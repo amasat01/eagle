@@ -202,6 +202,12 @@ static void lin_rows(eg_ctx* ctx, const char* lib) {
                              "gradients (x0 per sample, a and b summed: %.17g, %.17g)", si ? "HOST_TEAM" : "HOST_SERIAL",
                              threads[ti], (long long)windows[w], pass ? ", several passes" : "", ga, gb);
                     check(g_ok, what);
+                    struct eg_runner_figures fg;
+                    memset(&fg, 0, sizeof(fg));
+                    fg.struct_size = sizeof(fg);
+                    snprintf(what, sizeof(what), "fixture %s %d threads, window %lld%s: eg_runner_figures reports %d reverse pass(es) (ten samples fit, so passes of 8), bitwise",
+                             si ? "HOST_TEAM" : "HOST_SERIAL", threads[ti], (long long)windows[w], pass ? ", several passes" : "", pass ? (LN + 7) / 8 : 1);
+                    check(rok && eg_runner_figures(ctx, r, &fg) == EG_OK && fg.reverse_passes == (pass ? (LN + 7) / 8 : 1) && fg.reverse_bitwise == 1, what);
                     if (si == 0 && ti == 0 && w == 1 && pass == 0) {
                         check(eg_reverse(ctx, r, &sd, &gd) == EG_BAD_REQUEST && reason_has(ctx, "reversed once"),
                               "a record is reversed once: a second eg_reverse refused BAD_REQUEST");

@@ -1568,6 +1568,7 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
     if (n > 0 && m == 0)
         refuse(EG_BAD_REQUEST, "memory_budget " + std::to_string(budget) + ": one sample alone needs " + std::to_string(per) +
                " bytes (its checkpoints and a " + std::to_string(W) + "-step tape)");
+    runner->reverse_passes = n > 0 ? static_cast<std::int32_t>((n + m - 1) / m) : 1;
     for (Carried& c : r.state) c.buf.resize(static_cast<std::size_t>(c.rows * m) * c.bytes, D);
     for (Carried& c : r.reads) c.buf.resize(static_cast<std::size_t>(c.rows * m) * c.bytes, D);
     for (TapedState& x : r.taped)

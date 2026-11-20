@@ -28,6 +28,7 @@ namespace {
 /** @brief One adjoint of a plane: the seed (node -1) or what the vjp of node ``node`` produced. */
 struct Contribution {
     int node = -1;
+    int taint = -1;                             ///< the launch ordinal of the scatter-add vjp that fed it (or fed what it came from); -1: none
     Bytes bytes;
 };
 
@@ -89,6 +90,7 @@ std::vector<VjpLink> link_vjp(const GraphDiff& d, const DiffNode& node, const eg
                 if (!is(node.reads)) refuse(EG_BAD_REQUEST, where + ": GRAD of '" + ps.name + "', which the launch does not read");
                 k.kind = VjpLink::GRAD;
                 k.reduced = l.reduced != 0;
+                k.scatter = vjp.slots[static_cast<std::size_t>(l.slot)].role == EG_ROLE_ACCUM_OUT;
                 if (k.reduced && elements(tensor(*d.planes[static_cast<std::size_t>(k.plane)])) != 1)
                     refuse(EG_BAD_REQUEST, where + ": a reduced gradient is the sum over samples into a one-element plane; '" + ps.name + "' is not one");
             }
@@ -282,7 +284,7 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
             refuse(EG_BAD_REQUEST, "eg_graph_reverse: a plan of the graph (unit '" + m.plan->unit->name + "') was launched outside the graph after its last launch");
     }
     const eg_graph_reverse_desc r = read_input(desc, "eg_graph_reverse_desc");
-    if (r.flags != 0) refuse(EG_BAD_REQUEST, "eg_graph_reverse_desc.flags: unknown bits " + std::to_string(r.flags));
+    if ((r.flags & ~EG_REVERSE_STRICT) != 0) refuse(EG_BAD_REQUEST, "eg_graph_reverse_desc.flags: unknown bits " + std::to_string(r.flags & ~EG_REVERSE_STRICT));
     if (r.n_seeds < 0 || (r.n_seeds > 0 && (r.outputs == nullptr || r.seeds == nullptr)) ||
         r.n_grads < 0 || (r.n_grads > 0 && (r.inputs == nullptr || r.grads == nullptr)))
         refuse(EG_BAD_REQUEST, "eg_graph_reverse_desc: a count without its arrays");
@@ -329,6 +331,9 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
     std::vector<int> wanted;
     for (std::int32_t k = 0; k < r.n_grads; ++k) {
         check_handle(ctx.planes, r.grads[k], "eg_graph_reverse_desc.grads");
+        check_handle(ctx.planes, r.inputs[k], "eg_graph_reverse_desc.inputs");
+        if (tensor(*r.inputs[k]).dtype.code != kDLFloat)
+            refuse(EG_BAD_REQUEST, "eg_graph_reverse_desc.inputs[" + std::to_string(k) + "] is not a float plane: only a float input has a gradient");
         const int p = checked(r.inputs[k], k, "inputs", false);
         if (input[static_cast<std::size_t>(p)] == 0) refuse(EG_BAD_REQUEST, "eg_graph_reverse_desc.inputs[" + std::to_string(k) + "] is not read before the graph writes it");
         host::check_access(*r.grads[k], true, ("eg_graph_reverse_desc.grads[" + std::to_string(k) + "]").c_str());
@@ -337,11 +342,15 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
     }
 
     // The adjoint a plane has accumulated: the seed first, then the nodes in node order; none: nullopt-like empty vector.
-    const auto collect = [&](int p, bool& any) {
+    // @p origin gets the first scatter-add launch ordinal among the contributions, or -1.
+    const auto collect = [&](int p, bool& any, int& origin) {
         std::vector<Contribution> src = std::move(pending[static_cast<std::size_t>(p)]);
         pending[static_cast<std::size_t>(p)].clear();
         const eg_plane_s& plane = *d.planes[static_cast<std::size_t>(p)];
         any = !src.empty();
+        origin = -1;
+        for (const Contribution& c : src)
+            if (origin < 0) origin = c.taint;
         if (!any) return Bytes(byte_count(plane), D);
         std::stable_sort(src.begin(), src.end(), [](const Contribution& a, const Contribution& b) { return a.node < b.node; });
         if (src.size() == 1) return std::move(src.front().bytes);
@@ -355,10 +364,13 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
         const eg_plan_s& primal = *node.plan;
         std::vector<Bytes> adjoint;
         bool flows = false;
+        int incoming = -1;                      // a scatter-add behind any adjoint this leaf reverses
         for (int w : node.writes) {
             bool any = false;
-            adjoint.push_back(collect(w, any));
+            int origin = -1;
+            adjoint.push_back(collect(w, any, origin));
             flows = flows || any;
+            if (incoming < 0) incoming = origin;
         }
         if (node.vjp == nullptr) {
             if (flows) refuse(EG_BAD_REQUEST, "eg_graph_reverse: a gradient flows through launch " + std::to_string(d.plan.leaves[i].launch) + " (unit '" + primal.unit->name + "'), which has no vjp");
@@ -407,15 +419,27 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
             const eg_plane_s& plane = *d.planes[static_cast<std::size_t>(l.plane)];
             Contribution c;
             c.node = static_cast<int>(i);
+            c.taint = l.scatter ? d.plan.leaves[i].launch : incoming;
             c.bytes = l.reduced ? sum_over_samples(D, grads[k], primal.n_samples, element_bytes(plane), threads) : std::move(grads[k]);
             pending[static_cast<std::size_t>(l.plane)].push_back(std::move(c));
         }
     }
+    std::vector<Bytes> result;                  // every gradient is known before any is written, so a refusal writes none
+    std::vector<int> taints;
     for (std::int32_t k = 0; k < r.n_grads; ++k) {
         bool any = false;
-        Bytes g = collect(wanted[static_cast<std::size_t>(k)], any);
-        copy_bytes(D, live(*r.grads[k]), g.data(), byte_count(*r.grads[k]));
+        int origin = -1;
+        result.push_back(collect(wanted[static_cast<std::size_t>(k)], any, origin));
+        taints.push_back(origin);
+        if (origin >= 0 && (r.flags & EG_REVERSE_STRICT) != 0)
+            refuse(EG_BAD_REQUEST, "eg_graph_reverse: EG_REVERSE_STRICT, but the gradient of inputs[" + std::to_string(k) + "] comes through a cross-sample scatter-add "
+                   "in the vjp of launch " + std::to_string(origin) + ", whose summing order is not fixed; drop EG_REVERSE_STRICT to accept it (bitwise[" + std::to_string(k) + "] is 0)");
     }
+    for (std::int32_t k = 0; k < r.n_grads; ++k) {
+        copy_bytes(D, live(*r.grads[k]), result[static_cast<std::size_t>(k)].data(), byte_count(*r.grads[k]));
+        if (r.bitwise != nullptr) r.bitwise[k] = taints[static_cast<std::size_t>(k)] < 0;
+    }
+    if (r.passes != nullptr) *r.passes = 1;
     if (D != nullptr) device_sync(ctx);     // the gradients land before eg_graph_reverse returns
 }
 

@@ -9,6 +9,7 @@
  *   6 uscale  y = k * x        (k a by-value uniform)                                7 uscale_vjp (reduced GRAD of the uniform)
  *  10 fan     v[c] = (c + 1) x  (a width-3 vector plane out)                         11 fan_vjp
  *  12 norm2   o = sum_c v[c]^2  (the vector plane in)                                13 norm2_vjp
+ *  15 scale_scatter_vjp   scale's vjp with bar_x an ACCUM_OUT slot: a cross-sample scatter-add feeds the gradient of x
  *  14 tick    c[i] -= 1          (an int32 per-sample counter plane in place; a loop's stop, no gradient)
  *   8 scale_tape_vjp   scale's vjp reading a tape row (a link a graph vjp does not take)
  *   9 scale_open_vjp   scale's vjp with a slot no link names
@@ -170,6 +171,8 @@ SLOT(s_bar_w, EG_ROLE_OUT, "bar_w");
 SLOT(s_bar_k, EG_ROLE_OUT, "bar_k");
 static const struct eg_unit_slot s_c = { .struct_size = sizeof(struct eg_unit_slot), .flags = 0, .role = EG_ROLE_MUTABLE, .dtype = EG_DTYPE_INT32,
                                          .rank = 0, .like_slot = -1, .n_gather = 0, .shape = NULL, .gather = NULL, .name = "c" };
+static const struct eg_unit_slot s_bar_x_acc = { .struct_size = sizeof(struct eg_unit_slot), .flags = 0, .role = EG_ROLE_ACCUM_OUT, .dtype = EG_DTYPE_REAL,
+                                                 .rank = 0, .like_slot = -1, .n_gather = 0, .shape = NULL, .gather = NULL, .name = "bar_x" };
 static const int64_t width_shape[] = { 3 };
 #define SLOT_V(var, role_, name_)                                                                                 \
     static const struct eg_unit_slot var = { .struct_size = sizeof(struct eg_unit_slot), .flags = 0,             \
@@ -194,6 +197,7 @@ static const struct eg_unit_slot* const fan_vjp_slots[] = { &s_bar_v_in, &s_bar_
 static const struct eg_unit_slot* const norm2_slots[] = { &s_v_in, &s_o };
 static const struct eg_unit_slot* const norm2_vjp_slots[] = { &s_v_in, &s_bar_o, &s_bar_v_out };
 static const struct eg_unit_slot* const tick_slots[] = { &s_c };
+static const struct eg_unit_slot* const scale_scatter_vjp_slots[] = { &s_x, &s_w, &s_bar_y, &s_bar_x_acc, &s_bar_w };
 
 #define BODY(var, slots_, n_) \
     static const struct eg_unit_body var = { .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = n_, .slots = slots_ }
@@ -211,6 +215,7 @@ BODY(fan_vjp_body, fan_vjp_slots, 2);
 BODY(norm2_body, norm2_slots, 2);
 BODY(norm2_vjp_body, norm2_vjp_slots, 3);
 BODY(tick_body, tick_slots, 1);
+BODY(scale_scatter_vjp_body, scale_scatter_vjp_slots, 5);
 
 static const struct eg_unit_launch launch = { .struct_size = sizeof(struct eg_unit_launch), .n_lane_axes = 0, .block = 0,
                                               .active_map_slot = -1, .active_count_slot = -1, .index_map_slot = -1,
@@ -298,9 +303,10 @@ UNIT(u_fan_vjp, "fan_vjp", 0x1b, "fan_vjp_host", fan_vjp_body, &d_fan_vjp, IMAGE
 UNIT(u_norm2, "norm2", 0x1c, "norm2_host", norm2_body, NULL, IMAGE("norm2"));
 UNIT(u_norm2_vjp, "norm2_vjp", 0x1d, "norm2_vjp_host", norm2_vjp_body, &d_norm2_vjp, IMAGE("norm2_vjp"));
 UNIT(u_tick, "tick", 0x1e, "tick_host", tick_body, NULL, IMAGE("tick"));
+UNIT(u_scale_scatter_vjp, "scale_scatter_vjp", 0x1f, "scale_vjp_host", scale_scatter_vjp_body, &d_scale_vjp, NO_IMAGE);
 
 static const struct eg_unit_meta* const units[] = { &u_scale, &u_scale_vjp, &u_square, &u_square_vjp, &u_mul2, &u_mul2_vjp,
-                                                    &u_uscale, &u_uscale_vjp, &u_scale_tape_vjp, &u_scale_open_vjp, &u_fan, &u_fan_vjp, &u_norm2, &u_norm2_vjp, &u_tick };
+                                                    &u_uscale, &u_uscale_vjp, &u_scale_tape_vjp, &u_scale_open_vjp, &u_fan, &u_fan_vjp, &u_norm2, &u_norm2_vjp, &u_tick, &u_scale_scatter_vjp };
 static const struct eg_library_meta library = { .struct_size = sizeof(struct eg_library_meta), .schema_major = EG_META_SCHEMA_MAJOR,
-                                                .schema_minor = 0, .n_units = 15, .units = units };
+                                                .schema_minor = 0, .n_units = 16, .units = units };
 const struct eg_library_meta* eg_unit_library_meta(void) { return &library; }

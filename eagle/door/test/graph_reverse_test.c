@@ -174,7 +174,7 @@ static void drop(eg_ctx* ctx, int n, eg_plane* const* p) {
 struct units {
     eg_unit *scale, *scale_vjp, *square, *square_vjp, *mul2, *mul2_vjp, *uscale, *uscale_vjp, *tape_vjp, *open_vjp;
     eg_unit *fan, *fan_vjp, *norm2, *norm2_vjp;
-    eg_unit* tick;
+    eg_unit *tick, *scatter_vjp;
 };
 
 static eg_status end_diff(eg_ctx* ctx, int32_t n, const struct eg_node_vjp* v, eg_graph** g) {
@@ -773,14 +773,140 @@ static void conditional_rows(struct rig* r, const struct units* u) {
     while_refusal_row(r, u);
 }
 
+/* ---- reverse options: bitwise report, strict, passes, a non-float input (host) ------------------------------------------------ */
+
+static eg_status reverse_with(eg_ctx* ctx, eg_graph* g, eg_plane* out, eg_plane* seed, int32_t n_in, eg_plane* const* in, eg_plane* const* grads,
+                              uint32_t flags, uint8_t* bitwise, int32_t* passes) {
+    struct eg_graph_reverse_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.flags = flags;
+    d.n_seeds = 1;
+    d.outputs = &out;
+    d.seeds = &seed;
+    d.n_grads = n_in;
+    d.inputs = in;
+    d.grads = grads;
+    d.bitwise = bitwise;
+    d.passes = passes;
+    return eg_graph_reverse(ctx, g, &d);
+}
+
+/* u = w1 x, y = w2 u: the vjp of the second launch is @p vjp1. Oracle: the closed forms dJ/dx = w1 w2, dJ/dw1 = sum w2 x,
+ * dJ/dw2 = sum w1 x, and which gradients a scatter-add reaches written out by hand: the scatter vjp of launch 1 feeds the adjoint of
+ * u, which launch 0 passes on to x and w1; w2 is fed by launch 1's plain reduced slot only. */
+static void scatter_row(struct rig* r, const struct units* u, eg_unit* vjp1, int scatter) {
+    eg_ctx* ctx = r->ctx;
+    double x[N], uu[N], y[N], w1[1] = { 1.7 }, w2[1] = { -0.6 }, one[N], gx[N], gw1[1], gw2[1], want[N], sx = 0.0;
+    struct tensor tx, tu, ty, tw1, tw2, tone, tgx, tgw1, tgw2;
+    fill(x, w1, 0.5);
+    for (int i = 0; i < N; ++i) {
+        one[i] = 1.0;
+        gx[i] = -999.0;
+        sx += x[i];
+    }
+    eg_plane *px = mk(r, &tx, N, x), *pu = mk(r, &tu, N, uu), *py = mk(r, &ty, N, y), *pw1 = mk(r, &tw1, 1, w1), *pw2 = mk(r, &tw2, 1, w2);
+    eg_plane *p1 = mk(r, &tone, N, one), *pgx = mk(r, &tgx, N, gx), *pgw1 = mk(r, &tgw1, 1, gw1), *pgw2 = mk(r, &tgw2, 1, gw2);
+    eg_plane *a1[] = { px, pw1, pu }, *a2[] = { pu, pw2, py };
+    eg_plan *f1 = plan_with(r, u->scale, 3, a1, NULL), *f2 = plan_with(r, u->scale, 3, a2, NULL);
+    const struct eg_node_vjp vjps[] = { { 0, u->scale_vjp }, { 1, vjp1 } };
+    eg_graph* g = NULL;
+    int ok = f1 && f2 && eg_record_begin(ctx) == EG_OK && eg_launch(ctx, f1, NULL) == EG_OK && eg_launch(ctx, f2, NULL) == EG_OK &&
+             end_diff(ctx, 2, vjps, &g) == EG_OK && eg_graph_launch(ctx, g) == EG_OK;
+    eg_plane* in[] = { px, pw1, pw2 };
+    eg_plane* gr[] = { pgx, pgw1, pgw2 };
+    uint8_t bitwise[3] = { 9, 9, 9 };
+    int32_t passes = 0;
+    ok = ok && reverse_with(ctx, g, py, p1, 3, in, gr, 0, bitwise, &passes) == EG_OK;
+    for (int i = 0; i < N; ++i) want[i] = w1[0] * w2[0];
+    const double want_w1 = w2[0] * sx, want_w2 = w1[0] * sx;
+    ok = ok && close_to(gx, want, N) && close_to(gw1, &want_w1, 1) && close_to(gw2, &want_w2, 1) && passes == 1;
+    ok = ok && bitwise[0] == !scatter && bitwise[1] == !scatter && bitwise[2] == 1;
+    verdict(r, ok, scatter ? "a scatter-add vjp taints the gradients its adjoint reaches: bitwise 0 for x and w1, 1 for w2; values are the closed forms; passes 1"
+                           : "without a scatter-add every gradient is bitwise; values are the closed forms; passes 1");
+    /* STRICT refuses a tainted gradient by name before anything is written, and accepts a clean graph */
+    for (int i = 0; i < N; ++i) gx[i] = -999.0;
+    const eg_status st = reverse_with(ctx, g, py, p1, 3, in, gr, EG_REVERSE_STRICT, NULL, NULL);
+    ok = scatter ? refused(st, EG_BAD_REQUEST, ctx, "inputs[0]") && reason_has(ctx, "launch 1") && gx[0] == -999.0 : st == EG_OK && close_to(gx, want, N);
+    verdict(r, ok, scatter ? "EG_REVERSE_STRICT over a scatter-add gradient is refused by name (the input and the launch) and writes no gradient"
+                           : "EG_REVERSE_STRICT over a graph with no scatter-add succeeds");
+    eg_graph_free(ctx, g);
+    eg_plan_free(ctx, f1);
+    eg_plan_free(ctx, f2);
+    release(r);
+}
+
+/* A scatter-add inside an IF arm taints only when the arm ran. */
+static void scatter_if_row(struct rig* r, const struct units* u) {
+    eg_ctx* ctx = r->ctx;
+    double x[N], x2[N], y[N], w1[1] = { 1.7 }, w2[1] = { -0.6 }, one[N], gx[N], gx2[N];
+    int32_t flags[4] = { 7, 7, 0, 7 };
+    struct tensor tx, tx2, ty, tw1, tw2, tone, tgx, tgx2, tf;
+    fill(x, w1, 0.5);
+    fill(x2, w1, -1.5);
+    for (int i = 0; i < N; ++i) one[i] = 1.0;
+    eg_plane *px = mk(r, &tx, N, x), *px2 = mk(r, &tx2, N, x2), *py = mk(r, &ty, N, y), *pw1 = mk(r, &tw1, 1, w1), *pw2 = mk(r, &tw2, 1, w2);
+    eg_plane *p1 = mk(r, &tone, N, one), *pgx = mk(r, &tgx, N, gx), *pgx2 = mk(r, &tgx2, N, gx2), *pf = mk_i32(r, &tf, 4, flags);
+    eg_plane *a1[] = { px, pw1, py }, *a2[] = { px2, pw2, py };
+    eg_plan *f1 = plan_with(r, u->scale, 3, a1, NULL), *f2 = plan_with(r, u->scale, 3, a2, NULL);
+    const struct eg_node_vjp vjps[] = { { 0, u->scale_vjp }, { 1, u->scatter_vjp } };
+    eg_graph* g = NULL;
+    int ok = f1 && f2 && pf && eg_record_begin(ctx) == EG_OK && eg_launch(ctx, f1, NULL) == EG_OK && cond_open(ctx, EG_COND_IF, 0, pf, 2, 0) == EG_OK &&
+             eg_launch(ctx, f2, NULL) == EG_OK && eg_record_cond_end(ctx) == EG_OK && end_diff(ctx, 2, vjps, &g) == EG_OK;
+    eg_plane* in[] = { px, px2 };
+    eg_plane* gr[] = { pgx, pgx2 };
+    for (int lane = 1; ok && lane >= 0; --lane) {
+        uint8_t bitwise[2] = { 9, 9 };
+        flags[2] = lane;
+        ok = eg_graph_launch(ctx, g) == EG_OK && reverse_with(ctx, g, py, p1, 2, in, gr, 0, bitwise, NULL) == EG_OK && bitwise[0] == 1 && bitwise[1] == !lane;
+    }
+    verdict(r, ok, "a scatter-add vjp under an IF arm taints x2 only when the arm ran; x, overwritten or alone, stays bitwise");
+    eg_graph_free(ctx, g);
+    eg_plan_free(ctx, f1);
+    eg_plan_free(ctx, f2);
+    release(r);
+}
+
+/* A non-float input has no gradient: refused by name. */
+static void int_input_row(struct rig* r, const struct units* u) {
+    eg_ctx* ctx = r->ctx;
+    double x[N], y[N], w[1] = { 1.7 }, one[N], gx[N];
+    int32_t flags[4] = { 7, 7, 7, 7 };
+    struct tensor tx, ty, tw, tone, tgx, tf;
+    fill(x, w, 0.5);
+    for (int i = 0; i < N; ++i) one[i] = 1.0;
+    eg_plane *px = mk(r, &tx, N, x), *py = mk(r, &ty, N, y), *pw = mk(r, &tw, 1, w), *p1 = mk(r, &tone, N, one), *pgx = mk(r, &tgx, N, gx);
+    eg_plane* pf = mk_i32(r, &tf, 4, flags);
+    eg_plane* a1[] = { px, pw, py };
+    eg_plan* f1 = plan_with(r, u->scale, 3, a1, NULL);
+    const struct eg_node_vjp vjps[] = { { 0, u->scale_vjp } };
+    eg_graph* g = NULL;
+    int ok = f1 && pf && eg_record_begin(ctx) == EG_OK && cond_open(ctx, EG_COND_IF, 0, pf, 0, 0) == EG_OK && eg_launch(ctx, f1, NULL) == EG_OK &&
+             eg_record_cond_end(ctx) == EG_OK && end_diff(ctx, 1, vjps, &g) == EG_OK && eg_graph_launch(ctx, g) == EG_OK;
+    eg_plane* in[] = { pf };
+    eg_plane* gr[] = { pgx };
+    ok = ok && refused(reverse_with(ctx, g, py, p1, 1, in, gr, 0, NULL, NULL), EG_BAD_REQUEST, ctx, "is not a float plane");
+    verdict(r, ok, "an int32 plane listed in inputs is refused by name: only a float input has a gradient");
+    eg_graph_free(ctx, g);
+    eg_plan_free(ctx, f1);
+    release(r);
+}
+
+static void option_rows(struct rig* r, const struct units* u) {
+    scatter_row(r, u, u->scatter_vjp, 1);
+    scatter_row(r, u, u->scale_vjp, 0);
+    scatter_if_row(r, u);
+    int_input_row(r, u);
+}
+
 static struct units load_units(struct rig* r) {
     const struct units u = { load(r, "scale", 0x10), load(r, "scale_vjp", 0x11), load(r, "square", 0x12), load(r, "square_vjp", 0x13),
                              load(r, "mul2", 0x14), load(r, "mul2_vjp", 0x15), load(r, "uscale", 0x16), load(r, "uscale_vjp", 0x17),
                              load(r, "scale_tape_vjp", 0x18), load(r, "scale_open_vjp", 0x19),
-                             load(r, "fan", 0x1a), load(r, "fan_vjp", 0x1b), load(r, "norm2", 0x1c), load(r, "norm2_vjp", 0x1d), load(r, "tick", 0x1e) };
+                             load(r, "fan", 0x1a), load(r, "fan_vjp", 0x1b), load(r, "norm2", 0x1c), load(r, "norm2_vjp", 0x1d), load(r, "tick", 0x1e), load(r, "scale_scatter_vjp", 0x1f) };
     verdict(r, u.scale && u.scale_vjp && u.square && u.square_vjp && u.mul2 && u.mul2_vjp && u.uscale && u.uscale_vjp && u.tape_vjp &&
-                   u.open_vjp && u.fan && u.fan_vjp && u.norm2 && u.norm2_vjp && u.tick,
-            "the graph fixture's fifteen units load");
+                   u.open_vjp && u.fan && u.fan_vjp && u.norm2 && u.norm2_vjp && u.tick && u.scatter_vjp,
+            "the graph fixture's sixteen units load");
     return u;
 }
 
@@ -810,6 +936,7 @@ int main(int argc, char** argv) {
     gradient_rows(&host, &u);
     refusal_rows(&host, &u);
     conditional_rows(&host, &u);
+    option_rows(&host, &u);
 
     int32_t devices = 0;
     if (eg_device_count(ctx, &devices) != EG_OK || devices < 1) {

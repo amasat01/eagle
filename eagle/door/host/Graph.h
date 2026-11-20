@@ -69,6 +69,7 @@ struct VjpLink {
     int primal = -1;                            ///< the launch's slot it names
     int plane = -1;                             ///< index in GraphDiff::planes (not for a uniform)
     bool reduced = false;                       ///< GRAD: summed over samples into a one-cell plane
+    bool scatter = false;                       ///< GRAD: the vjp slot is an ACCUM_OUT, a cross-sample scatter-add
 };
 
 /** @brief One launch node's accesses and its vjp. */
