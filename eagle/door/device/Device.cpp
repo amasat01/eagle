@@ -1354,9 +1354,6 @@ void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out)
         return;
     }
     const std::int64_t k = launch_steps(d.plans[0]->unit->finish, static_cast<std::size_t>(d.n_plans));
-    if (d.plans[0]->unit->finish.steps == EG_STEPS_AUTO && d.n_plans > 1 && (d.plans[0]->unit->active_map_slot >= 0 || (d.flags & EG_RUN_REORDER)))
-        refuse(EG_NOT_WRITTEN, "unit '" + d.plans[0]->unit->name + "': finish steps AUTO in a several-plan step with an active set on a device is not written in "
-               "this build of the door");
     if (k == EG_STEPS_AUTO) {    // the no-graph entries: no loop, no loop cells
         if (d.events == EG_EVENTS_REFINE)
             refuse(EG_NOT_WRITTEN, "events REFINE of an automatic unit on a device is not written in this build of the door");

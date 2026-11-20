@@ -33,6 +33,8 @@
  *  - "vecsplit": a split unit of two stages, "vecw" and "vecr", that pass a width-4 vector through an eagle-made plane "cross":
  *    stage 1 writes cross[j, i] = (j + 1) * x[i] + j, stage 2 reads it as y[i] = sum_j (j + 1) * cross[j, i]; both read the
  *    plane through its 40-byte mirror (the component and sample pitches it states).
+ *  - "actrow": an active set (slots 1 and 2) and no finish; each launch adds 1 to w[map[t]] for the live positions, the plain
+ *    plan that shares a step with a finishing unit.
  *  - "count1", "count3": a finishing unit that steps k += 1 until k >= limit,
  *    then marks the sample and counts it into the finished counter; one or
  *    three steps per launch (slots: k, limit, mask, the counter).
@@ -100,6 +102,7 @@ EG_FIXTURE_EXPORT void widesum_host(void* const* params, int64_t base, int64_t c
 EG_FIXTURE_EXPORT void prefixsum_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void vecw_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void vecr_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void actrow_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void count1_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void count3_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void count1a_host(void* const* params, int64_t base, int64_t count, int64_t n);
@@ -172,6 +175,14 @@ void vecr_host(void* const* params, int64_t base, int64_t count, int64_t n) {
         for (int64_t j = 0; j < VEC_WIDTH; ++j) sum += (double)(j + 1) * *mirror_at(cross, j, i);
         y[i] = sum;
     }
+}
+
+/* "actrow": adds 1 to w[map[t]] for each position t it is given (an active set, no finish). */
+void actrow_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    double* w = (double*)((const struct fixture_handle*)params[0])->data;
+    const int32_t* map = (const int32_t*)((const struct fixture_handle*)params[1])->data;
+    (void)n;
+    for (int64_t t = base; t < base + count; ++t) w[map[t]] += 1.0;
 }
 
 void wait_host(void* const* params, int64_t base, int64_t count, int64_t n) {
@@ -1228,6 +1239,17 @@ static const struct eg_unit_meta unit_vecsplit = {
     .scalar_type = EG_SCALAR_FLOAT64, .host_entry = NULL, .device_image_format = EG_IMAGE_NONE,
     .n_stages = 2, .stages = vec_stages, .body = &vecsplit_body, .launch = &launch };
 
+static const struct eg_unit_slot* const actrow_slots[] = { &slot_k, &slot_map, &slot_live };
+static const struct eg_unit_body actrow_body = {
+    .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = 3, .slots = actrow_slots };
+static const struct eg_unit_launch launch_actrow = {
+    .struct_size = sizeof(struct eg_unit_launch), .active_map_slot = 1, .active_count_slot = 2, .index_map_slot = -1,
+    .index_count_slot = -1, .group = 1 };
+static const struct eg_unit_meta unit_actrow = {
+    .struct_size = sizeof(struct eg_unit_meta), .name = "actrow", .digest = DIGEST(0xE4), .pattern = EG_PATTERN_PURE,
+    .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "actrow_host", .device_image_format = EG_IMAGE_NONE,
+    .body = &actrow_body, .launch = &launch_actrow };
+
 static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &unit_tick, &unit_spans, &unit_prefixsum, &unit_widesum, &unit_mix2, &unit_split, &unit_count1,
                                                     &unit_count3, &unit_count1a, &unit_count3a, &unit_countA, &unit_countAa, &unit_vecs, &unit_count1i,
                                                     &unit_count1ia, &unit_count1e, &unit_lanes, &unit_prefix, &unit_count1g, &unit_widemul,
@@ -1236,13 +1258,13 @@ static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &uni
                                                     &unit_sg_cls, &unit_sg_k0, &unit_sg_k1, &unit_sgf, &unit_dg_k0, &unit_dg_k1, &unit_dg_sweep, &unit_dgf,
                                                     &unit_sga_cls, &unit_sga_k0, &unit_sga_k1, &unit_sga_rare, &unit_sga_even, &unit_sga_scalar, &unit_sga_heavy,
                                                     &unit_auto_nocls, &unit_auto_nobr, &unit_auto_sweep, &unit_auto_nocost, &unit_auto_group, &unit_auto_steps, &unit_auto_k3,
-                                                    &unit_vecw, &unit_vecr, &unit_vecsplit };
+                                                    &unit_vecw, &unit_vecr, &unit_vecsplit, &unit_actrow };
 
 static const struct eg_library_meta library = {
     .struct_size = sizeof(struct eg_library_meta),
     .schema_major = EG_META_SCHEMA_MAJOR,
     .schema_minor = 0,
-    .n_units = 59,
+    .n_units = 60,
     .units = units,
 };
 

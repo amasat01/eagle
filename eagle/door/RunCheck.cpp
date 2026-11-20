@@ -191,7 +191,7 @@ bool check_active(const eg_runner_desc& d) {
     if (group > 1 && (d.flags & EG_RUN_REORDER))
         refuse(EG_BAD_REQUEST, "EG_RUN_REORDER: an active set over groups of " + std::to_string(group) +
                " lanes compacts whole groups, which a reorder would split");
-    const std::int64_t k = d.plans[0]->unit->finish.steps;
+    const std::int64_t k = launch_steps(d.plans[0]->unit->finish, static_cast<std::size_t>(d.n_plans));
     if (k == EG_STEPS_AUTO) {
         if (d.every != 0)
             refuse(EG_BAD_REQUEST, "every " + std::to_string(d.every) + ": a unit with steps AUTO compacts after "
@@ -255,7 +255,7 @@ void check_index_live(const eg_plan_s& plan, std::uint64_t live) {
 /** @brief The steps between two compactions of a fixed-step active set: @p d's ``every``, else the smallest
  *  whole number of launches of at least kDefaultEvery steps. */
 std::int64_t active_every_steps(const eg_runner_desc& d) {
-    const std::int64_t k = d.plans[0]->unit->finish.steps;
+    const std::int64_t k = launch_steps(d.plans[0]->unit->finish, static_cast<std::size_t>(d.n_plans));
     return d.every != 0 ? d.every : k * ((kDefaultEvery + k - 1) / k);
 }
 

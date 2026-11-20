@@ -1698,8 +1698,14 @@ static void check_caller_active_set(eg_ctx* ctx) {
         char what[160];
         snprintf(what, sizeof(what), "caller active set: the map and count bind on a plan no runner owns (%s)",
                  structures[si] == EG_STRUCTURE_HOST_SERIAL ? "HOST_SERIAL" : "HOST_TEAM");
-        check(p && pm && pc && eg_bind(ctx, p, &bd) == EG_OK, what);
-        if (!p || !pm || !pc) continue;
+        const int bound = p && pm && pc && eg_bind(ctx, p, &bd) == EG_OK;
+        check(bound, what);
+        if (!bound) {    // a red here stays a red: nothing below runs on an unbound plan
+            if (p) eg_plan_free(ctx, p);
+            if (pm) eg_plane_free(ctx, pm);
+            if (pc) eg_plane_free(ctx, pc);
+            continue;
+        }
         int launched = 1;
         for (int l = 0; l < 3; ++l) launched &= eg_launch(ctx, p, NULL) == EG_OK;
         int values = 1;
@@ -1723,6 +1729,57 @@ static void check_caller_active_set(eg_ctx* ctx) {
     }
     eg_host_threads(ctx, 1);
     eg_unit_free(ctx, unit);
+}
+
+/* A steps AUTO finisher that reads an active set, beside a plain plan that reads it too: the K=1 compacting loop. */
+static void check_auto_several_active(eg_ctx* ctx) {
+    static double k[RN], limit[RN], want_k[RN], w[RN];
+    static unsigned char mask[RN], mask0[RN];
+    struct tensor t[3], tw;
+    count_inputs(k, limit, mask);
+    memcpy(mask0, mask, RN);
+    int64_t launches = 0, finished = 0;
+    count_oracle(limit, mask0, 1, 100000, want_k, &launches, &finished);
+    eg_unit *uaa = NULL, *ur = NULL;
+    eg_plan *pa = NULL, *pr = NULL;
+    eg_plane* pw = wrap(ctx, &tw, w, RN, kDLFloat, 64);
+    int ok = load(ctx, "countAa", 0xF2, &uaa) == EG_OK && load(ctx, "actrow", 0xE4, &ur) == EG_OK;
+    pa = ok ? count_plan(ctx, uaa, EG_STRUCTURE_HOST_TEAM, k, limit, mask, t) : NULL;
+    if (ok && pw && plan(ctx, ur, EG_STRUCTURE_HOST_TEAM, RN, 0, NULL, NULL, &pr) == EG_OK) {
+        const int32_t slot = 0;
+        struct eg_bind_desc bd;
+        memset(&bd, 0, sizeof(bd));
+        bd.struct_size = sizeof(bd);
+        bd.n_planes = 1;
+        bd.plane_slots = &slot;
+        bd.planes = &pw;
+        ok = pa && eg_bind(ctx, pr, &bd) == EG_OK;
+    } else {
+        ok = 0;
+    }
+    check(ok, "steps AUTO with an active set beside a plain active plan: the two plans built");
+    eg_runner* r = NULL;
+    struct eg_run_report rep;
+    memset(&rep, 0, sizeof(rep));
+    rep.struct_size = sizeof(rep);
+    eg_plan* two[2] = { pa, pr };
+    struct eg_runner_desc d = runner_desc(two, 2, 100000);
+    eg_status s = ok ? eg_runner_new(ctx, &d, &r) : EG_FAULT;
+    if (s == EG_OK) s = eg_run(ctx, r, &rep);
+    int rows_ok = ok && memcmp(k, want_k, sizeof(k)) == 0;
+    for (int64_t i = 0; ok && i < RN; ++i)    /* a position is handed to the plain plan at every launch until a compaction drops it: a start-finished one for the first cadence at most */
+        rows_ok &= mask0[i] ? w[i] <= 16.0 : w[i] >= limit[i] && w[i] <= (double)rep.steps;
+    /* the K=1 compacting loop: whole cadences of the default 16 steps, so the run is ceil(need / 16) cadences of 16 steps */
+    const int64_t cadences = (launches + 15) / 16;
+    check(s == EG_OK && rows_ok && (rep.flags & EG_REPORT_DONE) && rep.launches == cadences && rep.steps == cadences * 16 &&
+              rep.compactions > 0 && rep.finished == (uint32_t)finished,
+          "steps AUTO in a several-plan step with an active set runs the K=1 compacting loop: whole cadences of 16 steps, compactions > 0, k as the closed form");
+    if (r) eg_runner_free(ctx, r);
+    if (pa) eg_plan_free(ctx, pa);
+    if (pr) eg_plan_free(ctx, pr);
+    if (pw) eg_plane_free(ctx, pw);
+    if (uaa) eg_unit_free(ctx, uaa);
+    if (ur) eg_unit_free(ctx, ur);
 }
 
 /* A steps AUTO finisher beside a plain plan in one step runs one step per launch. */
@@ -4343,6 +4400,7 @@ int main(int argc, char** argv) {
     check_segmented_threads();
     check_active_set(ctx);
     check_auto(ctx);
+    check_auto_several_active(ctx);
     check_caller_active_set(ctx);
     check_counters(ctx);
     check_cell_rows(ctx);
