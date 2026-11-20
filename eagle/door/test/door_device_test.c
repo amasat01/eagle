@@ -578,6 +578,15 @@ static void host_steps_in_graph(eg_ctx* ctx, const char* dev_lib, const char* ho
     cudaFree(dx), cudaFree(d1), cudaFree(d2), cudaFree(dc);
 }
 
+/* True when @p e is cudaSuccess; otherwise print @p what and the CUDA error string (a row then fails with the cause named). */
+static int cuda_ok(cudaError_t e, const char* what) {
+    if (e == cudaSuccess) return 1;
+    char msg[200];
+    snprintf(msg, sizeof(msg), "%s failed: %s", what, cudaGetErrorString(e));
+    check(0, msg);
+    return 0;
+}
+
 /* ---- host nodes on a device context ---- */
 
 struct node_log {
@@ -613,8 +622,8 @@ static void host_nodes_device(eg_ctx* ctx, const char* dev_lib) {
     uint32_t count = HN;
     double *dx = dev_doubles(x, HN), *d1 = dev_doubles(NULL, HN), *d2 = dev_doubles(NULL, HN);
     uint32_t* dc = NULL;
-    cudaMalloc((void**)&dc, sizeof(count));
-    cudaMemcpy(dc, &count, sizeof(count), cudaMemcpyHostToDevice);
+    cuda_ok(cudaMalloc((void**)&dc, sizeof(count)), "cudaMalloc count");
+    cuda_ok(cudaMemcpy(dc, &count, sizeof(count), cudaMemcpyHostToDevice), "cudaMemcpy count");
     struct tensor tx, t1, t2, tc;
     eg_plane *px = wrap(ctx, &tx, dx, 1, HN, 0, 1, 0), *p1 = wrap(ctx, &t1, d1, 1, HN, 0, 1, 0), *p2 = wrap(ctx, &t2, d2, 1, HN, 0, 1, 0),
              *pc = wrap_typed(ctx, &tc, dc, kDLUInt, 32, 1, 1);
@@ -638,7 +647,7 @@ static void host_nodes_device(eg_ctx* ctx, const char* dev_lib) {
     eg_plane* decl[1] = { p1 };
     const uint32_t rw = EG_ACCESS_READ | EG_ACCESS_WRITE;
     ok = eg_launch(ctx, a, NULL) == EG_OK && eg_host_call(ctx, node, 1, decl, &rw) == EG_OK && eg_launch(ctx, b, NULL) == EG_OK && eg_sync(ctx) == EG_OK;
-    cudaMemcpy(eager, d2, sizeof(eager), cudaMemcpyDeviceToHost);
+    cuda_ok(cudaMemcpy(eager, d2, sizeof(eager), cudaMemcpyDeviceToHost), "cudaMemcpy chain result");
     check(ok && log.calls == 1 && log.device_views == 1 && memcmp(eager, want, sizeof(want)) == 0,
           "an eager host call between two device launches: the callback saw a device plane with the first launch's values, and the chain equals the closed form bitwise");
     cudaMemset(d1, 0, sizeof(got));
@@ -649,7 +658,7 @@ static void host_nodes_device(eg_ctx* ctx, const char* dev_lib) {
     ok = eg_record_begin(ctx) == EG_OK && eg_launch(ctx, a, NULL) == EG_OK && eg_host_call(ctx, node, 1, decl, &rw) == EG_OK && eg_launch(ctx, b, NULL) == EG_OK &&
          eg_record_end(ctx, NULL, &g) == EG_OK && log.calls == 0;
     for (int k = 0; ok && k < REPLAYS; ++k) ok = eg_graph_launch(ctx, g) == EG_OK && eg_sync(ctx) == EG_OK;
-    cudaMemcpy(got, d2, sizeof(got), cudaMemcpyDeviceToHost);
+    cuda_ok(cudaMemcpy(got, d2, sizeof(got), cudaMemcpyDeviceToHost), "cudaMemcpy replay result");
     check(ok && log.calls == REPLAYS && memcmp(got, eager, sizeof(got)) == 0,
           "launch -> host node -> launch recorded on a device context and replayed 3 times: the callback ran once per replay and the values equal the eager work, bitwise");
     struct eg_graph_description d;
@@ -745,6 +754,7 @@ static void host_device_copies(eg_ctx* ctx, const char* dev_lib) {
     cudaFreeHost(hx), cudaFreeHost(hy), cudaFree(dx), cudaFree(d1), cudaFree(dc);
 /* ---- checked units on a device context ---- */
 
+
 enum { DS_LEN = 8, DS_GUARD = 2, DS_MAX = 5000 };
 
 /* One run of "dscat" / "dscatp": host mirrors of the device planes; acc sits between guard cells that must never change. */
@@ -765,18 +775,17 @@ static void dscat_reset(struct dscat_rig* r) {
 }
 
 /* Copy the host mirrors to the device (the legacy stream: settle before the context's stream reads them). */
-static void dscat_up(struct dscat_rig* r) {
-    cudaMemcpy(r->d_idx, r->idx, sizeof(int32_t) * (size_t)r->n, cudaMemcpyHostToDevice);
-    cudaMemcpy(r->d_jdx, r->jdx, sizeof(int32_t) * (size_t)r->n, cudaMemcpyHostToDevice);
-    cudaMemcpy(r->d_val, r->val, sizeof(double) * (size_t)r->n, cudaMemcpyHostToDevice);
-    cudaMemcpy(r->d_tbl, r->tbl, sizeof(r->tbl), cudaMemcpyHostToDevice);
-    cudaMemcpy(r->d_buf, r->buf, sizeof(r->buf), cudaMemcpyHostToDevice);
-    cudaDeviceSynchronize();
+static int dscat_up(struct dscat_rig* r) {
+    int ok = cuda_ok(cudaMemcpy(r->d_idx, r->idx, sizeof(int32_t) * (size_t)r->n, cudaMemcpyHostToDevice), "cudaMemcpy idx");
+    ok = ok && cuda_ok(cudaMemcpy(r->d_jdx, r->jdx, sizeof(int32_t) * (size_t)r->n, cudaMemcpyHostToDevice), "cudaMemcpy jdx");
+    ok = ok && cuda_ok(cudaMemcpy(r->d_val, r->val, sizeof(double) * (size_t)r->n, cudaMemcpyHostToDevice), "cudaMemcpy val");
+    ok = ok && cuda_ok(cudaMemcpy(r->d_tbl, r->tbl, sizeof(r->tbl), cudaMemcpyHostToDevice), "cudaMemcpy tbl");
+    ok = ok && cuda_ok(cudaMemcpy(r->d_buf, r->buf, sizeof(r->buf), cudaMemcpyHostToDevice), "cudaMemcpy acc");
+    return ok && cuda_ok(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
 }
 
-static void dscat_down(struct dscat_rig* r) {
-    cudaDeviceSynchronize();
-    cudaMemcpy(r->buf, r->d_buf, sizeof(r->buf), cudaMemcpyDeviceToHost);
+static int dscat_down(struct dscat_rig* r) {
+    return cuda_ok(cudaDeviceSynchronize(), "cudaDeviceSynchronize") && cuda_ok(cudaMemcpy(r->buf, r->d_buf, sizeof(r->buf), cudaMemcpyDeviceToHost), "cudaMemcpy acc back");
 }
 
 static int dscat_guards_hold(const struct dscat_rig* r) {
@@ -788,12 +797,10 @@ static int dscat_guards_hold(const struct dscat_rig* r) {
 static int dscat_make(eg_ctx* ctx, struct dscat_rig* r, eg_unit* unit, int n) {
     r->n = n;
     dscat_reset(r);
-    cudaMalloc(&r->d_idx, sizeof(int32_t) * DS_MAX);
-    cudaMalloc(&r->d_jdx, sizeof(int32_t) * DS_MAX);
-    cudaMalloc(&r->d_val, sizeof(double) * DS_MAX);
-    cudaMalloc(&r->d_tbl, sizeof(r->tbl));
-    cudaMalloc(&r->d_buf, sizeof(r->buf));
-    dscat_up(r);
+    if (!(cuda_ok(cudaMalloc(&r->d_idx, sizeof(int32_t) * DS_MAX), "cudaMalloc idx") && cuda_ok(cudaMalloc(&r->d_jdx, sizeof(int32_t) * DS_MAX), "cudaMalloc jdx") &&
+          cuda_ok(cudaMalloc(&r->d_val, sizeof(double) * DS_MAX), "cudaMalloc val") && cuda_ok(cudaMalloc(&r->d_tbl, sizeof(r->tbl)), "cudaMalloc tbl") &&
+          cuda_ok(cudaMalloc(&r->d_buf, sizeof(r->buf)), "cudaMalloc acc") && dscat_up(r)))
+        return 0;
     r->p[0] = wrap_typed(ctx, &r->t[0], r->d_idx, kDLInt, 32, n, 1);
     r->p[1] = wrap_typed(ctx, &r->t[1], r->d_jdx, kDLInt, 32, n, 1);
     r->p[2] = wrap(ctx, &r->t[2], r->d_val, 1, n, 0, 1, 0);
@@ -1220,16 +1227,16 @@ static eg_plane* wrap_device_typed(eg_ctx* ctx, struct tensor* t, void* data, in
 /* limit_i in 1..50; every 97th sample starts finished. */
 static void dcount_inputs(struct dcount* c) {
     for (int i = 0; i < DN; ++i) c->k[i] = 0.0, c->limit[i] = (double)(1 + (i * 37) % 50), c->mask[i] = i % 97 == 0;
-    cudaMemcpy(c->dk, c->k, sizeof(c->k), cudaMemcpyHostToDevice);
-    cudaMemcpy(c->dl, c->limit, sizeof(c->limit), cudaMemcpyHostToDevice);
-    cudaMemcpy(c->dm, c->mask, sizeof(c->mask), cudaMemcpyHostToDevice);
+    cuda_ok(cudaMemcpy(c->dk, c->k, sizeof(c->k), cudaMemcpyHostToDevice), "cudaMemcpy k");
+    cuda_ok(cudaMemcpy(c->dl, c->limit, sizeof(c->limit), cudaMemcpyHostToDevice), "cudaMemcpy limit");
+    cuda_ok(cudaMemcpy(c->dm, c->mask, sizeof(c->mask), cudaMemcpyHostToDevice), "cudaMemcpy mask");
 }
 
 static eg_status dcount_new_n(eg_ctx* ctx, eg_unit* unit, int64_t every, double theta, int64_t n, struct dcount* c) {
     memset(c, 0, sizeof(*c));
-    cudaMalloc((void**)&c->dk, sizeof(c->k));
-    cudaMalloc((void**)&c->dl, sizeof(c->limit));
-    cudaMalloc((void**)&c->dm, sizeof(c->mask));
+    if (!(cuda_ok(cudaMalloc((void**)&c->dk, sizeof(c->k)), "cudaMalloc k") && cuda_ok(cudaMalloc((void**)&c->dl, sizeof(c->limit)), "cudaMalloc limit") &&
+          cuda_ok(cudaMalloc((void**)&c->dm, sizeof(c->mask)), "cudaMalloc mask")))
+        return EG_FAULT;
     c->pk = wrap(ctx, &c->tk, c->dk, 1, n, 0, 1, 0);
     c->pl = wrap(ctx, &c->tl, c->dl, 1, n, 0, 1, 0);
     c->pm = wrap_device_typed(ctx, &c->tm, c->dm, n, kDLBool, 8);
