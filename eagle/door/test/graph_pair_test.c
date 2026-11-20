@@ -2,7 +2,7 @@
  * Device recording and the caller's stream. N launches of the recorded step unit osc (call 2014362.459) recorded
  * into an eagle graph run nothing; K replays leave every plane BITWISE equal to the old device graph's
  * (GraphPipeline: the same launches captured and replayed K times) and to N*K plain launches (closed form:
- * t = min(stop, N*K) * dt). A plan rebound since the recording is refused at replay; what a capture cannot hold
+ * t = min(stop, N*K) * dt). A plan rebound since the recording replays on the new planes; what a capture cannot hold
  * is refused by name while recording, and a free asked for meanwhile waits for the capture's end. eg_stream_use:
  * launches and replays on a stream the test makes with the runtime are ordered on it between the test's own
  * copies there.
@@ -178,14 +178,19 @@ int main(int argc, char** argv) {
     check(ok && same(&got, &want), "5 replays of the 3 recorded launches: t, v, x, mask bitwise equal to 15 plain launches");
     check(ok && old_ok && same(&got, &old), "5 replays: t, v, x, mask bitwise equal to the old device graph (GraphPipeline, 3 launches, launch(5))");
 
-    /* a rebound plan is refused at replay */
-    struct set other;
-    ok = set_new(ctx, osc, &other, 0) && bind(ctx, rec.plan, other.p) == EG_OK;
-    check(ok && eg_graph_launch(ctx, graph) == EG_BAD_REQUEST && reason_has(ctx, "rebound since the recording"),
-          "a plan rebound since the recording: eg_graph_launch refused BAD_REQUEST");
+    /* a rebound plan replays on the new planes: the values of the same launches run plain on them; the recorded planes stay as they were */
+    struct set other, plain;
+    struct host_planes before, other_got, other_want;
+    ok = set_new(ctx, osc, &other, 0) && set_new(ctx, osc, &plain, 0) && set_get(&rec, slots_of(&before), 0) && bind(ctx, rec.plan, other.p) == EG_OK;
+    for (int i = 0; ok && i < LAUNCHES; ++i) ok = eg_launch(ctx, plain.plan, NULL) == EG_OK;
+    ok = ok && eg_sync(ctx) == EG_OK && set_get(&plain, slots_of(&other_want), 0);
+    ok = ok && eg_graph_launch(ctx, graph) == EG_OK && eg_sync(ctx) == EG_OK && set_get(&other, slots_of(&other_got), 0) && set_get(&rec, slots_of(&got), 0);
+    check(ok && same(&other_got, &other_want) && same(&got, &before),
+          "a plan rebound since the recording: the replay writes the new planes (the values of 3 plain launches on them) and leaves the recorded ones untouched");
     check(bind(ctx, rec.plan, rec.p) == EG_OK && eg_graph_launch(ctx, graph) == EG_OK && eg_sync(ctx) == EG_OK,
           "bound back to the recorded planes: the replay runs again");
     set_free(ctx, &other);
+    set_free(ctx, &plain);
 
     /* what a capture cannot hold, refused by name while recording; a free waits for the capture's end */
     struct eg_unit_ref href;
@@ -228,8 +233,8 @@ int main(int argc, char** argv) {
     rd.max_steps = 10;
     check(eg_runner_new(ctx, &rd, &runner) == EG_BAD_REQUEST && reason_has(ctx, "eg_runner_new while recording"),
           "eg_runner_new while recording on a device: BAD_REQUEST");
-    check(eg_launch(ctx, host_plan, NULL) == EG_NOT_WRITTEN && reason_has(ctx, "host work inside a device graph"),
-          "a host launch while recording on a device: NOT_WRITTEN by name");
+    check(eg_launch(ctx, host_plan, NULL) == EG_BAD_REQUEST && reason_has(ctx, "is unbound"),
+          "a host launch of an unbound plan while recording on a device: BAD_REQUEST by name (a bound one is recorded as a host node, door_device_test)");
     struct eg_cond_desc cd;
     memset(&cd, 0, sizeof(cd));
     cd.struct_size = sizeof(cd);
