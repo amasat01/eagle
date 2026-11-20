@@ -53,6 +53,7 @@ struct Buf {
         dev.reset(static_cast<char*>(device_alloc(*on, std::max<std::size_t>(n, 8))), [on](char* p) { device_free(*on, p); });
     }
     char* data() { return dev ? dev.get() : reinterpret_cast<char*>(words.data()); }
+    std::size_t size_bytes() const { return dev ? bytes : words.size() * 8; }
     void zero() {
         if (dev) device_zero(*ctx, dev.get(), bytes);
         else std::fill(words.begin(), words.end(), 0);
@@ -166,6 +167,7 @@ struct RunRecord {
     Buf tape;                       ///< a refine run's tape: one row of width * n, written (the state before each stop step)
     std::vector<std::vector<Buf>> pool;   ///< checkpoints: pool[k][state]
     std::vector<std::vector<std::int32_t>> epochs;   ///< a reordering run: epochs[k][sample] = its slot at checkpoint k
+    std::vector<std::int64_t> epoch_spans;           ///< a reordering run: the set's span (the slots a reorder may still move) at checkpoint k
     std::int64_t taken = 0;
     bool live = false;              ///< a record not reversed yet
 };
@@ -913,9 +915,17 @@ void record_new(eg_ctx& ctx, eg_runner_s& runner, const eg_runner_desc& d) {
                 if (primal.bindings[s].plane != sp.plane) continue;
                 const bool carried = std::any_of(r->taped.begin(), r->taped.end(), [&](const TapedState& x) { return x.primal_slot == static_cast<int>(s); });
                 const bool graded = std::any_of(r->grads.begin(), r->grads.end(), [&](const Grad& g) { return g.primal_slot == static_cast<int>(s); });
-                if (!carried && graded)
-                    refuse(EG_NOT_WRITTEN, "step_graph: the plane bound to slot " + std::to_string(s) + " ('" + pu.slots[s].name + "') takes a gradient in this run but is not a "
-                           "carried state; reversing a step graph through such a plane is not written in this build of the door");
+                if (carried || !graded) continue;
+                const Grad& g = *std::find_if(r->grads.begin(), r->grads.end(), [&](const Grad& x) { return x.primal_slot == static_cast<int>(s); });
+                if (sp.written)
+                    refuse(EG_NOT_WRITTEN, "step_graph: the plane bound to slot " + std::to_string(s) + " ('" + pu.slots[s].name + "') takes a gradient in this run and the graph "
+                           "overwrites it; reversing that is not written in this build of the door");
+                if (runner.active && runner.act.reorder)
+                    refuse(EG_NOT_WRITTEN, "step_graph: the plane bound to slot " + std::to_string(s) + " ('" + pu.slots[s].name + "') takes a gradient the graph adds to, in a run with "
+                           "EG_RUN_REORDER; reversing that is not written in this build of the door");
+                if (elements(sp.plane->tensor->dl_tensor) != g.rows * primal.n_samples)
+                    refuse(EG_NOT_WRITTEN, "step_graph: the plane bound to slot " + std::to_string(s) + " ('" + pu.slots[s].name + "') takes a gradient and does not hold one value per "
+                           "sample and row; reversing a step graph through it is not written in this build of the door");
             }
     }
 }
@@ -1242,6 +1252,7 @@ void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report) {
             if (c.kind == Carried::START) owned.push_back({ c.own.data(), c.bytes });
     }
     r.epochs.clear();
+    r.epoch_spans.clear();
     // The finished count follows the mask (the plain loop's re-sync), counted by the twin from here.
     const FinishFacts& f = primal.unit->finish;
     const DLTensor& mt = primal.bindings[static_cast<std::size_t>(f.mask_slot)].plane->tensor->dl_tensor;
@@ -1294,7 +1305,8 @@ void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report) {
                 copy_bytes(D, r.pool[static_cast<std::size_t>(k)][i].data(), r.state[i].src,
                            static_cast<std::size_t>(r.state[i].rows * n) * r.state[i].bytes);
             if (reordering) {
-                if (k == static_cast<std::int64_t>(r.epochs.size())) r.epochs.emplace_back();
+                if (k == static_cast<std::int64_t>(r.epochs.size())) r.epochs.emplace_back(), r.epoch_spans.push_back(0);
+                r.epoch_spans[static_cast<std::size_t>(k)] = runner.act.span;
                 std::vector<std::int32_t>& inv = r.epochs[static_cast<std::size_t>(k)];
                 if (D != nullptr) {   // the device's sample -> slot map, read back at the checkpoint
                     inv.resize(static_cast<std::size_t>(n));
@@ -1616,6 +1628,7 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
         refuse(EG_BAD_REQUEST, "memory_budget " + std::to_string(budget) + ": one sample alone needs " + std::to_string(per) +
                " bytes (its checkpoints and a " + std::to_string(W) + "-step tape)");
     runner->reverse_passes = n > 0 ? static_cast<std::int32_t>((n + m - 1) / m) : 1;
+    runner->reverse_not_bitwise = false;
     for (Carried& c : r.state) c.buf.resize(static_cast<std::size_t>(c.rows * m) * c.bytes, D);
     for (Carried& c : r.reads) c.buf.resize(static_cast<std::size_t>(c.rows * m) * c.bytes, D);
     for (TapedState& x : r.taped)
@@ -1728,14 +1741,29 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
     std::vector<std::pair<char*, std::size_t>> kept_at;
     ActiveState act_kept;
     std::uint32_t finished_kept = 0;
+    struct GraphShare {
+        std::size_t grad;       // index in r.grads
+        eg_plane_s* plane;
+        Buf total;              // the graph's share of the gradient, over the steps, in the caller's sample order
+    };
+    std::vector<GraphShare> shares;
+    StepReverseInfo graph_info;               // the step graph's passes and bitwise flag over the whole reverse
     std::vector<StepTape> tapes;
     std::vector<std::vector<Buf>> post;       // per step of the window: the carried planes right after the step graph, n wide
     std::int64_t cur_window = 0, win_start = 0;
     const FinishFacts& pfin = pu.finish;
     const DLTensor& pmask = primal.bindings[static_cast<std::size_t>(pfin.mask_slot)].plane->tensor->dl_tensor;
     const char* mask_p = static_cast<const char*>(pmask.data) + pmask.byte_offset;
-    const std::vector<Owned> no_owned;
-    ForwardEnv fenv{ ctx, *runner, r, D, threads, mask_p, elem_bytes(pmask), no_owned, false };
+    std::vector<Owned> no_owned;    // what a reordering set moves with the runner's planes: as the forward's
+    const bool reordering = graphed && runner->active && runner->act.reorder;
+    if (reordering) {
+        no_owned = owned_planes(*runner);
+        no_owned.push_back({ r.steps.data(), 8 });
+        for (Carried& c : r.reads)
+            if (c.kind == Carried::START) no_owned.push_back({ c.own.data(), c.bytes });
+    }
+    ForwardEnv fenv{ ctx, *runner, r, D, threads, mask_p, elem_bytes(pmask), no_owned, reordering };
+    std::vector<std::vector<std::int64_t>> layout_idx;    // per step of the window: each column's slot in the caller's planes at that step (a reordering set)
     if (graphed) {
         steps_final.assign(all_steps, all_steps + n);
         all_steps = steps_final.data();
@@ -1750,10 +1778,26 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
             if (c.kind == Carried::PLANE) keep(c.src, static_cast<std::size_t>(c.rows * n) * c.bytes);
         for (const StepPlane& sp : step_graph_planes(ctx, runner->step_graph)) keep(plane_bytes(*sp.plane), static_cast<std::size_t>(elements(sp.plane->tensor->dl_tensor)) * elem_bytes(sp.plane->tensor->dl_tensor));
         keep(r.steps.data(), static_cast<std::size_t>(n) * 8);
+        for (const StepPlane& sp : step_graph_planes(ctx, runner->step_graph)) {    // a plane the graph reads that takes a gradient of its own: the graph's share joins it
+            if (!sp.input) continue;
+            for (std::size_t s = 0; s < primal.bindings.size(); ++s) {
+                if (primal.bindings[s].plane != sp.plane) continue;
+                for (std::size_t gi = 0; gi < r.grads.size(); ++gi)
+                    if (r.grads[gi].primal_slot == static_cast<int>(s) && r.grads[gi].fold < 0) {
+                        const bool carried_slot = std::any_of(r.taped.begin(), r.taped.end(), [&](const TapedState& x) { return x.primal_slot == static_cast<int>(s); });
+                        if (carried_slot) continue;
+                        shares.emplace_back();
+                        shares.back().grad = gi;
+                        shares.back().plane = sp.plane;
+                        shares.back().total.resize(static_cast<std::size_t>(elements(sp.plane->tensor->dl_tensor)) * r.scalar, D);
+                    }
+            }
+        }
         act_kept = runner->act;
         finished_kept = r.fwd->finished;
         tapes.resize(static_cast<std::size_t>(W));
         post.resize(static_cast<std::size_t>(W));
+        layout_idx.resize(static_cast<std::size_t>(W));
     }
     for (std::int64_t s0 = 0; s0 < n; s0 += m) {
         const std::int64_t cnt = std::min(m, n - s0);
@@ -1775,15 +1819,17 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
             }
         for (Grad& g : r.grads) g.acc.zero();
         // The carried planes as a step's graph left them (what its plans read), loaded into the pass's columns.
+        const auto idx_of = [&](std::int64_t j) { return reordering ? layout_idx[static_cast<std::size_t>(j - win_start)].data() : at; };
         const auto load_post = [&](std::int64_t j, std::int64_t count, bool states) {
+            const std::int64_t* ix = idx_of(j);
             std::vector<Buf>& p = post[static_cast<std::size_t>(j - win_start)];
             std::size_t at_p = 0;
             for (Carried& cc : r.state) {
-                if (states) gather(D, cc.buf.data(), m, p[at_p].data(), n, at, count, cc.rows, cc.bytes, threads);
+                if (states) gather(D, cc.buf.data(), m, p[at_p].data(), n, ix, count, cc.rows, cc.bytes, threads);
                 ++at_p;
             }
             for (Carried& cc : r.reads)
-                if (cc.kind == Carried::PLANE) gather(D, cc.buf.data(), m, p[at_p++].data(), n, at, count, cc.rows, cc.bytes, threads);
+                if (cc.kind == Carried::PLANE) gather(D, cc.buf.data(), m, p[at_p++].data(), n, ix, count, cc.rows, cc.bytes, threads);
         };
         if (!live.empty()) {
             diff::AdjointChain chain(static_cast<std::int64_t>(live.size()), W, r.fused_k);
@@ -1814,8 +1860,16 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
                     if (graphed) {   // the window again in the caller's layout: the forward's own step, each step's graph tape and carried planes kept
                         for (std::size_t i = 0; i < r.state.size(); ++i)
                             copy_bytes(D, r.state[i].src, r.pool[static_cast<std::size_t>(cur_window)][i].data(), static_cast<std::size_t>(r.state[i].rows * n) * r.state[i].bytes);
+                        ActiveState& as = runner->act;
+                        if (reordering) {   // the planes are in the checkpoint's order: the set's permutation as it was, so the same reorders happen again
+                            as.inv = r.epochs[static_cast<std::size_t>(cur_window)];
+                            for (std::int64_t s = 0; s < n; ++s) as.perm[static_cast<std::size_t>(as.inv[static_cast<std::size_t>(s)])] = static_cast<std::int32_t>(s);
+                            as.span = r.epoch_spans[static_cast<std::size_t>(cur_window)];
+                            as.fire = false;
+                        }
                         std::vector<std::int64_t> applied(static_cast<std::size_t>(n));
-                        for (std::int64_t i = 0; i < n; ++i) applied[static_cast<std::size_t>(i)] = std::min(steps_final[static_cast<std::size_t>(i)], c);
+                        for (std::int64_t i = 0; i < n; ++i)    // the steps each sample had applied at the window's start, in the planes' slot order
+                            applied[static_cast<std::size_t>(reordering ? as.inv[static_cast<std::size_t>(i)] : i)] = std::min(steps_final[static_cast<std::size_t>(i)], c);
                         if (D != nullptr) device_write(*D, r.steps.data(), applied.data(), static_cast<std::size_t>(n) * 8);
                         else std::memcpy(r.steps.data(), applied.data(), static_cast<std::size_t>(n) * 8);
                         eg_plan_s& fwd = *r.fwd;
@@ -1840,6 +1894,11 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
                         }
                         for (std::int64_t j = c; j < c + len; ++j) {
                             forward_graph(fenv);
+                            if (reordering) {
+                                std::vector<std::int64_t>& li = layout_idx[static_cast<std::size_t>(j - c)];
+                                li.resize(static_cast<std::size_t>(n));
+                                for (std::int64_t q = 0; q < n; ++q) li[static_cast<std::size_t>(q)] = runner->act.inv[static_cast<std::size_t>(cols[static_cast<std::size_t>(q)])];
+                            }
                             step_tape_save(ctx, runner->step_graph, tapes[static_cast<std::size_t>(j - c)]);
                             std::vector<Buf>& p = post[static_cast<std::size_t>(j - c)];
                             p.clear();
@@ -1896,13 +1955,27 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
                         for (std::size_t k = 0; k < r.taped.size(); ++k) {
                             TapedState& x = r.taped[k];
                             caller[k].resize(static_cast<std::size_t>(x.rows * n) * r.scalar, D);
-                            put(D, caller[k].data(), n, x.adj[chain.cur].data(), m, at, cnt, x.rows, r.scalar);
+                            put(D, caller[k].data(), n, x.adj[chain.cur].data(), m, idx_of(j), cnt, x.rows, r.scalar);
                             adjoints.push_back({ primal.bindings[static_cast<std::size_t>(x.primal_slot)].plane, caller[k].data() });
                         }
-                        graph_reverse_step(ctx, runner->step_graph, adjoints);
+                        std::vector<Buf> step_share(shares.size());
+                        for (std::size_t q = 0; q < shares.size(); ++q) {
+                            step_share[q].resize(shares[q].total.size_bytes(), D);
+                            adjoints.push_back({ shares[q].plane, step_share[q].data() });
+                        }
+                        graph_reverse_step(ctx, runner->step_graph, adjoints, graph_info);
+                        for (std::size_t q = 0; q < shares.size(); ++q) {    // the graph's share of this step, added to the running one
+                            const std::size_t elems = shares[q].total.size_bytes() / r.scalar;
+                            if (D != nullptr) device_columns(*D, 1, shares[q].total.data(), static_cast<std::int64_t>(elems), step_share[q].data(), static_cast<std::int64_t>(elems), nullptr,
+                                                             static_cast<std::int64_t>(elems), 1, static_cast<unsigned>(r.scalar), 0);
+                            else if (r.scalar == 8)
+                                for (std::size_t e = 0; e < elems; ++e) reinterpret_cast<double*>(shares[q].total.data())[e] += reinterpret_cast<const double*>(step_share[q].data())[e];
+                            else
+                                for (std::size_t e = 0; e < elems; ++e) reinterpret_cast<float*>(shares[q].total.data())[e] += reinterpret_cast<const float*>(step_share[q].data())[e];
+                        }
                         for (std::size_t k = 0; k < r.taped.size(); ++k) {
                             TapedState& x = r.taped[k];
-                            gather(D, x.adj[chain.cur].data(), m, caller[k].data(), n, at, cnt, x.rows, r.scalar, threads);
+                            gather(D, x.adj[chain.cur].data(), m, caller[k].data(), n, idx_of(j), cnt, x.rows, r.scalar, threads);
                             // a sample that has stopped is not touched by the next step's vjp: its adjoint lives on in both planes
                             copy_bytes(D, x.adj[1 - chain.cur].data(), x.adj[chain.cur].data(), static_cast<std::size_t>(x.rows * m) * r.scalar);
                         }
@@ -1966,6 +2039,30 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
         else if (tk >= 0)
             for (std::int64_t i = 0; i < n; ++i) reinterpret_cast<float*>(out_state[static_cast<std::size_t>(tk)].data())[i] += reinterpret_cast<const float*>(extra.t0.data())[i];
     }
+    for (GraphShare& gs : shares) {   // the step graph's share of a plane's gradient: per sample, or summed into the parameter's one value
+        const Grad& g = r.grads[gs.grad];
+        if (g.plane) {
+            extra.planes.emplace_back(g.primal_slot, std::move(gs.total));
+            continue;
+        }
+        Buf host;
+        const char* at_host = gs.total.data();
+        if (D != nullptr) {
+            host.resize(gs.total.size_bytes());
+            device_read(*D, gs.total.data(), host.data(), gs.total.size_bytes());
+            at_host = host.data();
+        }
+        double v = 0.0;
+        const std::int64_t count = static_cast<std::int64_t>(gs.total.size_bytes() / r.scalar);
+        if (r.scalar == 8) {
+            const auto p = pair_sum(reinterpret_cast<const double*>(at_host), count, threads);
+            v = p.h + p.c;
+        } else {
+            const auto p = pair_sum(reinterpret_cast<const float*>(at_host), count, threads);
+            v = static_cast<double>(p.h) + static_cast<double>(p.c);
+        }
+        extra.params.push_back({ g.primal_slot, v });
+    }
     for (const Out& o : outs) {
         if (o.plane) {   // the step reverse's per-sample gradient (accumulated over steps), then the refine vjp's share added
             const std::size_t bytes = static_cast<std::size_t>(n) * r.scalar;
@@ -2009,6 +2106,8 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
         }
     }
     if (graphed) {   // the caller's planes as the run left them
+        runner->reverse_passes += graph_info.passes;
+        runner->reverse_not_bitwise = !graph_info.bitwise;
         for (std::size_t i = 0; i < kept.size(); ++i) copy_bytes(D, kept_at[i].first, kept[i].data(), kept_at[i].second);
         runner->act = act_kept;
         r.fwd->finished = finished_kept;

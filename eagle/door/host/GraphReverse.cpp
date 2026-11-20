@@ -992,10 +992,10 @@ std::vector<StepPlane> step_graph_planes(eg_ctx& ctx, eg_graph_s* graph) {
     return out;
 }
 
-void graph_reverse_step(eg_ctx& ctx, eg_graph_s* graph, const std::vector<StepAdjoint>& states) {
+void graph_reverse_step(eg_ctx& ctx, eg_graph_s* graph, const std::vector<StepAdjoint>& states, StepReverseInfo& info) {
     GraphDiff& d = step_tape_of(ctx, graph);
     eg_ctx* const D = d.dev;
-    const std::vector<StepPlane> info = step_graph_planes(ctx, graph);
+    const std::vector<StepPlane> planes_of_graph = step_graph_planes(ctx, graph);
     struct Entry {
         const StepAdjoint* state;
         bool input, written;
@@ -1009,8 +1009,8 @@ void graph_reverse_step(eg_ctx& ctx, eg_graph_s* graph, const std::vector<StepAd
         if (p < 0) continue;
         Entry e;
         e.state = &s;
-        e.input = info[static_cast<std::size_t>(p)].input;
-        e.written = info[static_cast<std::size_t>(p)].written;
+        e.input = planes_of_graph[static_cast<std::size_t>(p)].input;
+        e.written = planes_of_graph[static_cast<std::size_t>(p)].written;
         if (!e.input && !e.written) continue;
         entries.push_back(std::move(e));
     }
@@ -1036,7 +1036,13 @@ void graph_reverse_step(eg_ctx& ctx, eg_graph_s* graph, const std::vector<StepAd
     desc.n_grads = static_cast<std::int32_t>(inputs.size());
     desc.inputs = inputs.data();
     desc.grads = grads.data();
+    std::vector<std::uint8_t> bitwise(inputs.size(), 1);
+    std::int32_t passes = 0;
+    desc.bitwise = bitwise.data();
+    desc.passes = &passes;
     graph_reverse(ctx, graph, &desc, true);
+    info.passes += passes;
+    for (std::uint8_t b : bitwise) info.bitwise = info.bitwise && b != 0;
     for (Entry& e : entries) {
         const eg_plane_s& plane = *e.state->plane;
         const std::size_t bytes = byte_count(plane), width = element_bytes(plane);

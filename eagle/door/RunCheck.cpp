@@ -148,9 +148,9 @@ void check_step_graph(eg_ctx& ctx, const eg_runner_desc& d, bool device) {
         refuse(EG_BAD_REQUEST, std::string("step_graph: a ") + (on_device ? "device" : "host") + " graph in a " +
                (device ? "device" : "host") + " runner; a runner runs graphs recorded on its own side");
     const bool recording = (d.flags & EG_RUN_RECORD) != 0;
-    if (recording && (d.flags & EG_RUN_REORDER))
-        refuse(EG_NOT_WRITTEN, "step_graph in a recorded run with EG_RUN_REORDER: the reverse recomputes each window in the caller's sample order, "
-               "which a reorder permutes; this is not written in this build of the door");
+    if (recording && (d.flags & EG_RUN_REORDER) && device)
+        refuse(EG_NOT_WRITTEN, "step_graph in a recorded run with EG_RUN_REORDER on a device: the reverse replays the reorders on the host; this is not written in "
+               "this build of the door");
     const std::int64_t f1 = d.plans[0]->unit->finish.steps;
     if (f1 != 1)
         refuse(EG_BAD_REQUEST, "step_graph: the graph runs once per step, so each plan must advance exactly one step per launch (unit '" +

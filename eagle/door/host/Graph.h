@@ -178,10 +178,15 @@ struct StepAdjoint {
     eg_plane_s* plane = nullptr;
     char* adjoint = nullptr;
 };
+/** @brief What a step graph's reverse reports: the memory passes it ran in (one per call) and whether every adjoint it wrote is bitwise reproducible. */
+struct StepReverseInfo {
+    std::int32_t passes = 0;
+    bool bitwise = true;
+};
 /** @brief Reverse the last launch of step graph @p graph over @p states: a plane the graph writes is seeded with its adjoint and gets it REPLACED
  *  by what flows to it through the graph's reads (zero when the graph never reads it first); a plane it only reads gets that ADDED. Planes of
  *  the graph not listed have no adjoint: neither seeded nor written. */
-void graph_reverse_step(eg_ctx& ctx, eg_graph_s* graph, const std::vector<StepAdjoint>& states);
+void graph_reverse_step(eg_ctx& ctx, eg_graph_s* graph, const std::vector<StepAdjoint>& states, StepReverseInfo& info);
 
 /** @brief The tape of a graph ended with EG_RECORD_DIFF (host/GraphReverse.cpp): @p plan from GraphShape::reverse_plan, @p launches by launch ordinal and @p others (copies, reduces, transforms and products) by their ordinal; refuses what the reverse does not cover. */
 std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<eg_plan_s*>& launches, const std::vector<const Node*>& others, const ReversePlan& plan, const eg_record_end_desc& desc);

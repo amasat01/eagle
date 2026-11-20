@@ -402,7 +402,7 @@ void runner_figures(eg_ctx& ctx, const eg_runner_s* runner, struct eg_runner_fig
     f.grid = r.block > 0 ? static_cast<std::int64_t>(r.grid) : -1;
     f.chunk = f.mode == EG_MODE_PERSIST ? static_cast<std::int32_t>(r.chunk) : -1;
     f.reverse_passes = runner->reverse_passes;
-    f.reverse_bitwise = runner->reverse_passes > 0;   // the canonical compensated pair, in sample order
+    f.reverse_bitwise = runner->reverse_passes > 0 && !runner->reverse_not_bitwise;   // the canonical compensated pair, in sample order
     const BandFigures& b = runner->band;
     f.go = b.go;
     f.fill = r.fill;

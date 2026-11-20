@@ -116,6 +116,95 @@ void lin_vjp_host(void* const* params, int64_t base, int64_t count, int64_t n) {
     }
 }
 
+/* The step with a per-sample read plane c (library units 30-32): x <- a x + b + c. slots: x, t, terminated, finished_count, T, a, b, c */
+EXPORT void linc_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EXPORT void linc_tape_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EXPORT void linc_vjp_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EXPORT void lina_tape_host(void* const* params, int64_t base, int64_t count, int64_t n);
+void linc_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    double* x = H(0, double);
+    double* t = H(1, double);
+    uint8_t* done = H(2, uint8_t);
+    uint32_t* finished = H(3, uint32_t);
+    const double* T = H(4, double);
+    const double a = U(5, double), b = U(6, double);
+    const double* c = H(7, double);
+    (void)n;
+    for (int64_t i = base; i < base + count; ++i) {
+        if (done[i]) continue;
+        x[i] = a * x[i] + b + c[i];
+        t[i] = t[i] + 1.0;
+        if (t[i] >= T[i]) {
+            done[i] = 1;
+            __atomic_fetch_add(finished, 1u, __ATOMIC_RELAXED);
+        }
+    }
+}
+/* slots: applied_steps, x, t, tape (2 rows), T, finished_count, terminated, a, b, tape_on, c */
+void linc_tape_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    int64_t* steps = H(0, int64_t);
+    double* x = H(1, double);
+    double* t = H(2, double);
+    const struct mirror* tape = (const struct mirror*)params[3];
+    const double* T = H(4, double);
+    uint32_t* finished = H(5, uint32_t);
+    uint8_t* done = H(6, uint8_t);
+    const double a = U(7, double), b = U(8, double);
+    const int64_t on = U(9, int64_t);
+    const double* c = H(10, double);
+    (void)n;
+    for (int64_t i = base; i < base + count; ++i) {
+        if (done[i]) continue;
+        if (on != 0) {
+            tape->data[(uint64_t)(steps[i] % 1 * 2 + 0) * tape->comp_stride + (uint64_t)i] = t[i];
+            tape->data[(uint64_t)(steps[i] % 1 * 2 + 1) * tape->comp_stride + (uint64_t)i] = x[i];
+        }
+        x[i] = a * x[i] + b + c[i];
+        t[i] = t[i] + 1.0;
+        steps[i] = steps[i] + 1;
+        if (t[i] >= T[i]) {
+            done[i] = 1;
+            __atomic_fetch_add(finished, 1u, __ATOMIC_RELAXED);
+        }
+    }
+}
+/* slots: bar_a, bar_b, bar_x, bar_t, bar_x_next, bar_t_next, x (taped), a, b, bar_c */
+void linc_vjp_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    lin_vjp_host(params, base, count, n);
+    double* gc = H(9, double);
+    const double* gxn = H(4, double);
+    for (int64_t i = base; i < base + count; ++i) gc[i] = gxn[i];
+}
+/* The taping twin of lina (library unit 33): lin_tape1 over the live samples of the active map. slots: as the twin, then active_map, active_count */
+void lina_tape_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    const int32_t* map = H(10, int32_t);
+    int64_t* steps = H(0, int64_t);
+    double* x = H(1, double);
+    double* t = H(2, double);
+    const struct mirror* tape = (const struct mirror*)params[3];
+    const double* T = H(4, double);
+    uint32_t* finished = H(5, uint32_t);
+    uint8_t* done = H(6, uint8_t);
+    const double a = U(7, double), b = U(8, double);
+    const int64_t on = U(9, int64_t);
+    (void)n;
+    for (int64_t k = base; k < base + count; ++k) {
+        const int64_t i = map[k];
+        if (done[i]) continue;
+        if (on != 0) {
+            tape->data[(uint64_t)0 * tape->comp_stride + (uint64_t)i] = t[i];
+            tape->data[(uint64_t)1 * tape->comp_stride + (uint64_t)i] = x[i];
+        }
+        x[i] = a * x[i] + b;
+        t[i] = t[i] + 1.0;
+        steps[i] = steps[i] + 1;
+        if (t[i] >= T[i]) {
+            done[i] = 1;
+            __atomic_fetch_add(finished, 1u, __ATOMIC_RELAXED);
+        }
+    }
+}
+
 /* ---- the size block ---- */
 EXPORT extern const char eagle_abi_tag[];
 EXPORT extern const uint64_t eagle_layout_sizes[5];
@@ -152,6 +241,12 @@ SLOT(s_gxn, EG_ROLE_PER_SAMPLE, EG_DTYPE_REAL, "bar_x_next");
 SLOT(s_gtn, EG_ROLE_PER_SAMPLE, EG_DTYPE_REAL, "bar_t_next");
 SLOT(s_xr, EG_ROLE_PER_SAMPLE, EG_DTYPE_REAL, "x");
 
+SLOT(s_c, EG_ROLE_PER_SAMPLE, EG_DTYPE_REAL, "c");
+SLOT(s_gc, EG_ROLE_MUTABLE, EG_DTYPE_REAL, "bar_c");
+static const struct eg_unit_slot* const linc_slots[] = { &s_x, &s_t, &s_done, &s_fin, &s_T, &s_a, &s_b, &s_c };
+static const struct eg_unit_slot* const tw_linc_slots[] = { &s_steps, &s_x, &s_t, &s_tape1, &s_T, &s_fin, &s_done, &s_a, &s_b, &s_on, &s_c };
+static const struct eg_unit_slot* const tw_lina_slots[] = { &s_steps, &s_x, &s_t, &s_tape1, &s_T, &s_fin, &s_done, &s_a, &s_b, &s_on, &s_map, &s_live };
+static const struct eg_unit_slot* const vjp_c_slots[] = { &s_ga, &s_gb, &s_gx, &s_gt, &s_gxn, &s_gtn, &s_xr, &s_a, &s_b, &s_gc };
 static const struct eg_unit_slot* const lin_slots[] = { &s_x, &s_t, &s_done, &s_fin, &s_T, &s_a, &s_b };
 static const struct eg_unit_slot* const lina_slots[] = { &s_x, &s_t, &s_done, &s_fin, &s_T, &s_a, &s_b, &s_map, &s_live };
 #define TWIN_SLOTS(var, tape_) \
@@ -169,6 +264,10 @@ BODY(tw1_body, tw1_slots, 10);
 BODY(tw3_body, tw3_slots, 10);
 BODY(tw16_body, tw16_slots, 10);
 BODY(vjp_body, vjp_slots, 9);
+BODY(linc_body, linc_slots, 8);
+BODY(tw_linc_body, tw_linc_slots, 11);
+BODY(tw_lina_body, tw_lina_slots, 12);
+BODY(vjp_c_body, vjp_c_slots, 10);
 
 #define LAUNCH(var, map_, live_)                                                                               \
     static const struct eg_unit_launch var = { .struct_size = sizeof(struct eg_unit_launch), .n_lane_axes = 0, \
@@ -176,6 +275,7 @@ BODY(vjp_body, vjp_slots, 9);
                                                .index_map_slot = -1, .index_count_slot = -1, .n_plane_axes = 0, .group = 1 }
 LAUNCH(launch, -1, -1);
 LAUNCH(launch_active, 7, 8);
+LAUNCH(launch_active_twin, 10, 11);
 
 #define FINISH(var, mask_, counter_)                                                                            \
     static const struct eg_unit_finish var = { .struct_size = sizeof(struct eg_unit_finish), .flags = 0,        \
@@ -196,7 +296,10 @@ LINK(tl_done, 6, PRIMAL_SLOT, VALUE, 2, 0);
 LINK(tl_a, 7, PRIMAL_SLOT, VALUE, 5, 0);
 LINK(tl_b, 8, PRIMAL_SLOT, VALUE, 6, 0);
 LINK(tl_bad_slot, 12, PRIMAL_SLOT, VALUE, 0, 0);
+LINK(tl_c, 10, PRIMAL_SLOT, VALUE, 7, 0);
+LINK(vl_gc, 9, PRIMAL_SLOT, GRAD, 7, 0);
 LINK(tl_time0, 4, TIME0, VALUE, 1, 0);
+static const struct eg_unit_link* const twin_links_c[] = { &tl_x, &tl_t, &tl_T, &tl_done, &tl_a, &tl_b, &tl_c };
 static const struct eg_unit_link* const twin_links[] = { &tl_x, &tl_t, &tl_T, &tl_done, &tl_a, &tl_b };
 static const struct eg_unit_link* const twin_links_bad_slot[] = { &tl_x, &tl_t, &tl_T, &tl_done, &tl_a, &tl_bad_slot };
 static const struct eg_unit_link* const twin_links_time0[] = { &tl_x, &tl_t, &tl_time0, &tl_done, &tl_a, &tl_b };
@@ -249,6 +352,18 @@ TWIN_DERIVED(d_twin_time0, 0, 2, twin_links_time0);
                                                 .fused_steps_slot = -1, .n_links = n_, .taped = NULL, \
                                                 .links = links_ }
 VJP_DERIVED(d_vjp, 9, vjp_links);
+static const struct eg_unit_link* const vjp_links_c[] = { &vl_ga, &vl_gb, &vl_gx, &vl_gt, &vl_gxn, &vl_gtn, &vl_x, &vl_a, &vl_b, &vl_gc };
+/* units 30-32: the per-sample read plane c (primal 30, its twin, its vjp); 33-34: the taping twin and the vjp of lina (unit 5) */
+static const struct eg_unit_derived d_twin_c = { .struct_size = sizeof(struct eg_unit_derived), .role = EG_DERIVED_TAPE, .of_unit = 30, .tape_slot = 3,
+                                                 .n_taped = 2, .tape_rows = 2, .steps_slot = 0, .tape_on_slot = 9, .time0_slot = -1,
+                                                 .fused_steps_slot = -1, .n_links = 7, .taped = taped, .links = twin_links_c };
+static const struct eg_unit_derived d_vjp_cc = { .struct_size = sizeof(struct eg_unit_derived), .role = EG_DERIVED_STEP_VJP, .of_unit = 30, .tape_slot = -1,
+                                                 .n_taped = 0, .tape_rows = 0, .steps_slot = -1, .tape_on_slot = -1, .time0_slot = -1,
+                                                 .fused_steps_slot = -1, .n_links = 10, .taped = NULL, .links = vjp_links_c };
+TWIN_DERIVED(d_twin_a, 5, 2, twin_links);
+static const struct eg_unit_derived d_vjp_a = { .struct_size = sizeof(struct eg_unit_derived), .role = EG_DERIVED_STEP_VJP, .of_unit = 5, .tape_slot = -1,
+                                                .n_taped = 0, .tape_rows = 0, .steps_slot = -1, .tape_on_slot = -1, .time0_slot = -1,
+                                                .fused_steps_slot = -1, .n_links = 9, .taped = NULL, .links = vjp_links };
 VJP_DERIVED(d_vjp_missing, 8, vjp_links_missing);
 VJP_DERIVED(d_vjp_twice, 9, vjp_links_twice);
 VJP_DERIVED(d_vjp_reduced, 9, vjp_links_reduced);
@@ -333,6 +448,11 @@ UNIT(u_vjp_missing, "lin_vjp", 0xF4, "lin_vjp_host", vjp_body, launch, NULL, &d_
 UNIT(u_vjp_twice, "lin_vjp", 0xF5, "lin_vjp_host", vjp_body, launch, NULL, &d_vjp_twice);
 UNIT(u_vjp_reduced, "lin_vjp", 0xF6, "lin_vjp_host", vjp_body, launch, NULL, &d_vjp_reduced);
 UNIT(u_vjp_steps, "lin_vjp", 0xF7, "lin_vjp_host", vjp_body, launch, NULL, &d_vjp_steps);
+UNIT(u_linc, "linc", 0xB0, "linc_host", linc_body, launch, &lin_finish, NULL);
+UNIT(u_tw_c, "linc", 0xB1, "linc_tape_host", tw_linc_body, launch, &twin_finish, &d_twin_c);
+UNIT(u_vjp_c, "linc_vjp", 0xB2, "linc_vjp_host", vjp_c_body, launch, NULL, &d_vjp_cc);
+UNIT(u_tw_a, "lina", 0xB3, "lina_tape_host", tw_lina_body, launch_active_twin, &twin_finish, &d_twin_a);
+UNIT(u_vjp_a, "lina_vjp", 0xB4, "lin_vjp_host", vjp_body, launch, NULL, &d_vjp_a);
 UNIT(u_vjp_unreduced, "lin_vjp", 0xF8, "lin_vjp_host", vjp_body, launch, NULL, &d_vjp_unreduced);
 UNIT(u_vjp_badform, "lin_vjp", 0xF9, "lin_vjp_host", vjp_body, launch, NULL, &d_vjp_badform);
 UNIT(u_newton_two_steps, "lin_newton", 0xFA, "lin_vjp_host", vjp_body, launch, NULL, &d_newton_two_steps);
@@ -354,7 +474,7 @@ static const struct eg_unit_meta* const units[] = { &u_lin, &u_tw1, &u_tw3, &u_t
                                                     &u_tw_slot, &u_tw_time0, &u_vjp_missing, &u_vjp_twice, &u_vjp_reduced,
                                                     &u_vjp_steps, &u_vjp_unreduced, &u_vjp_badform, &u_newton_two_steps,
                                                     &u_lin3_in, &u_tw_in, &u_vjp_in, &u_lin3_out, &u_tw_out, &u_vjp_out, &u_lin3_res,
-                                                    &u_tw_res, &u_vjp_res, &u_lin3_none, &u_tw_none, &u_vjp_none, &u_fused_vjp };
+                                                    &u_tw_res, &u_vjp_res, &u_lin3_none, &u_tw_none, &u_vjp_none, &u_fused_vjp, &u_linc, &u_tw_c, &u_vjp_c, &u_tw_a, &u_vjp_a };
 static const struct eg_library_meta library = { .struct_size = sizeof(struct eg_library_meta), .schema_major = EG_META_SCHEMA_MAJOR,
-                                                .schema_minor = 0, .n_units = 30, .units = units };
+                                                .schema_minor = 0, .n_units = 35, .units = units };
 const struct eg_library_meta* eg_unit_library_meta(void) { return &library; }

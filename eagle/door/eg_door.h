@@ -408,9 +408,15 @@ struct eg_runner_desc {
                                              added; planes of the graph that are no carried state have no adjoint. A graph may mix samples,
                                              so with a step graph the reverse is one chunk of all n samples whatever the memory budget; the
                                              memory is the window checkpoints, that chunk and, per step of a window, the graph's snapshots
-                                             and planes. NOT_WRITTEN: EG_RUN_REORDER with a recording runner (the recompute is in sample
-                                             order), and a graph reading a plane that takes a gradient in the run but is no carried state.
-                                             The device reverse runs the graph reverse per step, host driven, between the vjp launches. */
+                                             and planes. A plane the graph reads that
+                                             takes a gradient in the run (a per-sample read) gets the graph's share added to it, as eagle's
+                                             Python runner added a hook node's reads to the gradient of the plane it read. With
+                                             EG_RUN_REORDER the recompute repeats the forward's reorders (the permutation and span are kept
+                                             per checkpoint) and each step's adjoints are carried in that step's layout. NOT_WRITTEN by name:
+                                             a graph that overwrites a plane the run takes a gradient of, such a plane that does not hold
+                                             one value per sample and row, such a plane with EG_RUN_REORDER, and EG_RUN_REORDER on a device.
+                                             The reverse of each step counts as one pass in eg_runner_figures.reverse_passes, and a step
+                                             graph adjoint fed by a cross-sample scatter-add clears reverse_bitwise. The device reverse runs the graph reverse per step, host driven, between the vjp launches. */
 };
 
 /** Report flags. */
@@ -462,8 +468,8 @@ struct eg_runner_figures {
                                          at eg_runner_new); PER_STEP for a runner without EG_RUN_RECORD */
     int64_t grid;            /**< blocks of that launch */
     /* appended: a struct_size that ends before a member reads 0 */
-    int32_t reverse_passes;  /**< the memory passes of the last ``eg_reverse`` of this runner; 0 before one */
-    int32_t reverse_bitwise; /**< 1 once an ``eg_reverse`` ran: its sums over samples are the canonical compensated pair, bitwise; 0 before one */
+    int32_t reverse_passes;  /**< the memory passes of the last ``eg_reverse`` of this runner, a step graph's reverse of each step counted as one more; 0 before one */
+    int32_t reverse_bitwise; /**< 1 once an ``eg_reverse`` ran: its sums over samples are the canonical compensated pair, bitwise (0 when a step graph's reverse wrote an adjoint a cross-sample scatter-add feeds); 0 before one */
     /* appended, as ``Runner.launch_policy`` and ``Runner.policy`` of the Python runner named them; -1 (-1.0) where the runner has none */
     int32_t go;              /**< steps AUTO on the host, after a run: 1 if the policy would launch again, else 0; -1 otherwise (``go``) */
     int32_t reserved1;

@@ -569,7 +569,8 @@ struct eg_runner_s {
     int refs = 1;                             ///< the caller's reference plus one per recorded graph
     bool caller_ref = true;
     bool active = false;                      ///< the plans read an active set
-    std::int32_t reverse_passes = 0;          ///< the memory passes of the last eg_reverse; 0 before one
+    std::int32_t reverse_passes = 0;          ///< the memory passes of the last eg_reverse (a step graph's reverse of each step adds one); 0 before one
+    bool reverse_not_bitwise = false;         ///< a step graph's reverse of the last eg_reverse wrote an adjoint a cross-sample scatter-add feeds
     eg_steps_reverse steps_reverse = EG_STEPS_REVERSE_PER_STEP;   ///< a recorded runner's reverse mode, AUTO resolved
     eagle::door::ActiveState act;
     eagle::door::DeviceRun dev;               ///< a DEVICE runner's loop and cells
