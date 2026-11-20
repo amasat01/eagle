@@ -683,7 +683,7 @@ static int cuda_ok(cudaError_t e, const char* what) {
 
 /* H2D copy of x -> launch (p1 = 2 x + 1) -> D2H copy of p1, recorded and replayed twice with the host input changed between the replays, against the same
  * sequence done eagerly (bitwise); a pageable host plane is refused by name with the recording left open; a graph ended with EG_RECORD_DIFF that holds such a
- * copy is refused NOT_WRITTEN; the description shows the copies as COPY nodes over the host and device planes. */
+ * copy ends and replays; the description shows the copies as COPY nodes over the host and device planes. */
 static void host_device_copies(eg_ctx* ctx, const char* dev_lib) {
     enum { HN = 64 };
     eg_unit* dp = NULL;
@@ -732,13 +732,13 @@ static void host_device_copies(eg_ctx* ctx, const char* dev_lib) {
     check(ok, "eg_graph_describe: the host->device and device->host copies are COPY nodes over their host and device planes");
     eg_graph_free(ctx, g);
     ok = eg_record_begin(ctx) == EG_OK && eg_copy(ctx, phx, pdx) == EG_OK;
-    eg_graph* none = NULL;
+    eg_graph* diff = NULL;
     struct eg_record_end_desc ed;
     memset(&ed, 0, sizeof(ed));
     ed.struct_size = sizeof(ed);
     ed.flags = EG_RECORD_DIFF;
-    check(ok && refused(eg_record_end(ctx, &ed, &none), EG_NOT_WRITTEN, ctx, "would cross memory kinds") && none == NULL && eg_record_abort(ctx) == EG_OK,
-          "a graph ended with EG_RECORD_DIFF that holds a host<->device copy is refused NOT_WRITTEN by name");
+    check(ok && eg_record_end(ctx, &ed, &diff) == EG_OK && eg_graph_launch(ctx, diff) == EG_OK && eg_sync(ctx) == EG_OK && eg_graph_free(ctx, diff) == EG_OK,
+          "a graph ended with EG_RECORD_DIFF that holds a host->device copy ends and replays (its reverse is rowed in graph_reverse_test)");
     eg_plan_free(ctx, a);
     eg_plane_free(ctx, phx), eg_plane_free(ctx, phy), eg_plane_free(ctx, ppg), eg_plane_free(ctx, pdx), eg_plane_free(ctx, pd1), eg_plane_free(ctx, pc);
     eg_unit_free(ctx, dp);

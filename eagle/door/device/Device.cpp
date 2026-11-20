@@ -2321,6 +2321,8 @@ void plan_diff_pass(eg_ctx& ctx, const GraphDiff& diff, std::size_t n_launches, 
     }
     for (const Snapshot& snap : diff.snapshots) {
         const RLeaf& leaf = plan.leaves[snap.node];
+        if (diff.planes[static_cast<std::size_t>(snap.plane)]->tensor->dl_tensor.device.device_type == kDLCPU)
+            refuse(EG_NOT_WRITTEN, "eg_record_end: a later leaf overwrites a host plane an earlier leaf of the EG_RECORD_DIFF recording reads; the tape's copy of a host plane is not written on a device");
         if (leaf.loop >= 0) continue;                                           // a windowed WHILE's states are rebuilt by the reverse from its checkpoints
         const DLTensor& t = diff.planes[static_cast<std::size_t>(snap.plane)]->tensor->dl_tensor;
         const char* plane = static_cast<const char*>(t.data) + t.byte_offset;
@@ -2406,10 +2408,6 @@ void device_record_end(eg_ctx& ctx, const eg_record_end_desc* desc, eg_graph** o
         diff_wanted = (d.flags & EG_RECORD_DIFF) != 0;
         if (!diff_wanted && d.n_vjps != 0) refuse(EG_BAD_REQUEST, "eg_record_end_desc.n_vjps: vjps without EG_RECORD_DIFF");
         if (diff_wanted) {                       // a refusal leaves the recording open, as the host's does
-            for (const Op& op : ctx.dev_rec->log)
-                if (op.kind == Op::Leaf && op.leaf.kind == Node::Copy &&
-                    (op.leaf.src->tensor->dl_tensor.device.device_type == kDLCPU) != (op.leaf.dst->tensor->dl_tensor.device.device_type == kDLCPU))
-                    refuse(EG_NOT_WRITTEN, "eg_record_end: a host<->device eg_copy in an EG_RECORD_DIFF recording is not written: the adjoint it hands back would cross memory kinds");
             reverse = ctx.dev_rec->shape.reverse_plan();
             if (ctx.dev_rec->shape.leaves() != static_cast<int>(ctx.dev_rec->plans.size() + ctx.dev_rec->others))
                 refuse(EG_NOT_WRITTEN, "eg_record_end: a call that runs on the host in a device recording (a host plan, the copy or reduce of host planes) is not written in EG_RECORD_DIFF");

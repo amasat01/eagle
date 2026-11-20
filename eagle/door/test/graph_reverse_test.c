@@ -2812,6 +2812,48 @@ static void host_node_rows(struct rig* r, const struct units* u) {
     host_segment_row(r, u);
 }
 
+#ifdef EG_TEST_CUDA
+/* A host input copied to the device, scaled by a launch (y = w x), and copied back to a host plane, J = sum of the host output: the reverse runs the copies back
+ * across memory kinds. dJ/dx (a host plane) = w per element and dJ/dw = sum x, the closed form. Device contexts only. */
+static void host_copy_row(struct rig* r, const struct units* u) {
+    eg_ctx* ctx = r->ctx;
+    double *hx = NULL, *hy = NULL;
+    double w[1], x0[N], dx_host[N], dy_host[N], one[N], gx[N], gw[1] = { 0.0 }, want_gw = 0.0;
+    int ok = cudaMallocHost((void**)&hx, N * sizeof(double)) == cudaSuccess && cudaMallocHost((void**)&hy, N * sizeof(double)) == cudaSuccess;
+    fill(x0, w, 0.5);
+    memset(dx_host, 0, sizeof(dx_host));
+    memset(dy_host, 0, sizeof(dy_host));
+    for (int i = 0; i < N; ++i) one[i] = 1.0, hx[i] = x0[i], hy[i] = 0.0, want_gw += x0[i];
+    struct tensor thx, thy, t1, tgx, tdx, tdy, tw, tgw;
+    eg_plane *phx = ok ? host_plane(ctx, &thx, N, hx) : NULL, *phy = ok ? host_plane(ctx, &thy, N, hy) : NULL, *p1 = host_plane(ctx, &t1, N, one), *pgx = host_plane(ctx, &tgx, N, gx);
+    eg_plane *pdx = mk(r, &tdx, N, dx_host), *pdy = mk(r, &tdy, N, dy_host), *pw = mk(r, &tw, 1, w), *pgw = mk(r, &tgw, 1, gw);
+    eg_plane* a[] = { pdx, pw, pdy };
+    eg_plan* f = plan_with(r, u->scale, 3, a, NULL);
+    const struct eg_node_vjp vjps[] = { { 0, u->scale_vjp } };
+    eg_graph* graph = NULL;
+    up(r);
+    ok = ok && phx && phy && f && eg_record_begin(ctx) == EG_OK && eg_copy(ctx, phx, pdx) == EG_OK && eg_launch(ctx, f, NULL) == EG_OK && eg_copy(ctx, pdy, phy) == EG_OK &&
+         end_diff(ctx, 1, vjps, &graph) == EG_OK && eg_graph_launch(ctx, graph) == EG_OK && eg_sync(ctx) == EG_OK;
+    eg_plane *in[] = { phx, pw }, *gr[] = { pgx, pgw };
+    ok = ok && reverse(ctx, graph, phy, p1, 2, in, gr) == EG_OK;
+    down(r);
+    double want_gx[N];
+    int forward = ok;
+    for (int i = 0; i < N; ++i) want_gx[i] = w[0], forward = forward && hy[i] == w[0] * x0[i];
+    verdict(r, ok && forward && close_to(gx, want_gx, N) && close_to(gw, &want_gw, 1),
+            "eg_graph_reverse through host->device copy, launch, device->host copy: the host output is w x, and dJ/dx (a host plane) and dJ/dw match the closed form");
+    if (graph) eg_graph_free(ctx, graph);
+    if (f) eg_plan_free(ctx, f);
+    if (phx) eg_plane_free(ctx, phx);
+    if (phy) eg_plane_free(ctx, phy);
+    eg_plane_free(ctx, p1);
+    eg_plane_free(ctx, pgx);
+    release(r);
+    cudaFreeHost(hx);
+    cudaFreeHost(hy);
+}
+#endif
+
 static struct units load_units(struct rig* r) {
     const struct units u = { load(r, "scale", 0x10), load(r, "scale_vjp", 0x11), load(r, "square", 0x12), load(r, "square_vjp", 0x13),
                              load(r, "mul2", 0x14), load(r, "mul2_vjp", 0x15), load(r, "uscale", 0x16), load(r, "uscale_vjp", 0x17),
@@ -2874,6 +2916,9 @@ int main(int argc, char** argv) {
         int_read_rows(&dev, &du);
         run_rows(&dev, &du);
         host_node_rows(&dev, &du);
+#ifdef EG_TEST_CUDA
+        host_copy_row(&dev, &du);
+#endif
         device_host_scope_row(&dev, &du);
         policy_row(&host, &u, &dev, &du);
         eg_ctx_free(dctx);

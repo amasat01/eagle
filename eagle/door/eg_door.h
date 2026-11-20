@@ -1016,8 +1016,10 @@ eg_status eg_reduce(eg_ctx* ctx, const struct eg_reduce_desc* desc);
  * when the graph runs, so the host plane must be page-locked (a plane made with ``eg_plane_new`` EG_MEM_PINNED, or a range the driver knows as pinned) and
  * stays the caller's, alive until the graph has run; a pageable host plane is refused BAD_REQUEST by name, the recording left open, with the way out in the
  * reason (``eg_plane_new`` of EG_MEM_HOST is pageable). ``eg_graph_describe`` shows it as an EG_GNODE_COPY node reading ``src`` and writing ``dst``: the
- * direction is the side of each plane (kDLCPU or kDLCUDAHost against kDLCUDA). A graph ended with EG_RECORD_DIFF that holds such a copy is refused
- * NOT_WRITTEN at ``eg_record_end``: the adjoint it hands back would cross memory kinds.
+ * direction is the side of each plane (kDLCPU or kDLCUDAHost against kDLCUDA). In a graph ended with EG_RECORD_DIFF its reverse is the copy back, as eagle's
+ * Python reverse did (``_graph_kinds.py`` ``_copy_transpose``): the adjoint of a host->device copy is a device->host copy of the device plane's adjoint, added to the
+ * host plane's adjoint, which lives in host memory the door makes; ``eg_graph_reverse`` takes seeds and gradient planes of the side of the graph plane they
+ * name. A host plane that a later leaf overwrites while an earlier leaf of a DIFF recording reads it is refused NOT_WRITTEN at ``eg_record_end``.
  * Replaces: ``_transfer`` copy nodes.
  * Status: OK; BAD_REQUEST (shape, dtype, access, a pageable host plane in a recording).
  */

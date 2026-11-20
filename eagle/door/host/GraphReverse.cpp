@@ -541,14 +541,23 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
         refuse(EG_BAD_REQUEST, "eg_graph_reverse_desc: a count without its arrays");
 
     const std::size_t n_leaves = d.plan.leaves.size();
+    // A DEVICE graph may hold host planes (the ends of a host<->device copy): their adjoints live in host memory, the device planes' in device memory.
+    const auto is_host = [](const eg_plane_s& p) { return tensor(p).device.device_type == kDLCPU || tensor(p).device.device_type == kDLCUDAHost; };
+    const auto dev_of = [&](const eg_plane_s& p) -> eg_ctx* { return D != nullptr && !is_host(p) ? D : nullptr; };
+    const auto cross = [&](eg_ctx* dst_dev, eg_ctx* src_dev, void* dst, const void* src, std::size_t bytes) {    // a copy between buffers of either side
+        if (dst_dev != nullptr && src_dev != nullptr) copy_bytes(D, dst, src, bytes);
+        else if (dst_dev != nullptr) device_write(*D, dst, src, bytes);
+        else if (src_dev != nullptr) device_read(*D, src, dst, bytes);
+        else std::memcpy(dst, src, bytes);
+    };
     const auto checked = [&](eg_plane_s* given, int k, const char* what, bool write) {
         const std::string at = std::string("eg_graph_reverse_desc.") + what + "[" + std::to_string(k) + "]";
         check_handle(ctx.planes, given, at.c_str());
         const int idx = find_plane(d, given);
         if (idx < 0) refuse(EG_BAD_REQUEST, at + " is no plane of the graph");
         host::check_access(*given, write, at.c_str());
-        if (tensor(*given).device.device_type != (D != nullptr ? kDLCUDA : kDLCPU))
-            refuse(EG_BAD_REQUEST, at + (D != nullptr ? ": a device graph takes device planes" : ": a host graph takes host planes"));
+        if (D == nullptr ? !is_host(*given) : is_host(*given) != is_host(*d.planes[static_cast<std::size_t>(idx)]))
+            refuse(EG_BAD_REQUEST, at + (D != nullptr ? ": a plane of the other side (host or device) than the graph's plane it names" : ": a host graph takes host planes"));
         return idx;
     };
     const auto same_shape = [&](const eg_plane_s& a, const eg_plane_s& b, const std::string& at) {
@@ -567,8 +576,8 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
         if (!pending[static_cast<std::size_t>(p)].empty()) refuse(EG_BAD_REQUEST, "eg_graph_reverse_desc.outputs[" + std::to_string(k) + "] is given twice");
         same_shape(*d.planes[static_cast<std::size_t>(p)], *r.seeds[k], "eg_graph_reverse_desc.seeds[" + std::to_string(k) + "]");
         Contribution seed;
-        seed.bytes = Bytes(byte_count(*r.seeds[k]), D);
-        copy_bytes(D, seed.bytes.data(), live(*r.seeds[k]), byte_count(*r.seeds[k]));
+        seed.bytes = Bytes(byte_count(*r.seeds[k]), dev_of(*d.planes[static_cast<std::size_t>(p)]));
+        cross(dev_of(*d.planes[static_cast<std::size_t>(p)]), dev_of(*r.seeds[k]), seed.bytes.data(), live(*r.seeds[k]), byte_count(*r.seeds[k]));
         pending[static_cast<std::size_t>(p)].push_back(std::move(seed));
     }
     std::vector<char> input(d.planes.size(), 0), seen(d.planes.size(), 0);
@@ -602,10 +611,10 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
         origin = -1;
         for (const Contribution& c : src)
             if (origin < 0) origin = c.taint;
-        if (!any) return Bytes(byte_count(plane), D);
+        if (!any) return Bytes(byte_count(plane), dev_of(plane));
         std::stable_sort(src.begin(), src.end(), [](const Contribution& a, const Contribution& b) { return a.node < b.node; });
         if (src.size() == 1) return std::move(src.front().bytes);
-        return ordered_sum(D, src, static_cast<std::size_t>(elements(tensor(plane))), element_bytes(plane));
+        return ordered_sum(dev_of(plane), src, static_cast<std::size_t>(elements(tensor(plane))), element_bytes(plane));
     };
     const int threads = host::team_threads(ctx);
     // The buffer a snapshot entry reads and fills: a windowed WHILE's later iterations share the first window's.
@@ -763,7 +772,16 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
         Bytes& dy = adjoint.front();
         const int in = node.reads.front(), out = node.writes.front();
         switch (node.kind) {
-            case Node::Copy: give(in, std::move(dy)); break;
+            case Node::Copy: {          // the adjoint of a copy is the copy back: across memory kinds when the copy was a transfer
+                if (dev_of(plane_of(in)) == dev_of(plane_of(out))) {
+                    give(in, std::move(dy));
+                    break;
+                }
+                Bytes back(byte_count(plane_of(in)), dev_of(plane_of(in)));
+                cross(dev_of(plane_of(in)), dev_of(plane_of(out)), back.data(), dy.data(), byte_count(plane_of(in)));
+                give(in, std::move(back));
+                break;
+            }
             case Node::Reduce: {                // every sample of the sum gets the adjoint of the sum
                 const std::size_t es = element_bytes(plane_of(in));
                 const std::int64_t n = node.reduce.n;
@@ -917,7 +935,7 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
                    "in the vjp of launch " + std::to_string(origin) + ", whose summing order is not fixed; drop EG_REVERSE_STRICT to accept it (bitwise[" + std::to_string(k) + "] is 0)");
     }
     for (std::int32_t k = 0; k < r.n_grads; ++k) {
-        copy_bytes(D, live(*r.grads[k]), result[static_cast<std::size_t>(k)].data(), byte_count(*r.grads[k]));
+        cross(dev_of(*r.grads[k]), dev_of(*d.planes[static_cast<std::size_t>(wanted[static_cast<std::size_t>(k)])]), live(*r.grads[k]), result[static_cast<std::size_t>(k)].data(), byte_count(*r.grads[k]));
         if (r.bitwise != nullptr) r.bitwise[k] = taints[static_cast<std::size_t>(k)] < 0;
     }
     if (r.passes != nullptr) *r.passes = 1;
