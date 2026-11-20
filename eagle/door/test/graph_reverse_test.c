@@ -463,6 +463,46 @@ static void refusal_rows(struct rig* r, const struct units* u) {
     drop(ctx, 6, all);
 }
 
+/* The refusals a DEVICE recording adds: a node that is not a launch, and a tape plan that is refused (it ends the recording). */
+static void device_refusal_rows(struct rig* r, const struct units* u) {
+    eg_ctx* ctx = r->ctx;
+    double x[N], y[N], z[N], w[1];
+    struct tensor tx, ty, tz, tw;
+    fill(x, w, 0.5);
+    memset(y, 0, sizeof(y));
+    memset(z, 0, sizeof(z));
+    eg_plane* px = mk(r, &tx, N, x);
+    eg_plane* py = mk(r, &ty, N, y);
+    eg_plane* pz = mk(r, &tz, N, z);
+    eg_plane* pw = mk(r, &tw, 1, w);
+    up(r);
+    eg_plane* a[] = { px, pw, py };
+    eg_plane* b[] = { py, pz };
+    eg_plan* f = plan_with(r, u->scale, 3, a, NULL);
+    eg_plan* g = plan_with(r, u->square, 2, b, NULL);
+    const struct eg_node_vjp both[] = { { 0, u->scale_vjp }, { 1, u->square_vjp } }, wrong[] = { { 0, u->square_vjp } };
+    eg_graph *none = NULL, *plain = NULL;
+
+    int ok = f && g && eg_record_begin(ctx) == EG_OK && eg_launch(ctx, f, NULL) == EG_OK && eg_copy(ctx, py, pz) == EG_OK &&
+             eg_launch(ctx, g, NULL) == EG_OK;
+    verdict(r, ok && refused(end_diff(ctx, 2, both, &none), EG_NOT_WRITTEN, ctx, "not an eg_launch") && none == NULL,
+            "eg_record_end with EG_RECORD_DIFF over a recording that holds a copy between two launches: refused NOT_WRITTEN by name");
+    ok = ok && eg_record_end(ctx, NULL, &plain) == EG_OK;
+    verdict(r, ok, "the same recording, still open after the refusal, ends as a plain graph");
+    eg_graph_free(ctx, plain);
+
+    ok = eg_record_begin(ctx) == EG_OK && eg_launch(ctx, f, NULL) == EG_OK && eg_launch(ctx, g, NULL) == EG_OK;
+    verdict(r, ok && refused(end_diff(ctx, 1, wrong, &none), EG_BAD_REQUEST, ctx, "not a derived unit") &&
+                   refused(eg_record_end(ctx, NULL, &none), EG_BAD_REQUEST, ctx, "not recording"),
+            "eg_record_end with a vjp of another unit: refused BAD_REQUEST by name, and the refusal ends the device recording");
+    ok = eg_record_begin(ctx) == EG_OK && eg_launch(ctx, f, NULL) == EG_OK && eg_record_end(ctx, NULL, &plain) == EG_OK;
+    verdict(r, ok, "a new eg_record_begin after the refused device tape plan records and ends");
+    eg_graph_free(ctx, plain);
+    eg_plan_free(ctx, f);
+    eg_plan_free(ctx, g);
+    release(r);
+}
+
 static struct units load_units(struct rig* r) {
     const struct units u = { load(r, "scale", 0x10), load(r, "scale_vjp", 0x11), load(r, "square", 0x12), load(r, "square_vjp", 0x13),
                              load(r, "mul2", 0x14), load(r, "mul2_vjp", 0x15), load(r, "uscale", 0x16), load(r, "uscale_vjp", 0x17),
@@ -509,6 +549,7 @@ int main(int argc, char** argv) {
         struct rig dev = { .ctx = dctx, .lib = argv[1], .device = 1 };
         const struct units du = load_units(&dev);
         gradient_rows(&dev, &du);
+        device_refusal_rows(&dev, &du);
         eg_ctx_free(dctx);
     }
     eg_ctx_free(ctx);
