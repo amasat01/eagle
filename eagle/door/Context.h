@@ -268,6 +268,20 @@ inline std::int64_t elements(const DLTensor& t) {
     return n;
 }
 
+/** @brief The 40-byte mirror of the team plane @p d (made by eagle for @p t) that a mirror slot reads: the plane's own pitches,
+ *  plane-major (per_lane, units) or lane-major (units, per_lane). */
+inline plugin::GRefMirror team_mirror(const DLTensor& d, const TeamPlaneFacts& t, std::int32_t device_type) {
+    const std::uint64_t units = static_cast<std::uint64_t>(elements(d) / t.per_lane);
+    plugin::GRefMirror m;
+    m.data_ = reinterpret_cast<double*>(static_cast<char*>(d.data) + d.byte_offset);
+    m.samples_ = units;
+    m.compStride_ = t.layout == EG_LAYOUT_PLANE_MAJOR ? units : 1;
+    m.sampleStride_ = t.layout == EG_LAYOUT_PLANE_MAJOR ? 1 : static_cast<std::uint64_t>(t.per_lane);
+    m.deviceType_ = device_type;
+    m.deviceId_ = 0;
+    return m;
+}
+
 /** @brief True when @p t is one compact row-major range (no strides, or the compact ones). */
 inline bool compact(const DLTensor& t) {
     if (t.strides == nullptr) return true;

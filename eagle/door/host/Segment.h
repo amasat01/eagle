@@ -131,15 +131,21 @@ inline std::uint64_t run_unit(const eg_plan_s& plan, std::size_t mi, const eg_un
     const exec::Partition part{ 0, count, plan.n_samples };
     std::vector<void*> stage_params;
     std::vector<plugin::ScalarHandle> handles;
+    std::vector<plugin::GRefMirror> mirrors;
     std::uint32_t n32 = static_cast<std::uint32_t>(plan.n_samples);
     if (!m.stages.empty()) {
         const StageFacts& st = m.stages[0];
         const std::size_t n_slots = st.unit->slots.size();
         stage_params.resize(n_slots);
         handles.resize(n_slots);
+        mirrors.resize(n_slots);
         for (std::size_t j = 0; j < n_slots; ++j) {
             if (st.source_of[j] >= 0) {
                 stage_params[j] = params[static_cast<std::size_t>(st.source_of[j])];
+            } else if (st.plane_of[j] >= 0 && st.unit->slots[j].mirror) {    // a vector plane: the generated code reads the plane's own pitches
+                mirrors[j] = team_mirror(plan.segteam[mi][static_cast<std::size_t>(st.plane_of[j])]->tensor->dl_tensor,
+                                         m.team_planes[static_cast<std::size_t>(st.plane_of[j])], plugin::kEagleAbiDeviceCPU);
+                stage_params[j] = &mirrors[j];
             } else if (st.plane_of[j] >= 0) {
                 const DLTensor& d = plan.segteam[mi][static_cast<std::size_t>(st.plane_of[j])]->tensor->dl_tensor;
                 const int role = st.unit->slots[j].role;

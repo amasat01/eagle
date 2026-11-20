@@ -326,6 +326,72 @@ static void check_fresh_load(eg_ctx* ctx) {
     rmdir(dir);
 }
 
+/* ---- a vector passed between stages through a team plane ------------------ */
+
+/* "vecsplit": stage 1 writes a width-4 plane, stage 2 reads it; y[i] = sum_j (j + 1) ((j + 1) x[i] + j), summed in that order. */
+static void check_stage_vector(eg_ctx* ctx) {
+    eg_unit *stages[2] = { NULL, NULL }, *split = NULL;
+    struct eg_unit_ref ref;
+    memset(&ref, 0, sizeof(ref));
+    ref.struct_size = sizeof(ref);
+    ref.name = "vecsplit";
+    memset(ref.digest, 0xE3, EG_DIGEST_BYTES);
+    struct eg_unit_load_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.path = library_path;
+    d.unit = &ref;
+    d.deps = stages;
+    d.n_deps = 2;
+    check(load(ctx, "vecw", 0xE1, &stages[0]) == EG_OK && load(ctx, "vecr", 0xE2, &stages[1]) == EG_OK &&
+              eg_unit_load(ctx, &d, &split) == EG_OK && split != NULL,
+          "stage vector: the two-stage split unit loads with its stages in deps");
+    if (split == NULL) return;
+    const eg_structure structures[2] = { EG_STRUCTURE_HOST_SERIAL, EG_STRUCTURE_HOST_TEAM };
+    const int64_t sizes[3] = { 37, 64, 301 };    /* none a multiple of the width */
+    for (int si = 0; si < 2; ++si)
+        for (int ni = 0; ni < 3; ++ni) {
+            const int64_t n = sizes[ni];
+            double* x = malloc(sizeof(double) * (size_t)n);
+            double* y = calloc((size_t)n, sizeof(double));
+            double* want = malloc(sizeof(double) * (size_t)n);
+            for (int64_t i = 0; i < n; ++i) {
+                x[i] = (double)((i * 7919) % 1000) / 37.0 - 13.0;
+                want[i] = 0.0;
+                for (int j = 0; j < 4; ++j) want[i] += (double)(j + 1) * ((double)(j + 1) * x[i] + (double)j);
+            }
+            struct tensor tx, ty;
+            tensor_init(&tx, x, n, 64);
+            tensor_init(&ty, y, n, 64);
+            eg_plane *px = NULL, *py = NULL;
+            eg_plan* p = NULL;
+            const int32_t plane_slots[2] = { 0, 1 };
+            eg_status s = eg_plane_wrap(ctx, &tx.managed, &px);
+            if (s == EG_OK) s = eg_plane_wrap(ctx, &ty.managed, &py);
+            if (s == EG_OK) s = plan(ctx, split, structures[si], n, 0, NULL, NULL, &p);
+            eg_plane* const bound[2] = { py, px };
+            struct eg_bind_desc b;
+            memset(&b, 0, sizeof(b));
+            b.struct_size = sizeof(b);
+            b.n_planes = 2;
+            b.plane_slots = plane_slots;
+            b.planes = bound;
+            uint64_t tiles = 0;
+            if (s == EG_OK) s = eg_bind(ctx, p, &b);
+            if (s == EG_OK) s = eg_launch(ctx, p, &tiles);
+            char what[160];
+            snprintf(what, sizeof(what), "stage vector: %s n=%lld: every lane of the passed vector, bitwise",
+                     structures[si] == EG_STRUCTURE_HOST_SERIAL ? "HOST_SERIAL" : "HOST_TEAM", (long long)n);
+            check(s == EG_OK && memcmp(y, want, sizeof(double) * (size_t)n) == 0, what);
+            eg_plane_free(ctx, px);
+            eg_plane_free(ctx, py);
+            eg_plan_free(ctx, p);
+            free(x), free(y), free(want);
+        }
+    check(eg_unit_free(ctx, split) == EG_OK && eg_unit_free(ctx, stages[0]) == EG_OK && eg_unit_free(ctx, stages[1]) == EG_OK,
+          "stage vector: the split unit and its stages freed");
+}
+
 /* ---- refusals ------------------------------------------------------------ */
 
 static void check_error_protocol(eg_ctx* ctx) {
@@ -4180,6 +4246,7 @@ int main(int argc, char** argv) {
     check_box(ctx);
     check_even_split(ctx);
     check_fresh_load(ctx);
+    check_stage_vector(ctx);
     check_made(ctx);
     check_alloc(ctx, unit);
     check_clear(ctx, unit);

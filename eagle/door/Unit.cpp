@@ -891,6 +891,14 @@ void resolve_stages(eg_ctx& ctx, const eg_unit_load_desc& d, eg_unit_s& unit) {
                 }
                 if (st.source_of[j] < 0 && st.plane_of[j] < 0 && su.slots[j].role != EG_ROLE_NSAMPLES)
                     refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + at + " slot '" + nm + "' joins no source slot, no team plane and no cell");
+                if (st.plane_of[j] >= 0 && su.slots[j].mirror) {    // a vector slot reads the plane as components: the widths must agree
+                    std::int64_t width = 1;
+                    for (std::int64_t e : su.slots[j].shape) width *= e;
+                    const std::int64_t per_lane = unit.team_planes[static_cast<std::size_t>(st.plane_of[j])].per_lane;
+                    if (width != per_lane)
+                        refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + at + " slot '" + nm + "' has " + std::to_string(width) +
+                               " components but the team plane it joins has " + std::to_string(per_lane) + " per lane");
+                }
             }
             for (const std::string& out : st.cells_out) {    // the cells the stage says it folds are cells its unit has
                 bool found = false;

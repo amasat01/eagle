@@ -78,6 +78,7 @@ inline std::uint64_t run_split(const eg_plan_s& plan, int threads) {
         const std::size_t n_slots = st.unit->slots.size();
         std::vector<void*> params(n_slots);
         std::vector<plugin::ScalarHandle> handles(n_slots);
+        std::vector<plugin::GRefMirror> mirrors(n_slots);
         std::uint32_t n32 = static_cast<std::uint32_t>(plan.n_samples);
         for (std::size_t j = 0; j < n_slots; ++j) {
             if (st.row_of[j] >= 0 || st.comp_of[j] >= 0) {    // the rows this stage writes into a cell: eagle's
@@ -103,6 +104,10 @@ inline std::uint64_t run_split(const eg_plan_s& plan, int threads) {
                 params[j] = &h;
             } else if (st.source_of[j] >= 0) {
                 params[j] = plan.params[static_cast<std::size_t>(st.source_of[j])];
+            } else if (st.plane_of[j] >= 0 && st.unit->slots[j].mirror) {    // a vector plane: the generated code reads the plane's own pitches
+                mirrors[j] = team_mirror(plan.team[static_cast<std::size_t>(st.plane_of[j])]->tensor->dl_tensor,
+                                         plan.unit->team_planes[static_cast<std::size_t>(st.plane_of[j])], plugin::kEagleAbiDeviceCPU);
+                params[j] = &mirrors[j];
             } else if (st.plane_of[j] >= 0) {
                 const DLTensor& d = plan.team[static_cast<std::size_t>(st.plane_of[j])]->tensor->dl_tensor;
                 const int role = st.unit->slots[j].role;

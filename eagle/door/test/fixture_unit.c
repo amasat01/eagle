@@ -30,6 +30,9 @@
  *  - "cells": two cells of rows of 4 samples (a MIN and a MAX); "cellsum": a SUM cell, which the meta cannot complete; "keyed": a keyed
  *    accumulate whose companion eagle makes and whose fold entry runs after each launch; "keyedbad": the same
  *    with no fold entry.
+ *  - "vecsplit": a split unit of two stages, "vecw" and "vecr", that pass a width-4 vector through an eagle-made plane "cross":
+ *    stage 1 writes cross[j, i] = (j + 1) * x[i] + j, stage 2 reads it as y[i] = sum_j (j + 1) * cross[j, i]; both read the
+ *    plane through its 40-byte mirror (the component and sample pitches it states).
  *  - "count1", "count3": a finishing unit that steps k += 1 until k >= limit,
  *    then marks the sample and counts it into the finished counter; one or
  *    three steps per launch (slots: k, limit, mask, the counter).
@@ -95,6 +98,8 @@ EG_FIXTURE_EXPORT void spans_host(void* const* params, int64_t base, int64_t cou
 EG_FIXTURE_EXPORT void mix2_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void widesum_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void prefixsum_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void vecw_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void vecr_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void count1_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void count3_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void count1a_host(void* const* params, int64_t base, int64_t count, int64_t n);
@@ -140,6 +145,33 @@ void axpb_host(void* const* params, int64_t base, int64_t count, int64_t n) {
     const double b = *(const double*)params[3];
     (void)n;
     for (int64_t i = base; i < base + count; ++i) y[i] = a * x[i] + AXPB_B_FACTOR * b;
+}
+
+/* The width of the "cross" vector the "vecsplit" stages pass. */
+#define VEC_WIDTH 4
+
+/* Element (component j, sample i) of a 40-byte mirror: the pitches are the plane's own. */
+static double* mirror_at(const struct fixture_mirror* m, int64_t j, int64_t i) {
+    return m->data + j * (int64_t)m->comp_stride + i * (int64_t)m->sample_stride;
+}
+
+void vecw_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    const struct fixture_mirror* cross = (const struct fixture_mirror*)params[0];
+    const double* x = (const double*)((const struct fixture_handle*)params[1])->data;
+    (void)n;
+    for (int64_t i = base; i < base + count; ++i)
+        for (int64_t j = 0; j < VEC_WIDTH; ++j) *mirror_at(cross, j, i) = (double)(j + 1) * x[i] + (double)j;
+}
+
+void vecr_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    double* y = (double*)((const struct fixture_handle*)params[0])->data;
+    const struct fixture_mirror* cross = (const struct fixture_mirror*)params[1];
+    (void)n;
+    for (int64_t i = base; i < base + count; ++i) {
+        double sum = 0.0;
+        for (int64_t j = 0; j < VEC_WIDTH; ++j) sum += (double)(j + 1) * *mirror_at(cross, j, i);
+        y[i] = sum;
+    }
 }
 
 void wait_host(void* const* params, int64_t base, int64_t count, int64_t n) {
@@ -1155,6 +1187,47 @@ static const struct eg_unit_body mix2_body = { .struct_size = sizeof(struct eg_u
     .slots = mix2_slots, .n_dispatches = 2, .dispatches = mix2_list };
 SEG_UNIT(unit_mix2, "mix2", 0xBA, "mix2_host", mix2_body, launch, &finish1);
 
+/* "vecsplit": stage "vecw" writes the width-4 plane "cross", stage "vecr" reads it. */
+static const int64_t vec_shape[1] = { VEC_WIDTH };
+static const struct eg_unit_slot slot_cross_out = {
+    .struct_size = sizeof(struct eg_unit_slot), .role = EG_ROLE_MUTABLE, .dtype = EG_DTYPE_REAL, .rank = 1,
+    .like_slot = -1, .shape = vec_shape, .name = "cross" };
+static const struct eg_unit_slot slot_cross_in = {
+    .struct_size = sizeof(struct eg_unit_slot), .role = EG_ROLE_VEC_IN, .dtype = EG_DTYPE_REAL, .rank = 1,
+    .like_slot = -1, .shape = vec_shape, .name = "cross" };
+static const struct eg_unit_slot* const vecw_slots[] = { &slot_cross_out, &slot_x };
+static const struct eg_unit_slot* const vecr_slots[] = { &slot_y, &slot_cross_in };
+static const struct eg_unit_body vecw_body = {
+    .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = 2, .slots = vecw_slots };
+static const struct eg_unit_body vecr_body = {
+    .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = 2, .slots = vecr_slots };
+static const struct eg_unit_meta unit_vecw = {
+    .struct_size = sizeof(struct eg_unit_meta), .name = "vecw", .digest = DIGEST(0xE1), .pattern = EG_PATTERN_PURE,
+    .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "vecw_host", .device_image_format = EG_IMAGE_NONE,
+    .body = &vecw_body, .launch = &launch };
+static const struct eg_unit_meta unit_vecr = {
+    .struct_size = sizeof(struct eg_unit_meta), .name = "vecr", .digest = DIGEST(0xE2), .pattern = EG_PATTERN_PURE,
+    .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "vecr_host", .device_image_format = EG_IMAGE_NONE,
+    .body = &vecr_body, .launch = &launch };
+static const struct eg_unit_ref vecw_ref = { .struct_size = sizeof(struct eg_unit_ref), .name = "vecw", .digest = DIGEST(0xE1) };
+static const struct eg_unit_ref vecr_ref = { .struct_size = sizeof(struct eg_unit_ref), .name = "vecr", .digest = DIGEST(0xE2) };
+static const struct eg_unit_stage vec_stage0 = { .struct_size = sizeof(struct eg_unit_stage), .unit = &vecw_ref };
+static const struct eg_unit_stage vec_stage1 = { .struct_size = sizeof(struct eg_unit_stage), .unit = &vecr_ref };
+static const struct eg_unit_stage* const vec_stages[] = { &vec_stage0, &vec_stage1 };
+static const struct eg_unit_team_plane vec_cross = {
+    .struct_size = sizeof(struct eg_unit_team_plane), .dtype = EG_DTYPE_REAL, .unit = EG_UNIT_LANE,
+    .layout = EG_LAYOUT_PLANE_MAJOR, .wide = EG_WIDE_NONE, .keyed = -1, .target_slot = -1, .per_lane = VEC_WIDTH,
+    .name = "cross", .target_stage = -1 };
+static const struct eg_unit_team_plane* const vec_planes[] = { &vec_cross };
+static const struct eg_unit_slot* const vecsplit_slots[] = { &slot_y, &slot_x };
+static const struct eg_unit_body vecsplit_body = {
+    .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = 2, .n_team_planes = 1,
+    .slots = vecsplit_slots, .team_planes = vec_planes };
+static const struct eg_unit_meta unit_vecsplit = {
+    .struct_size = sizeof(struct eg_unit_meta), .name = "vecsplit", .digest = DIGEST(0xE3), .pattern = EG_PATTERN_PURE,
+    .scalar_type = EG_SCALAR_FLOAT64, .host_entry = NULL, .device_image_format = EG_IMAGE_NONE,
+    .n_stages = 2, .stages = vec_stages, .body = &vecsplit_body, .launch = &launch };
+
 static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &unit_tick, &unit_spans, &unit_prefixsum, &unit_widesum, &unit_mix2, &unit_split, &unit_count1,
                                                     &unit_count3, &unit_count1a, &unit_count3a, &unit_countA, &unit_countAa, &unit_vecs, &unit_count1i,
                                                     &unit_count1ia, &unit_count1e, &unit_lanes, &unit_prefix, &unit_count1g, &unit_widemul,
@@ -1162,13 +1235,14 @@ static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &uni
                                                     &unit_keyedbad, &unit_cellsum, &unit_axpb_cards, &unit_axpb_badflag,
                                                     &unit_sg_cls, &unit_sg_k0, &unit_sg_k1, &unit_sgf, &unit_dg_k0, &unit_dg_k1, &unit_dg_sweep, &unit_dgf,
                                                     &unit_sga_cls, &unit_sga_k0, &unit_sga_k1, &unit_sga_rare, &unit_sga_even, &unit_sga_scalar, &unit_sga_heavy,
-                                                    &unit_auto_nocls, &unit_auto_nobr, &unit_auto_sweep, &unit_auto_nocost, &unit_auto_group, &unit_auto_steps, &unit_auto_k3 };
+                                                    &unit_auto_nocls, &unit_auto_nobr, &unit_auto_sweep, &unit_auto_nocost, &unit_auto_group, &unit_auto_steps, &unit_auto_k3,
+                                                    &unit_vecw, &unit_vecr, &unit_vecsplit };
 
 static const struct eg_library_meta library = {
     .struct_size = sizeof(struct eg_library_meta),
     .schema_major = EG_META_SCHEMA_MAJOR,
     .schema_minor = 0,
-    .n_units = 56,
+    .n_units = 59,
     .units = units,
 };
 
