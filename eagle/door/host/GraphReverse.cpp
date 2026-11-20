@@ -398,6 +398,7 @@ std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<eg_plan_s*>&
         for (std::size_t L = 0; L < plan.loops.size(); ++L) {
             const RLoop& loop = plan.loops[L];
             LoopTape& tape = diff->loops[L];
+            if (loop.counter != nullptr) tape.counter = find_plane(*diff, loop.counter);
             for (int m = loop.first_leaf; m < loop.first_leaf + loop.cap * loop.per_iter; ++m) {
                 const DiffNode& node = diff->nodes[static_cast<std::size_t>(plan.leaves[static_cast<std::size_t>(m)].node)];
                 if (node.writes.empty() && node.overwrites.empty()) continue;
@@ -679,6 +680,15 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
             }
         }
     };
+    // Make the counter plane of @p tape read @p value, for the body launches the reverse re-runs or pulls back (none when no launch binds it).
+    const auto write_counter = [&](LoopTape& tape, int value) {
+        if (tape.counter < 0 || tape.shown == value) return;
+        const std::uint32_t word = static_cast<std::uint32_t>(value);
+        char* at = live(*d.planes[static_cast<std::size_t>(tape.counter)]);
+        if (D != nullptr) device_write(*D, at, &word, sizeof(word));
+        else std::memcpy(at, &word, sizeof(word));
+        tape.shown = value;
+    };
     // Rebuild window @p group of loop @p index: re-launch its body's plans over private copies, from the window's checkpoint, saving
     // each leaf's pre-write copies where the snapshot entries share their buffers.
     const auto rebuild = [&](int index, int group) {
@@ -696,7 +706,8 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
             const std::size_t at = position(tape, idx);
             return at < tape.planes.size() ? state[at].data() : value_of(idx, static_cast<std::size_t>(loop.first_leaf));
         };
-        for (int k = group * loop.w; k < std::min(loop.cap, (group + 1) * loop.w); ++k)
+        for (int k = group * loop.w; k < std::min(loop.cap, (group + 1) * loop.w); ++k) {
+            write_counter(tape, k);
             for (int local = 0; local < loop.per_iter; ++local) {
                 const std::size_t m = static_cast<std::size_t>(loop.first_leaf + k * loop.per_iter + local);
                 if (!leaf_ran(d, m)) continue;
@@ -727,6 +738,7 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
                 }
                 inner_free(ctx, rp);
             }
+        }
         tape.built = group;
     };
     // The adjoints @p adjoint of the planes the run, copy, sum reduce, transform or product @p node (leaf @p i) wrote, pulled back to what it read.
@@ -845,11 +857,23 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
             }
         }
     };
-    for (LoopTape& tape : d.loops) tape.built = -1;
+    for (LoopTape& tape : d.loops) {
+        tape.built = -1;
+        tape.shown = -1;
+        if (tape.counter < 0) continue;
+        std::uint32_t word = 0;
+        const char* at = live(*d.planes[static_cast<std::size_t>(tape.counter)]);
+        if (D != nullptr) device_read(*D, at, &word, sizeof(word));
+        else std::memcpy(&word, at, sizeof(word));
+        tape.final_count = static_cast<int>(word);
+    }
     for (std::size_t back = 0; back < n_leaves; ++back) {
         const std::size_t i = n_leaves - 1 - back;
         if (!leaf_ran(d, i)) continue;         // a leaf that did not run is the identity: what it would write keeps its adjoint
-        if (d.plan.leaves[i].loop >= 0) rebuild(d.plan.leaves[i].loop, d.plan.leaves[i].iter / d.plan.loops[static_cast<std::size_t>(d.plan.leaves[i].loop)].w);
+        if (d.plan.leaves[i].loop >= 0) {
+            rebuild(d.plan.leaves[i].loop, d.plan.leaves[i].iter / d.plan.loops[static_cast<std::size_t>(d.plan.leaves[i].loop)].w);
+            write_counter(d.loops[static_cast<std::size_t>(d.plan.leaves[i].loop)], d.plan.leaves[i].iter);
+        }
         const DiffNode& node = d.nodes[static_cast<std::size_t>(d.plan.leaves[i].node)];
         std::vector<Bytes> adjoint;
         bool flows = false;
@@ -923,6 +947,7 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
             pending[static_cast<std::size_t>(l.plane)].push_back(std::move(c));
         }
     }
+    for (LoopTape& tape : d.loops) write_counter(tape, tape.final_count);    // the counter reads the forward's count again
     std::vector<Bytes> result;                  // every gradient is known before any is written, so a refusal writes none
     std::vector<int> taints;
     for (std::int32_t k = 0; k < r.n_grads; ++k) {

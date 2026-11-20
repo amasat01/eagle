@@ -173,7 +173,8 @@ NodeFacts facts_of(const Node& n) {
         f.has_baseline = n.baseline != nullptr;
         f.max_iters = n.max_iters;
         f.cell_index = n.cell_index;
-        f.loop_controlled = n.counter != nullptr || n.limit != nullptr || n.brk != nullptr;
+        f.has_brk = n.brk != nullptr;
+        f.counter = n.counter;
     } else if (n.kind == Node::Run) {
         f.n_plans = static_cast<std::int32_t>(n.runner->plans.size());
     }
@@ -337,7 +338,7 @@ void run_node(eg_ctx& ctx, const Node& n, Tape* tape) {
             const auto save = [&](int extra) {      // what the test sees, for the reverse
                 if (tape == nullptr) return;
                 TestSave& t = tape->diff->saved[static_cast<std::size_t>(tape->diff->plan.test_of.at(tape_key(*tape, n, extra)))];
-                t = { true, cell(), base() };
+                t = { true, n.cell != nullptr ? cell() : 1, base() };
             };
             if (n.cond == EG_COND_IF) {
                 save(-1);
@@ -472,6 +473,7 @@ void check_loop_control(eg_ctx& ctx, const eg_cond_desc& d) {
     if (d.cell == nullptr && d.limit == nullptr && d.brk == nullptr)
         refuse(EG_BAD_REQUEST, "eg_record_cond_begin: a loop needs a cell, a limit or a brk to stop");
     if (d.cell == nullptr && d.baseline != nullptr) refuse(EG_BAD_REQUEST, "eg_cond_desc.baseline: needs a cell to compare with");
+    if (d.cell == nullptr && (d.flags & EG_COND_NEGATE) != 0) refuse(EG_BAD_REQUEST, "eg_cond_desc.flags: EG_COND_NEGATE needs a cell to invert");
     if (d.counter != nullptr) check_control_plane(ctx, d.counter, 0, true, "eg_cond_desc.counter");
     if (d.limit != nullptr) check_control_plane(ctx, d.limit, d.limit_index, false, "eg_cond_desc.limit");
     if (d.brk != nullptr) check_control_plane(ctx, d.brk, d.brk_index, false, "eg_cond_desc.brk");

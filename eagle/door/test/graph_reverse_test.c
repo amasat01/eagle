@@ -182,7 +182,7 @@ struct units {
     eg_unit *scale, *scale_vjp, *square, *square_vjp, *mul2, *mul2_vjp, *uscale, *uscale_vjp, *tape_vjp, *open_vjp;
     eg_unit *fan, *fan_vjp, *norm2, *norm2_vjp;
     eg_unit *tick, *scatter_vjp;
-    eg_unit *iscale, *iscale_vjp, *scale_vjp_comp;
+    eg_unit *iscale, *iscale_vjp, *scale_vjp_comp, *cscale, *cscale_vjp;
 };
 
 static eg_status end_diff(eg_ctx* ctx, int32_t n, const struct eg_node_vjp* v, eg_graph** g) {
@@ -894,39 +894,101 @@ static void while_refusal_row(struct rig* r, const struct units* u) {
     release(r);
 }
 
-/* A WHILE holding a counter, a limit or a brk is refused by EG_RECORD_DIFF by name (the reverse re-launches the body, which would set none of them); the recording ends plain. */
-static void while_control_refusal_row(struct rig* r, const struct units* u) {
+/* A WHILE holding a brk is refused by EG_RECORD_DIFF by name (the reverse re-launches the body and would not stop where the forward did); the recording ends plain. */
+static void while_brk_refusal_row(struct rig* r, const struct units* u) {
     eg_ctx* ctx = r->ctx;
     double x[N], t[N], a[1] = { 0.9 };
     int32_t c[N];
-    uint32_t word[3] = { 0, 4, 0 };
-    struct tensor tx, tt, ta, tc, tw[3];
+    uint32_t word = 0;
+    struct tensor tx, tt, ta, tc, tw;
     fill(x, a, 0.5);
     for (int i = 0; i < N; ++i) c[i] = 1;
-    eg_plane *px = mk(r, &tx, N, x), *pt = mk(r, &tt, N, t), *pa = mk(r, &ta, 1, a), *pc = mk_i32(r, &tc, N, c);
-    eg_plane* pw[3];
-    for (int i = 0; i < 3; ++i) pw[i] = mk_typed(r, &tw[i], 1, &word[i], kDLUInt, 32);
+    eg_plane *px = mk(r, &tx, N, x), *pt = mk(r, &tt, N, t), *pa = mk(r, &ta, 1, a), *pc = mk_i32(r, &tc, N, c), *pw = mk_typed(r, &tw, 1, &word, kDLUInt, 32);
     eg_plane* a1[] = { px, pa, pt };
     eg_plan* f1 = plan_with(r, u->scale, 3, a1, NULL);
     const struct eg_node_vjp vjps[] = { { 0, u->scale_vjp } };
-    int ok = f1 && pc && pw[0] && pw[1] && pw[2];
-    for (int member = 0; ok && member < 3; ++member) {
-        struct eg_cond_desc d;
-        memset(&d, 0, sizeof(d));
-        d.struct_size = sizeof(d);
-        d.kind = EG_COND_WHILE;
-        d.cell = pc;
-        d.max_iters = 4;
-        d.counter = member == 0 ? pw[0] : NULL;
-        d.limit = member == 1 ? pw[1] : NULL;
-        d.brk = member == 2 ? pw[2] : NULL;
-        eg_graph *g = NULL, *plain = NULL;
-        ok = eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_OK && eg_launch(ctx, f1, NULL) == EG_OK && eg_record_cond_end(ctx) == EG_OK &&
-             refused(end_diff(ctx, 1, vjps, &g), EG_NOT_WRITTEN, ctx, "a counter, a limit or a break") && g == NULL && eg_record_end(ctx, NULL, &plain) == EG_OK;
-        eg_graph_free(ctx, plain);
-    }
-    verdict(r, ok, "EG_RECORD_DIFF over a WHILE holding a counter, a limit or a brk is refused by name; the recording stays open and ends plain");
+    struct eg_cond_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.kind = EG_COND_WHILE;
+    d.cell = pc;
+    d.max_iters = 4;
+    d.brk = pw;
+    eg_graph *g = NULL, *plain = NULL;
+    int ok = f1 && pc && pw && eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_OK && eg_launch(ctx, f1, NULL) == EG_OK &&
+             eg_record_cond_end(ctx) == EG_OK && refused(end_diff(ctx, 1, vjps, &g), EG_NOT_WRITTEN, ctx, "holds a break") && g == NULL &&
+             eg_record_end(ctx, NULL, &plain) == EG_OK;
+    verdict(r, ok, "EG_RECORD_DIFF over a WHILE holding a brk is refused by name; the recording stays open and ends plain");
+    eg_graph_free(ctx, plain);
     eg_plan_free(ctx, f1);
+    release(r);
+}
+
+/* x <- (k + 1) a x in iteration k of a WHILE stopped by a limit L alone (no cell), the body reading the loop's counter k: after L iterations x = a^L L! x0.
+ * Each launch + reverse pair is checked against the closed form (dJ/dx0 = a^L L!, dJ/da = L a^(L-1) L! x0) and central differences of the forward; the limit is
+ * changed between the pairs, and the counter reads L again after each reverse. */
+static void limit_counter_row(struct rig* r, const struct units* u) {
+    eg_ctx* ctx = r->ctx;
+    enum { CAP = 8 };
+    double x[N], x0[N], t[N], a[1] = { 0.9 }, seed[N], gx[N], ga[1];
+    uint32_t counter = 77, limit = 3;
+    struct tensor tx, tt, ta, ts, tgx, tga, tn, tl;
+    fill(x, a, 0.5);
+    a[0] = 0.9;
+    for (int i = 0; i < N; ++i) {
+        x0[i] = x[i];
+        seed[i] = 1.0;
+    }
+    eg_plane *px = mk(r, &tx, N, x), *pt = mk(r, &tt, N, t), *pa = mk(r, &ta, 1, a), *ps = mk(r, &ts, N, seed), *pgx = mk(r, &tgx, N, gx), *pga = mk(r, &tga, 1, ga);
+    eg_plane *pn = mk_typed(r, &tn, 1, &counter, kDLUInt, 32), *pl = mk_typed(r, &tl, 1, &limit, kDLUInt, 32);
+    eg_plane *a1[] = { px, pa, pt }, *a2[] = { pt, pn, px };
+    eg_plan *f1 = plan_with(r, u->scale, 3, a1, NULL), *f2 = plan_with(r, u->cscale, 3, a2, NULL);
+    const struct eg_node_vjp vjps[] = { { 0, u->scale_vjp }, { 1, u->cscale_vjp } };
+    struct eg_cond_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.kind = EG_COND_WHILE;
+    d.max_iters = CAP;
+    d.limit = pl;
+    d.counter = pn;
+    eg_graph* g = NULL;
+    int ok = f1 && f2 && pn && pl && eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_OK && eg_launch(ctx, f1, NULL) == EG_OK &&
+             eg_launch(ctx, f2, NULL) == EG_OK && eg_record_cond_end(ctx) == EG_OK && end_diff(ctx, 2, vjps, &g) == EG_OK;
+    eg_plane *in[] = { px, pa }, *gr[] = { pgx, pga };
+    const uint32_t limits[2] = { 3, 5 };
+    for (int pass = 0; ok && pass < 2; ++pass) {
+        const uint32_t L = limits[pass];
+        double fact = 1.0, jsum[2] = { 0.0, 0.0 };
+        for (uint32_t k = 2; k <= L; ++k) fact *= (double)k;
+        const double a0 = 0.9, h = 1e-6;
+        for (int side = 0; ok && side < 2; ++side) {         /* central differences of the forward in a */
+            a[0] = a0 + (side ? -h : h);
+            for (int i = 0; i < N; ++i) x[i] = x0[i];
+            limit = L;
+            up(r);
+            ok = eg_graph_launch(ctx, g) == EG_OK;
+            down(r);
+            for (int i = 0; i < N; ++i) jsum[side] += x[i];
+        }
+        a[0] = a0;
+        for (int i = 0; i < N; ++i) x[i] = x0[i];
+        limit = L;
+        up(r);
+        ok = ok && eg_graph_launch(ctx, g) == EG_OK && reverse(ctx, g, px, ps, 2, in, gr) == EG_OK;
+        down(r);
+        double want[N], want_a = 0.0;
+        for (int i = 0; i < N; ++i) {
+            want[i] = pow(a0, (double)L) * fact;
+            want_a += (double)L * pow(a0, (double)L - 1.0) * fact * x0[i];
+        }
+        const double central = (jsum[0] - jsum[1]) / (2.0 * h);
+        ok = ok && counter == L && close_to(gx, want, N) && close_to(ga, &want_a, 1) && fabs(central - ga[0]) < 1e-5 * fabs(ga[0]);
+        if (!ok) printf("      limit %u: counter %u, dJ/da %.12g, closed form %.12g, central %.12g\n", L, counter, ga[0], want_a, central);
+    }
+    verdict(r, ok, "a DIFF WHILE stopped by a limit (3, then 5 between two launch + reverse pairs) whose body reads the counter, x <- (k + 1) a x: dJ/dx0 and dJ/da match the closed form and central differences, and the counter reads the count again");
+    eg_graph_free(ctx, g);
+    eg_plan_free(ctx, f1);
+    eg_plan_free(ctx, f2);
     release(r);
 }
 
@@ -949,7 +1011,8 @@ static void conditional_rows(struct rig* r, const struct units* u) {
     window_reader_row(r, u);
     fork_in_arm_row(r, u);
     while_refusal_row(r, u);
-    while_control_refusal_row(r, u);
+    while_brk_refusal_row(r, u);
+    limit_counter_row(r, u);
 }
 
 /* ---- reverse options: bitwise report, strict, passes, a non-float input (host) ------------------------------------------------ */
@@ -2925,10 +2988,11 @@ static struct units load_units(struct rig* r) {
                              load(r, "mul2", 0x14), load(r, "mul2_vjp", 0x15), load(r, "uscale", 0x16), load(r, "uscale_vjp", 0x17),
                              load(r, "scale_tape_vjp", 0x18), load(r, "scale_open_vjp", 0x19),
                              load(r, "fan", 0x1a), load(r, "fan_vjp", 0x1b), load(r, "norm2", 0x1c), load(r, "norm2_vjp", 0x1d), load(r, "tick", 0x1e), load(r, "scale_scatter_vjp", 0x1f),
-                             load(r, "iscale", 0x20), load(r, "iscale_vjp", 0x21), load(r, "scale_vjp_comp", 0x22) };
+                             load(r, "iscale", 0x20), load(r, "iscale_vjp", 0x21), load(r, "scale_vjp_comp", 0x22),
+                             load(r, "cscale", 0x23), load(r, "cscale_vjp", 0x24) };
     verdict(r, u.scale && u.scale_vjp && u.square && u.square_vjp && u.mul2 && u.mul2_vjp && u.uscale && u.uscale_vjp && u.tape_vjp &&
-                   u.open_vjp && u.fan && u.fan_vjp && u.norm2 && u.norm2_vjp && u.tick && u.scatter_vjp && u.iscale && u.iscale_vjp && u.scale_vjp_comp,
-            "the graph fixture's nineteen units load");
+                   u.open_vjp && u.fan && u.fan_vjp && u.norm2 && u.norm2_vjp && u.tick && u.scatter_vjp && u.iscale && u.iscale_vjp && u.scale_vjp_comp && u.cscale && u.cscale_vjp,
+            "the graph fixture's twenty-one units load");
     return u;
 }
 

@@ -567,8 +567,9 @@ struct eg_reduce_desc {
  *  A break from the middle of a body needs no member: record a write of ``brk`` (a launch that sets it from a cell), then the rest
  *  of the body inside an IF arm on ``brk`` with EG_COND_NEGATE (arms nest in WHILE bodies); the loop stops after that iteration.
  *
- *  A recording made with EG_RECORD_DIFF refuses a WHILE holding a ``counter``, ``limit`` or ``brk`` (its reverse rebuilds the body
- *  by re-launching it, which would neither set the counter nor honour the break). */
+ *  A recording made with EG_RECORD_DIFF takes a WHILE with a ``counter`` and a ``limit`` (the reverse follows the forward's iteration
+ *  count and writes the counter for each iteration it rebuilds, restoring the final count; only an outermost loop's counter) and
+ *  refuses one holding a ``brk``, by name. */
 struct eg_cond_desc {
     uint32_t struct_size;
     uint32_t flags;          /**< EG_COND_NEGATE, or 0 */

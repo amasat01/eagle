@@ -541,7 +541,7 @@ __global__ void saveTestKernel(const unsigned* cell, const unsigned* baseline, c
     unsigned k = iter != nullptr ? *iter : 0u;
     if (k >= capacity) k = capacity - 1;
     dst[3 * k] = 1u;
-    dst[3 * k + 1] = *cell;
+    dst[3 * k + 1] = cell != nullptr ? *cell : 1u;
     dst[3 * k + 2] = baseline != nullptr ? *baseline : 0u;
 }
 

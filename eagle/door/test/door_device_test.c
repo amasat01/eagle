@@ -2100,17 +2100,25 @@ static void while_control_device(eg_ctx* ctx, const char* dev_lib) {
     check(ok, "a device WHILE with a limit and no cell runs limit iterations (4), and the limit changed between replays is read at the replay (2)");
     eg_graph_free(ctx, g);
 
-    /* brk: the body copies its counter into brk, so iteration 1 breaks: 2 iterations; a second replay does the same (brk zeroed at entry) */
+    /* brk: a body kernel sets brk when the counter reads 3, so 4 iterations run; a second replay does the same (brk zeroed at entry) */
+    eg_unit* brkat = NULL;
+    eg_plan* brk_plan = NULL;
+    const int32_t two_slots[2] = { 0, 1 };
+    eg_plane* two_planes[2] = { pn, pb };
+    ok = load(ctx, dev_lib, "dbrkat", 0xDE, &brkat) == EG_OK && plan_n(ctx, brkat, EG_STRUCTURE_DEVICE, 1, 0, NULL, NULL, &brk_plan) == EG_OK &&
+         bind_planes(ctx, brk_plan, 2, two_slots, two_planes) == EG_OK;
     memset(&d, 0, sizeof(d));
     d.struct_size = sizeof(d), d.kind = EG_COND_WHILE, d.max_iters = 50, d.brk = pb, d.counter = pn;
-    ok = eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_OK && eg_launch(ctx, a.plan, NULL) == EG_OK && eg_copy(ctx, pn, pb) == EG_OK &&
+    ok = ok && eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_OK && eg_launch(ctx, a.plan, NULL) == EG_OK && eg_launch(ctx, brk_plan, NULL) == EG_OK &&
          eg_record_cond_end(ctx) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK;
     for (int rep = 0; ok && rep < 2; ++rep) {
         wcount_reset(&a);
-        ok = eg_graph_launch(ctx, g) == EG_OK && eg_sync(ctx) == EG_OK && wcount_k(&a) == 2.0 && device_word(dn) == 2 && device_word(db) == 1;
+        ok = eg_graph_launch(ctx, g) == EG_OK && eg_sync(ctx) == EG_OK && wcount_k(&a) == 4.0 && device_word(dn) == 4 && device_word(db) == 1;
     }
-    check(ok, "a device WHILE whose body sets brk at iteration 1 runs 2 iterations, and a second replay runs 2 again (brk zeroed at entry)");
+    check(ok, "a device WHILE whose body kernel sets brk at iteration 3 runs 4 iterations, and a second replay runs 4 again (brk zeroed at entry)");
     eg_graph_free(ctx, g);
+    eg_plan_free(ctx, brk_plan);
+    eg_unit_free(ctx, brkat);
 
     /* mid-body break: [A, brk = counter, IF not brk { B }] under a limit of 5: B ran one time fewer than A (oracle: the same work as a host loop) */
     memset(&d, 0, sizeof(d));

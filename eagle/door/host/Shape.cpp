@@ -229,9 +229,12 @@ ReversePlan GraphShape::reverse_plan() const {
                         }
                         continue;
                     }
-                    if (n.facts.loop_controlled)
-                        refuse(EG_NOT_WRITTEN, "eg_record_end: the WHILE of node " + std::to_string(c) + " holds a counter, a limit or a break; the reverse rebuilds its body by "
-                               "re-launching it, which would neither set the counter nor honour the limit or the break, so EG_RECORD_DIFF cannot record it");
+                    if (n.facts.has_brk)
+                        refuse(EG_NOT_WRITTEN, "eg_record_end: the WHILE of node " + std::to_string(c) + " holds a break; the reverse rebuilds its body by re-launching it "
+                               "and would not stop where the forward did, so EG_RECORD_DIFF cannot record a loop holding a break");
+                    if (n.facts.counter != nullptr && !iters.empty())
+                        refuse(EG_NOT_WRITTEN, "eg_record_end: the WHILE of node " + std::to_string(c) + " sits in another WHILE and holds a counter; "
+                               "only an outermost loop's counter is rewritten when the reverse rebuilds its iterations");
                     if (n.facts.max_iters < 1)
                         refuse(EG_BAD_REQUEST, "eg_record_end: the WHILE of node " + std::to_string(c) + " has max_iters 0; EG_RECORD_DIFF needs a cap, which bounds the tape");
                     const bool outermost = iters.empty();   // an inner WHILE stays unrolled inside its outer iteration
@@ -251,7 +254,7 @@ ReversePlan GraphShape::reverse_plan() const {
                         const int per = static_cast<int>(plan.leaves.size() - first) / cap;
                         if (per > 0) {          // a body with no launch has nothing to rebuild
                             plan.loop_of_cond[c] = loop;
-                            plan.loops.push_back({ c, cap, w, (cap + w - 1) / w, static_cast<int>(first), per });
+                            plan.loops.push_back({ c, cap, w, (cap + w - 1) / w, static_cast<int>(first), per, n.facts.counter });
                         }
                         loop = -1;
                         iteration = -1;

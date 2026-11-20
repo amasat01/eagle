@@ -2137,7 +2137,8 @@ void device_record_cond_begin(eg_ctx& ctx, const eg_cond_desc* desc) {
     facts.has_baseline = d.baseline != nullptr;
     facts.max_iters = d.max_iters;
     facts.cell_index = d.cell_index;
-    facts.loop_controlled = d.counter != nullptr || d.limit != nullptr || d.brk != nullptr;
+    facts.has_brk = d.brk != nullptr;
+    facts.counter = d.counter;
     const int node = note_node(ctx, EG_GNODE_COND, "a conditional", { { d.cell, 0, -1, "cell" }, { d.baseline, 0, -1, "baseline" },
                                                                    { d.counter, 1, -1, "counter" }, { d.limit, 0, -1, "limit" }, { d.brk, 2, -1, "brk" } }, "", facts);
     rec.shape.cond_begin(d.kind, arms);

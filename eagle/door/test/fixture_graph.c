@@ -14,6 +14,7 @@
  *   8 scale_tape_vjp   scale's vjp reading a tape row (a link a graph vjp does not take)
  *   9 scale_open_vjp   scale's vjp with a slot no link names
  *  18 scale_vjp_comp  scale's vjp whose bar_w is an ACCUM_OUT slot summed over samples with Kahan compensation: a companion plane eagle makes, folded after the launch
+ *  19 cscale  y = (c + 1) * x  (c a uint32 one-cell plane: a WHILE's counter)             20 cscale_vjp (c bound by a VALUE link: no adjoint)
  *  16 iscale  y = n * x        (n an int32 per-sample plane read by the kernel)          17 iscale_vjp (n bound by a VALUE link: no adjoint)
  *
  * Slots of scale: x, w, y. vjp of scale: x, w, bar_y, bar_x, bar_w.
@@ -57,6 +58,8 @@ EXPORT void fan_vjp_host(void* const* params, int64_t base, int64_t count, int64
 EXPORT void norm2_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EXPORT void norm2_vjp_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EXPORT void tick_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EXPORT void cscale_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EXPORT void cscale_vjp_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EXPORT void iscale_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EXPORT void iscale_vjp_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EXPORT void scale_vjp_comp_host(void* const* params, int64_t base, int64_t count, int64_t n);
@@ -85,6 +88,16 @@ void scale_vjp_comp_host(void* const* params, int64_t base, int64_t count, int64
 void scale_vjp_comp_fold_host(void* const* params, int64_t base, int64_t count, int64_t n) {
     (void)n;
     for (int64_t i = base; i < base + count; ++i) H(4)[i] -= H(5)[i];
+}
+/* slots: x, c (uint32 cell), y */
+void cscale_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    (void)n;
+    for (int64_t i = base; i < base + count; ++i) H(2)[i] = (double)(*(const uint32_t*)((const struct handle*)params[1])->data + 1u) * H(0)[i];
+}
+/* slots: c (uint32 cell), bar_y, bar_x */
+void cscale_vjp_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    (void)n;
+    for (int64_t i = base; i < base + count; ++i) H(2)[i] = (double)(*(const uint32_t*)((const struct handle*)params[0])->data + 1u) * H(1)[i];
 }
 /* slots: x, n (int32), y */
 void iscale_host(void* const* params, int64_t base, int64_t count, int64_t n) {
@@ -207,6 +220,8 @@ static const struct eg_unit_slot s_c = { .struct_size = sizeof(struct eg_unit_sl
                                          .rank = 0, .like_slot = -1, .n_gather = 0, .shape = NULL, .gather = NULL, .name = "c" };
 static const struct eg_unit_slot s_n = { .struct_size = sizeof(struct eg_unit_slot), .flags = 0, .role = EG_ROLE_PER_SAMPLE, .dtype = EG_DTYPE_INT32,
                                         .rank = 0, .like_slot = -1, .n_gather = 0, .shape = NULL, .gather = NULL, .name = "n" };
+static const struct eg_unit_slot s_cnt = { .struct_size = sizeof(struct eg_unit_slot), .flags = EG_SLOT_SHARED, .role = EG_ROLE_LOOKUP, .dtype = EG_DTYPE_UINT32,
+                                           .rank = 0, .like_slot = -1, .n_gather = 0, .shape = NULL, .gather = NULL, .name = "c" };
 static const struct eg_unit_slot s_bar_w_acc = { .struct_size = sizeof(struct eg_unit_slot), .flags = 0, .role = EG_ROLE_ACCUM_OUT, .dtype = EG_DTYPE_REAL,
                                                  .rank = 0, .like_slot = -1, .n_gather = 0, .shape = NULL, .gather = NULL, .name = "bar_w" };
 static const struct eg_unit_slot s_bar_w_c = { .struct_size = sizeof(struct eg_unit_slot), .flags = 0, .role = EG_ROLE_ACCUM_OUT, .dtype = EG_DTYPE_REAL,
@@ -243,6 +258,10 @@ static const struct eg_unit_slot* const scale_scatter_vjp_slots[] = { &s_x, &s_w
     static const struct eg_unit_body var = { .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = n_, .slots = slots_ }
 static const struct eg_unit_slot* const iscale_slots[] = { &s_x, &s_n, &s_y };
 static const struct eg_unit_slot* const iscale_vjp_slots[] = { &s_n, &s_bar_y, &s_bar_x };
+static const struct eg_unit_slot* const cscale_slots[] = { &s_x, &s_cnt, &s_y };
+static const struct eg_unit_slot* const cscale_vjp_slots[] = { &s_cnt, &s_bar_y, &s_bar_x };
+BODY(cscale_body, cscale_slots, 3);
+BODY(cscale_vjp_body, cscale_vjp_slots, 3);
 BODY(iscale_body, iscale_slots, 3);
 BODY(iscale_vjp_body, iscale_vjp_slots, 3);
 static const struct eg_unit_slot* const scale_vjp_comp_slots[] = { &s_x, &s_w, &s_bar_y, &s_bar_x, &s_bar_w_acc, &s_bar_w_c };
@@ -285,8 +304,12 @@ LINK(sv_x_tape, 0, TAPE_ROW, VALUE, 0, 0);
 LINK(iv_n, 0, PRIMAL_SLOT, VALUE, 1, 0);
 LINK(iv_by, 1, PRIMAL_SLOT, ADJOINT_IN, 2, 0);
 LINK(iv_bx, 2, PRIMAL_SLOT, GRAD, 0, 0);
+LINK(cv_c, 0, PRIMAL_SLOT, VALUE, 1, 0);
+LINK(cv_by, 1, PRIMAL_SLOT, ADJOINT_IN, 2, 0);
+LINK(cv_bx, 2, PRIMAL_SLOT, GRAD, 0, 0);
 LINK(sc_bw, 4, PRIMAL_SLOT, GRAD, 1, 0);
 static const struct eg_unit_link* const scale_vjp_comp_links[] = { &sv_x, &sv_w, &sv_by, &sv_bx, &sc_bw };
+static const struct eg_unit_link* const cscale_vjp_links[] = { &cv_c, &cv_by, &cv_bx };
 static const struct eg_unit_link* const iscale_vjp_links[] = { &iv_n, &iv_by, &iv_bx };
 static const struct eg_unit_link* const scale_vjp_links[] = { &sv_x, &sv_w, &sv_by, &sv_bx, &sv_bw };
 static const struct eg_unit_link* const scale_tape_links[] = { &sv_x_tape, &sv_w, &sv_by, &sv_bx, &sv_bw };
@@ -324,6 +347,7 @@ static const struct eg_unit_link* const norm2_vjp_links[] = { &nv_v, &nv_bo, &nv
                                                 .fused_steps_slot = -1, .n_links = n_, .taped = NULL, .links = links_ }
 VJP_OF(d_scale_vjp, 0, 5, scale_vjp_links);
 VJP_OF(d_iscale_vjp, 16, 3, iscale_vjp_links);
+VJP_OF(d_cscale_vjp, 19, 3, cscale_vjp_links);
 VJP_OF(d_scale_vjp_comp, 0, 5, scale_vjp_comp_links);
 VJP_OF(d_square_vjp, 2, 3, square_vjp_links);
 VJP_OF(d_mul2_vjp, 4, 5, mul2_vjp_links);
@@ -367,12 +391,15 @@ UNIT(u_scale_scatter_vjp, "scale_scatter_vjp", 0x1f, "scale_vjp_host", scale_sca
 UNIT(u_iscale, "iscale", 0x20, "iscale_host", iscale_body, NULL, IMAGE("iscale"));
 UNIT(u_iscale_vjp, "iscale_vjp", 0x21, "iscale_vjp_host", iscale_vjp_body, &d_iscale_vjp, IMAGE("iscale_vjp"));
 
+UNIT(u_cscale, "cscale", 0x23, "cscale_host", cscale_body, NULL, IMAGE("cscale"));
+UNIT(u_cscale_vjp, "cscale_vjp", 0x24, "cscale_vjp_host", cscale_vjp_body, &d_cscale_vjp, IMAGE("cscale_vjp"));
+
 static const struct eg_unit_meta u_scale_vjp_comp = { .struct_size = sizeof(struct eg_unit_meta), .name = "scale_vjp_comp", .digest = DIGEST(0x22), .pattern = EG_PATTERN_PURE,
                                                       .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "scale_vjp_comp_host", IMAGE("scale_vjp_comp"),
                                                       .body = &scale_vjp_comp_body, .launch = &launch, .derived = &d_scale_vjp_comp };
 
 static const struct eg_unit_meta* const units[] = { &u_scale, &u_scale_vjp, &u_square, &u_square_vjp, &u_mul2, &u_mul2_vjp,
-                                                    &u_uscale, &u_uscale_vjp, &u_scale_tape_vjp, &u_scale_open_vjp, &u_fan, &u_fan_vjp, &u_norm2, &u_norm2_vjp, &u_tick, &u_scale_scatter_vjp, &u_iscale, &u_iscale_vjp, &u_scale_vjp_comp };
+                                                    &u_uscale, &u_uscale_vjp, &u_scale_tape_vjp, &u_scale_open_vjp, &u_fan, &u_fan_vjp, &u_norm2, &u_norm2_vjp, &u_tick, &u_scale_scatter_vjp, &u_iscale, &u_iscale_vjp, &u_scale_vjp_comp, &u_cscale, &u_cscale_vjp };
 static const struct eg_library_meta library = { .struct_size = sizeof(struct eg_library_meta), .schema_major = EG_META_SCHEMA_MAJOR,
-                                                .schema_minor = 0, .n_units = 19, .units = units };
+                                                .schema_minor = 0, .n_units = 21, .units = units };
 const struct eg_library_meta* eg_unit_library_meta(void) { return &library; }

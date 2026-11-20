@@ -197,6 +197,13 @@ extern "C" __global__ void dauto_persist(DAUTO_SLOTS, long long base, long long 
     atomicMax(steps, 1u);
 }
 
+// dbrkat: *stop = 1 once the iteration index *counter reads 3 (the break of the fourth iteration of a WHILE).
+extern "C" __global__ void dbrkat(ScalarHandle counter, ScalarHandle stop, long long base, long long count, long long nSamples) {
+    (void)base, (void)nSamples;
+    if (static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x >= count) return;
+    if (*static_cast<const unsigned*>(counter.data) == 3u) *static_cast<unsigned*>(stop.data) = 1u;
+}
+
 // dlookup: the first *cnt lanes (a uint32 cell the caller owns) write y at the sample map[lane]: y[s] = 2 x[s] + 1.
 extern "C" __global__ void dlookup(ScalarHandle y, ScalarHandle x, ScalarHandle map, ScalarHandle cnt, long long base,
                                    long long count, long long nSamples) {

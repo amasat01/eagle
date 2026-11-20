@@ -54,6 +54,16 @@ __global__ void scale_vjp_comp_fold(ScalarHandle x, ScalarHandle w, ScalarHandle
     (void)x, (void)w, (void)bar_y, (void)bar_x;
     at(bar_w)[i] -= at(bar_w_c)[i];
 }
+// slots: x, c (uint32 cell: a WHILE's counter, 0-based), y: y = (c + 1) x
+__global__ void cscale(ScalarHandle x, ScalarHandle c, ScalarHandle y, TRIPLE) {
+    SAMPLE(i);
+    at(y)[i] = static_cast<double>(*static_cast<unsigned*>(c.data) + 1u) * at(x)[i];
+}
+// slots: c (uint32 cell), bar_y, bar_x
+__global__ void cscale_vjp(ScalarHandle c, ScalarHandle bar_y, ScalarHandle bar_x, TRIPLE) {
+    SAMPLE(i);
+    at(bar_x)[i] = static_cast<double>(*static_cast<unsigned*>(c.data) + 1u) * at(bar_y)[i];
+}
 // slots: x, n (int32), y
 __global__ void iscale(ScalarHandle x, ScalarHandle n, ScalarHandle y, TRIPLE) {
     SAMPLE(i);

@@ -40,7 +40,8 @@ struct NodeFacts {
     std::uint32_t cond_flags = 0;
     std::int32_t has_baseline = 0, n_plans = 0;
     std::int64_t max_iters = 0, cell_index = 0;
-    bool loop_controlled = false;               ///< WHILE: it holds a counter, a limit or a break plane
+    bool has_brk = false;                       ///< WHILE: it holds a break plane
+    eg_plane_s* counter = nullptr;              ///< WHILE: its counter plane, or null
 };
 
 /** @brief A conditional's test as the reverse needs it: which kind, and whether it is negated. One per test the forward can evaluate. */
@@ -70,6 +71,7 @@ struct RLoop {
     int cond = 0;                               ///< the COND node's ordinal
     int cap = 0, w = 0, groups = 0;             ///< max_iters, the window, ceil(cap / w)
     int first_leaf = 0, per_iter = 0;           ///< the first leaf of iteration 0 and the leaves of one iteration
+    eg_plane_s* counter = nullptr;              ///< the loop's counter plane, which the reverse rewrites for each iteration it rebuilds, or null
 };
 
 /** @brief The leaves of a recording in the order the forward runs them, its WHILE bodies unrolled ``max_iters`` times. */

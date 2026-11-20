@@ -121,6 +121,9 @@ struct LoopTape {
     std::vector<int> planes;                    ///< indices in GraphDiff::planes
     std::vector<std::vector<Bytes>> ckpt;       ///< per window, per plane of ``planes``
     int built = -1;                             ///< the window whose iterations the reverse has rebuilt into the shared buffers
+    int counter = -1;                           ///< the index in GraphDiff::planes of the loop's counter plane, or -1
+    int shown = -1;                             ///< the value the reverse last wrote into the counter plane, or -1
+    int final_count = 0;                        ///< the counter plane's value when the reverse began: the forward's iteration count
 };
 
 /** @brief The tape of a graph ended with EG_RECORD_DIFF. */
