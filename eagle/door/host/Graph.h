@@ -106,9 +106,7 @@ struct GraphDiff {
 };
 
 
-/** @brief The tape of a graph ended with EG_RECORD_DIFF over @p nodes (host/GraphReverse.cpp); refuses what the reverse does not cover. */
-std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<eg_plan_s*>& launches, const eg_record_end_desc& desc);
-/** @brief The same over a recording with conditionals, forks and WHILE loops: @p plan from GraphShape::reverse_plan, @p launches by launch ordinal. */
+/** @brief The tape of a graph ended with EG_RECORD_DIFF (host/GraphReverse.cpp): @p plan from GraphShape::reverse_plan, @p launches by launch ordinal; refuses what the reverse does not cover. */
 std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<eg_plan_s*>& launches, const ReversePlan& plan, const eg_record_end_desc& desc);
 /** @brief Whether leaf @p leaf ran at the last replay, from the tests the replay saved. */
 bool leaf_ran(const GraphDiff& diff, std::size_t leaf);

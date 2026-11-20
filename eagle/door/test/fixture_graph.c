@@ -297,7 +297,7 @@ UNIT(u_fan, "fan", 0x1a, "fan_host", fan_body, NULL, IMAGE("fan"));
 UNIT(u_fan_vjp, "fan_vjp", 0x1b, "fan_vjp_host", fan_vjp_body, &d_fan_vjp, IMAGE("fan_vjp"));
 UNIT(u_norm2, "norm2", 0x1c, "norm2_host", norm2_body, NULL, IMAGE("norm2"));
 UNIT(u_norm2_vjp, "norm2_vjp", 0x1d, "norm2_vjp_host", norm2_vjp_body, &d_norm2_vjp, IMAGE("norm2_vjp"));
-UNIT(u_tick, "tick", 0x1e, "tick_host", tick_body, NULL, NO_IMAGE);
+UNIT(u_tick, "tick", 0x1e, "tick_host", tick_body, NULL, IMAGE("tick"));
 
 static const struct eg_unit_meta* const units[] = { &u_scale, &u_scale_vjp, &u_square, &u_square_vjp, &u_mul2, &u_mul2_vjp,
                                                     &u_uscale, &u_uscale_vjp, &u_scale_tape_vjp, &u_scale_open_vjp, &u_fan, &u_fan_vjp, &u_norm2, &u_norm2_vjp, &u_tick };

@@ -71,4 +71,9 @@ __global__ void norm2_vjp(GRefMirror v, ScalarHandle bar_o, GRefMirror bar_v, TR
     for (int c = 0; c < 3; ++c) cell(bar_v, c, i) = 2.0 * cell(v, c, i) * at(bar_o)[i];
 }
 
+__global__ void tick(ScalarHandle c, TRIPLE) {
+    SAMPLE(i);
+    static_cast<int*>(c.data)[i] -= 1;
+}
+
 }  // extern "C"

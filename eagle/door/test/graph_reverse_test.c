@@ -99,6 +99,7 @@ static void verdict(struct rig* r, int ok, const char* what) {
     char name[600];
     snprintf(name, sizeof(name), "%s%s", r->device ? "on a DEVICE context: " : "", what);
     check(ok, name);
+    if (!ok) reason_has(r->ctx, "\x01");    /* the door's last reason, for the row that failed */
 }
 
 static eg_unit* load(struct rig* r, const char* name, uint8_t byte) {
@@ -515,11 +516,25 @@ static void device_refusal_rows(struct rig* r, const struct units* u) {
 static eg_plane* mk_i32(struct rig* r, struct tensor* t, int64_t n, int32_t* data) {
     tensor_fill(t, n, data, kDLInt, 32);
     t->managed.dl_tensor.device.device_type = kDLCPU;
-    eg_plane* p = NULL;
-    if (eg_plane_wrap(r->ctx, &t->managed, &p) != EG_OK) return NULL;
-    r->handle[r->n_planes] = p;                 /* released with the row, before its tensor goes out of scope */
-    r->host[r->n_planes++] = NULL;
-    return p;
+    eg_plane* host = NULL;
+    if (eg_plane_wrap(r->ctx, &t->managed, &host) != EG_OK) return NULL;
+    eg_plane* handle = host;
+    if (r->device) {                            /* the test cell of a device recording is a device plane, copied up like the others */
+        const int64_t shape[1] = { n };
+        struct eg_plane_desc d;
+        memset(&d, 0, sizeof(d));
+        d.struct_size = sizeof(d);
+        d.kind = EG_MEM_DEVICE;
+        d.ndim = 1;
+        d.dtype_code = kDLInt;
+        d.dtype_bits = 32;
+        d.shape = shape;
+        handle = NULL;
+        if (eg_plane_new(r->ctx, &d, &handle) != EG_OK) return NULL;
+    }
+    r->handle[r->n_planes] = handle;            /* released with the row, before its tensor goes out of scope */
+    r->host[r->n_planes++] = r->device ? host : NULL;
+    return handle;
 }
 
 static eg_status cond_open(eg_ctx* ctx, eg_cond_kind kind, uint32_t flags, eg_plane* cell, int64_t index, int64_t max_iters) {
@@ -568,6 +583,13 @@ static void fork_reverse_row(struct rig* r, const struct units* u) {
  * that ran, whatever the flag is when the reverse starts. */
 static void if_row(struct rig* r, const struct units* u, eg_cond_kind kind, int negate, int rewrite_before_reverse) {
     eg_ctx* ctx = r->ctx;
+    struct eg_ctx_info info;
+    memset(&info, 0, sizeof(info));
+    info.struct_size = sizeof(info);
+    if (kind == EG_COND_IF_ELSE && eg_ctx_info(ctx, &info) == EG_OK && (info.capabilities & EG_CAP_COND_IF_ELSE) == 0) {
+        verdict(r, 1, "an IF_ELSE row skipped: the context has no EG_CAP_COND_IF_ELSE (the driver has no conditional arms)");
+        return;
+    }
     double x[N], x2[N], y[N], w1[1] = { 1.7 }, w2[1] = { -0.6 }, one[N], gx[N], gx2[N], want[N], want2[N];
     int32_t flags[4] = { 7, 7, 0, 7 };
     struct tensor tx, tx2, ty, tw1, tw2, tone, tgx, tgx2, tf;
@@ -594,8 +616,13 @@ static void if_row(struct rig* r, const struct units* u, eg_cond_kind kind, int 
     eg_plane* gr[] = { pgx, pgx2 };
     for (int lane = 1; ok && lane >= 0; --lane) {
         flags[2] = lane;
-        ok = eg_graph_launch(ctx, g) == EG_OK;
-        if (rewrite_before_reverse) flags[2] = lane ? 0 : 1;
+        up(r);
+        ok = eg_graph_launch(ctx, g) == EG_OK && eg_sync(ctx) == EG_OK;
+        if (rewrite_before_reverse) {
+            flags[2] = lane ? 0 : 1;
+            up(r);
+            eg_sync(ctx);
+        }
         ok = ok && reverse(ctx, g, py, p1, 2, in, gr) == EG_OK;
         down(r);
         const int truth = (lane != 0) != (negate != 0);
@@ -645,6 +672,7 @@ static void while_row(struct rig* r, const struct units* u, int32_t start, int g
     ok = ok && eg_launch(ctx, tk, NULL) == EG_OK && eg_record_cond_end(ctx) == EG_OK && end_diff(ctx, 2, vjps, &g) == EG_OK;
     for (int i = 0; i < N; ++i) c[i] = start;
     flags[2] = lane;
+    up(r);
     ok = ok && eg_graph_launch(ctx, g) == EG_OK;
     const int passes = start > 4 ? 4 : start;              /* the cap is 4 */
     const int ran = guarded && lane == 0 ? 0 : passes;     /* passes that multiplied */
@@ -695,6 +723,7 @@ static void fork_in_arm_row(struct rig* r, const struct units* u) {
     eg_plane* gr[] = { pgx };
     for (int lane = 1; ok && lane >= 0; --lane) {
         flags[2] = lane;
+        up(r);
         ok = eg_graph_launch(ctx, g) == EG_OK && reverse(ctx, g, pz, p1, 1, in, gr) == EG_OK;
         down(r);
         for (int i = 0; i < N; ++i) want[i] = lane ? 2.0 * w1[0] * w2[0] * x[i] : 0.0;
@@ -793,6 +822,7 @@ int main(int argc, char** argv) {
         const struct units du = load_units(&dev);
         gradient_rows(&dev, &du);
         device_refusal_rows(&dev, &du);
+        conditional_rows(&dev, &du);
         eg_ctx_free(dctx);
     }
     eg_ctx_free(ctx);

@@ -528,52 +528,22 @@ DevicePool* pool_new(unsigned streams, unsigned events) {
 
 void pool_free(DevicePool* pool) noexcept { delete pool; }
 
-void* scratch_alloc(DevicePool* pool, std::size_t bytes, int device) {
-    // The capturing thread may not allocate (cudaErrorStreamCaptureUnsupported); a thread of its own may, because a thread-local capture
-    // restricts only its own thread. The side stream is not captured and is settled before the block is used.
-    const auto side = reinterpret_cast<std::uint64_t>(pool->side.cuda());
-    void* data = nullptr;
-    std::exception_ptr failure;
-    std::thread helper([&] {
-        try {
-            EAGLE_CHECK_ALWAYS(cudaSetDevice(device));
-            data = alloc_async(side, bytes, true);
-            try {
-                stream_wait(side);
-            } catch (...) {
-                free_async(side, side, data);
-                throw;
-            }
-        } catch (...) {
-            failure = std::current_exception();
-        }
-    });
-    helper.join();
-    if (failure) std::rethrow_exception(failure);
-    return data;
-}
-
-void scratch_free(std::uint64_t stream, void* data) noexcept { free_async(stream, stream, data); }
-
 namespace {
 
 __global__ void saveTestKernel(const unsigned* cell, const unsigned* baseline, const unsigned* iter, unsigned* dst, unsigned capacity) {
     unsigned k = iter != nullptr ? *iter : 0u;
     if (k >= capacity) k = capacity - 1;
-    dst[2 * k] = *cell;
-    dst[2 * k + 1] = baseline != nullptr ? *baseline : 0u;
+    dst[3 * k] = 1u;
+    dst[3 * k + 1] = *cell;
+    dst[3 * k + 2] = baseline != nullptr ? *baseline : 0u;
 }
 
-__global__ void loopCopyKernel(const unsigned char* src, unsigned char* buffer, std::size_t bytes, const unsigned* iter, unsigned capacity, bool wide) {
+__global__ void tableCopyKernel(const unsigned char* src, std::size_t bytes, unsigned char* const* table, const unsigned* iter, unsigned capacity) {
     unsigned k = *iter;
     if (k >= capacity) k = capacity - 1;
-    unsigned char* dst = buffer + static_cast<std::size_t>(k) * bytes;
+    unsigned char* dst = table[k];
     const std::size_t first = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x, stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
-    if (wide) {
-        for (std::size_t i = first; i < bytes / 8; i += stride) reinterpret_cast<unsigned long long*>(dst)[i] = reinterpret_cast<const unsigned long long*>(src)[i];
-    } else {
-        for (std::size_t i = first; i < bytes; i += stride) dst[i] = src[i];
-    }
+    for (std::size_t i = first; i < bytes; i += stride) dst[i] = src[i];
 }
 
 }  // namespace
@@ -583,13 +553,11 @@ void save_test_step(std::uint64_t stream, const unsigned* cell, const unsigned* 
     EAGLE_CHECK_ALWAYS(cudaGetLastError());
 }
 
-void loop_copy_step(std::uint64_t stream, const void* src, void* buffer, std::size_t bytes, const unsigned* iter, unsigned capacity) {
+void table_copy_step(std::uint64_t stream, const void* src, std::size_t bytes, void* const* table, const unsigned* iter, unsigned capacity) {
     if (bytes == 0) return;
-    const bool wide = bytes % 8 == 0 && (reinterpret_cast<std::uintptr_t>(src) | reinterpret_cast<std::uintptr_t>(buffer)) % 8 == 0;
-    const std::size_t work = wide ? bytes / 8 : bytes;
-    const unsigned blocks = static_cast<unsigned>(std::min<std::size_t>((work + 255) / 256, 1024));
-    loopCopyKernel<<<blocks, 256, 0, reinterpret_cast<cudaStream_t>(stream)>>>(static_cast<const unsigned char*>(src), static_cast<unsigned char*>(buffer), bytes,
-                                                                              iter, capacity, wide);
+    const unsigned blocks = static_cast<unsigned>(std::min<std::size_t>((bytes + 255) / 256, 1024));
+    tableCopyKernel<<<blocks, 256, 0, reinterpret_cast<cudaStream_t>(stream)>>>(static_cast<const unsigned char*>(src), bytes,
+                                                                               reinterpret_cast<unsigned char* const*>(table), iter, capacity);
     EAGLE_CHECK_ALWAYS(cudaGetLastError());
 }
 

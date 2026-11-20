@@ -97,10 +97,7 @@ void device_record_fork_branch(eg_ctx&) {}
 void device_record_fork_end(eg_ctx&) {}
 void device_record_wait(eg_ctx&, std::int32_t, eg_plane_s* const*) {}
 bool device_cond_arms_supported() { return false; }
-void* device_record_scratch(eg_ctx&, std::size_t) { return nullptr; }
-std::int32_t device_record_save_test(eg_ctx&, eg_plane_s*, std::int64_t, eg_plane_s*, std::int64_t) { return -1; }
-void device_record_loop_copy(eg_ctx&, const void*, void*, std::size_t) {}
-void device_saved_read(eg_ctx&, const eg_graph*, DeviceSaved&) {}
+void device_diff_read_saved(eg_ctx&, GraphDiff&) {}
 GraphShape& device_shape(eg_ctx&) { refuse(EG_NOT_WRITTEN, "the device group is not built"); }
 void device_graph_describe(eg_ctx&, const eg_graph*, eg_graph_description*) {}
 GraphDiff* device_graph_diff(eg_ctx&, eg_graph*) { return nullptr; }
@@ -277,20 +274,46 @@ constexpr unsigned kRecordedLoops = 64;
 /** @brief The streams and events a recording's conditionals and forks can hold at once, made before the capture opens. */
 constexpr unsigned kRecordStreams = 32, kRecordEvents = 128;
 
+/** @brief One call a recording kept to capture again: a launch, or a structure call (with its description). */
+struct Op {
+    enum Kind { Launch, CondBegin, CondArm, CondEnd, ForkBegin, ForkBranch, ForkEnd, Wait } kind = Launch;
+    eg_plan_s* plan = nullptr;
+    eg_cond_desc cond{};
+    std::vector<eg_plane_s*> planes;
+};
+
+/** @brief The tests of one conditional (its node ordinal ``cond``) that a replay saves: ``capacity`` entries (one, or one per iteration of the WHILE
+ *  around or at it) of three words each: evaluated, the cell, the baseline. */
+struct DiffSlot {
+    int cond = -1;
+    unsigned capacity = 1;
+    unsigned* buffer = nullptr;
+};
+
+/** @brief A plane copied to ``dst`` just before a launch: directly, or into ``table[iteration]`` inside a WHILE body. */
+struct LeafCopy {
+    const void* plane = nullptr;
+    std::size_t bytes = 0;
+    void* direct = nullptr;
+    void* const* table = nullptr;
+    unsigned capacity = 0;
+};
+
+/** @brief What the second capture of a EG_RECORD_DIFF recording adds: the saved tests by conditional ordinal and the copies in front of each launch. */
+struct DiffPass {
+    std::vector<DiffSlot> slots;
+    std::vector<std::vector<LeafCopy>> before;          ///< per launch ordinal
+};
+
 struct DeviceRecording {
     std::vector<Frame> frames;                          ///< the open conditionals and forks, outermost first
     GraphShape shape;                                   ///< the nodes, forks and conditionals recorded: races, waits and the description
     void* loop_cells = nullptr;                         ///< kRecordedLoops pairs of device words
     DevicePool* pool = nullptr;                         ///< the arm and branch streams and the events of its forks
     unsigned loops = 0;                                 ///< the pairs used
-    std::vector<void*> scratch;                         ///< device memory the recording owns (device_record_scratch, the save slots)
-    struct Save {
-        void* buffer;
-        unsigned capacity;
-    };
-    std::vector<Save> saves;                            ///< the save slots of device_record_save_test
+    std::vector<Op> log;                                ///< the structure calls and launches, kept to capture them again for EG_RECORD_DIFF
+    DiffPass* dp = nullptr;                             ///< the second capture of a EG_RECORD_DIFF recording: what it adds
     std::vector<std::vector<std::uint64_t>> kernels;    ///< per recorded launch (as ``plans``): the kernel nodes of its partitions
-    bool launches_only = true;                          ///< no copy, reduce, transform, product or host node was captured: what EG_RECORD_DIFF needs
     std::vector<std::unique_ptr<HostHook>> hooks;       ///< the host nodes captured so far
     std::shared_ptr<StepFailure> failure;               ///< shared by the hooks and, once recorded, the graph
     DeviceCapture* capture = nullptr;
@@ -303,8 +326,8 @@ struct DeviceRecording {
 
 /** @brief A recorded device graph: the instantiated capture and the plans whose bindings it holds by value. */
 struct DeviceGraph {
-    std::vector<void*> scratch;                         ///< device memory the graph owns, freed with it
-    std::vector<DeviceRecording::Save> saves;           ///< its save slots
+    std::vector<void*> buffers;                         ///< device memory the graph owns beside its tape (save slots, copy tables), freed with it
+    std::vector<DiffSlot> slots;                        ///< a EG_RECORD_DIFF graph's saved tests
     unsigned loops = 0;                                 ///< its WHILE conditionals
     GraphShape shape;                                   ///< what eg_graph_describe returns
     mutable DescribeStore described;                    ///< the arrays of the last description
@@ -656,10 +679,10 @@ int slot_access(std::int32_t role) {
 }
 
 /** @brief Record the call of kind @p kind that touches @p uses in the shape of the recording on @p ctx (none: nothing). */
-void note_node(eg_ctx& ctx, eg_gnode_kind kind, const std::string& label, std::vector<PlaneUse> uses, const std::string& unit = "", NodeFacts facts = {}) {
-    if (ctx.dev_rec == nullptr) return;
+int note_node(eg_ctx& ctx, eg_gnode_kind kind, const std::string& label, std::vector<PlaneUse> uses, const std::string& unit = "", NodeFacts facts = {}) {
+    if (ctx.dev_rec == nullptr) return -1;
     uses.erase(std::remove_if(uses.begin(), uses.end(), [](const PlaneUse& u) { return u.plane == nullptr || u.access < 0; }), uses.end());
-    ctx.dev_rec->shape.add(kind, label, unit, std::move(uses), facts);
+    return ctx.dev_rec->shape.add(kind, label, unit, std::move(uses), facts);
 }
 
 }  // namespace
@@ -668,7 +691,6 @@ void note_node(eg_ctx& ctx, eg_gnode_kind kind, const std::string& label, std::v
 void device_gemm_run(eg_ctx& ctx, const eg_gemm_s& gemm, eg_plane_s* a, eg_plane_s* b, eg_plane_s* c) {
     const auto at = [](const eg_plane_s* p) { return static_cast<char*>(p->tensor->dl_tensor.data) + p->tensor->dl_tensor.byte_offset; };
     const auto stride = [](const eg_plane_s* p) { return static_cast<int>(p->tensor->dl_tensor.shape[1]); };
-    if (ctx.dev_rec != nullptr) ctx.dev_rec->launches_only = false;
     note_node(ctx, EG_GNODE_GEMM, "eg_gemm_run", { { a, 0, -1, "a" }, { b, 0, -1, "b" }, { c, 1, -1, "c" } });
     Current current(ctx.dev);
     gemm_product(ctx, ctx.dev.stream, gemm.call, gemm.f32, at(a), stride(a), at(b), stride(b), at(c), stride(c));
@@ -1154,7 +1176,6 @@ void device_reduce(eg_ctx& ctx, const eg_reduce_desc& d) {
     const auto at = [](const eg_plane_s* p) -> void* {
         return p == nullptr ? nullptr : static_cast<char*>(p->tensor->dl_tensor.data) + p->tensor->dl_tensor.byte_offset;
     };
-    if (ctx.dev_rec != nullptr) ctx.dev_rec->launches_only = false;
     note_node(ctx, EG_GNODE_REDUCE, "eg_reduce", { { d.in, 0, -1, "in" }, { d.out, 1, -1, "out" }, { d.comp, r.pair ? 1 : 0, -1, "comp" } });
     Current current(ctx.dev);
     reduce_step(ctx.dev.stream, r.code, r.op == EG_REDUCE_ALL ? 3 : r.op, at(r.in), r.n, r.cols, at(r.out), at(r.comp), r.pair);
@@ -1165,7 +1186,6 @@ void device_reduce(eg_ctx& ctx, const eg_reduce_desc& d) {
  *  host plane, pageable or pinned, copies across and waits, so the host bytes are safe to reuse on return. */
 void device_copy(eg_ctx& ctx, eg_plane_s* src, eg_plane_s* dst) {
     host::copy_check(ctx, src, dst);
-    if (ctx.dev_rec != nullptr) ctx.dev_rec->launches_only = false;
     note_node(ctx, EG_GNODE_COPY, "eg_copy", { { src, 0, -1, "src" }, { dst, 1, -1, "dst" } });
     const DLTensor& s = src->tensor->dl_tensor;
     const DLTensor& t = dst->tensor->dl_tensor;
@@ -1208,7 +1228,6 @@ void device_fft_run(eg_ctx& ctx, eg_fft_s& plan, eg_plane_s* in, eg_plane_s* out
     Current current(ctx.dev);
     fft_enqueue(*plan.dev, plan, at(in), at(out), plan.work, ctx.dev.stream);
     if (ctx.dev_rec == nullptr) return;
-    ctx.dev_rec->launches_only = false;
     note_node(ctx, EG_GNODE_FFT, "eg_fft_run", { { in, 0, -1, "src" }, { out, 1, -1, "dst" } });
     ctx.dev_rec->ffts.push_back(&plan);
     ++plan.refs;
@@ -1723,6 +1742,39 @@ void device_record_begin(eg_ctx& ctx) {
     ctx.dev_rec = rec.release();
 }
 
+namespace {
+
+/** @brief The innermost open WHILE of @p rec, or null. */
+const Frame* innermost_loop(const DeviceRecording& rec) {
+    for (std::size_t i = rec.frames.size(); i-- > 0;)
+        if (rec.frames[i].iteration != nullptr) return &rec.frames[i];
+    return nullptr;
+}
+
+/** @brief The second capture of a EG_RECORD_DIFF recording: capture the copies the tape keeps in front of launch @p launch. */
+void diff_copies(eg_ctx& ctx, const DeviceRecording& rec, std::size_t launch) {
+    if (launch >= rec.dp->before.size()) return;
+    for (const LeafCopy& c : rec.dp->before[launch]) {
+        if (c.direct != nullptr) {
+            copy_step(ctx.dev.stream, c.direct, c.plane, c.bytes);
+        } else {
+            const Frame* loop = innermost_loop(rec);
+            table_copy_step(ctx.dev.stream, c.plane, c.bytes, c.table, loop->iteration, c.capacity);
+        }
+    }
+}
+
+/** @brief The second capture saves the test of the conditional node @p node into its slot, entry ``*iteration`` of the innermost WHILE (entry 0 outside one). */
+void diff_save(eg_ctx& ctx, const DeviceRecording& rec, int node, const unsigned* cell, const unsigned* baseline) {
+    for (const DiffSlot& slot : rec.dp->slots) {
+        if (slot.cond != node) continue;
+        const Frame* loop = innermost_loop(rec);
+        save_test_step(ctx.dev.stream, cell, baseline, loop != nullptr ? loop->iteration : nullptr, slot.buffer, slot.capacity);
+    }
+}
+
+}  // namespace
+
 /** @brief eg_launch of a DEVICE plan while recording: its launches captured on the recording's stream. An index set's grid is
  *  its partition (the capacity) and its kernel reads the count plane at each replay, so a replay runs at the count last
  *  written; the plain launch's host read of the count (check_index_live) cannot be made inside a capture. */
@@ -1738,10 +1790,12 @@ void device_record_launch(eg_ctx& ctx, eg_plan_s& plan) {
     for (std::size_t i = 0; i < plan.bindings.size(); ++i)
         uses.push_back({ plan.bindings[i].plane, slot_access(u.slots[i].role), static_cast<int>(i), u.slots[i].name });
     note_node(ctx, EG_GNODE_LAUNCH, "eg_launch of unit '" + u.name + "'", std::move(uses), u.name);
+    Current current(ctx.dev);
+    if (rec.dp != nullptr) diff_copies(ctx, rec, rec.plans.size());
+    rec.log.push_back(Op{ Op::Launch, &plan, {}, {} });
     rec.bound.push_back(binding_bytes(plan));
     rec.plans.push_back(&plan);
     ++plan.refs;
-    Current current(ctx.dev);
     finished_zero(plan, ctx.dev.stream);    // each replay counts from zero, as eg_launch does
     launch_on(plan, ctx.dev.stream);
     // The kernel node of each partition, kept to re-apply the arguments of a plan rebound after the recording.
@@ -1784,7 +1838,6 @@ void abort_recording(eg_ctx& ctx) noexcept {
         pool_free(rec->pool);
         run_later(ctx, *rec);
         device_free(ctx, rec->loop_cells);
-        for (void* p : rec->scratch) scratch_free(ctx.dev.stream, p);
     } catch (...) {
     }
     release_hooks(ctx, rec->hooks);
@@ -1836,10 +1889,14 @@ void device_record_cond_begin(eg_ctx& ctx, const eg_cond_desc* desc) {
     facts.has_baseline = d.baseline != nullptr;
     facts.max_iters = d.max_iters;
     facts.cell_index = d.cell_index;
-    note_node(ctx, EG_GNODE_COND, "a conditional", { { d.cell, 0, -1, "cell" }, { d.baseline, 0, -1, "baseline" } }, "", facts);
+    const int node = note_node(ctx, EG_GNODE_COND, "a conditional", { { d.cell, 0, -1, "cell" }, { d.baseline, 0, -1, "baseline" } }, "", facts);
     rec.shape.cond_begin(d.kind, arms);
-    rec.launches_only = false;
     Current current(ctx.dev);
+    if (rec.dp != nullptr && d.kind != EG_COND_WHILE) diff_save(ctx, rec, node, cell, baseline);    // outside the conditional: the test as it is when it is reached
+    Op op;
+    op.kind = Op::CondBegin;
+    op.cond = d;
+    rec.log.push_back(op);
     unsigned* loop = d.kind == EG_COND_WHILE ? static_cast<unsigned*>(rec.loop_cells) + 2 * rec.loops : nullptr;
     Frame frame;
     frame.arms = arms;
@@ -1852,12 +1909,14 @@ void device_record_cond_begin(eg_ctx& ctx, const eg_cond_desc* desc) {
     }
     ctx.dev.stream = cond_stream(frame.weave, 0);
     rec.frames.push_back(std::move(frame));
+    if (rec.dp != nullptr && d.kind == EG_COND_WHILE) diff_save(ctx, rec, node, cell, baseline);    // a WHILE's test at the start of each iteration
 }
 
 /** @brief eg_record_cond_arm on a device context: the capture moves to the next arm's stream. */
 void device_record_cond_arm(eg_ctx& ctx) {
     DeviceRecording& rec = recording_of(ctx);
     rec.shape.cond_arm();
+    rec.log.push_back(Op{ Op::CondArm, nullptr, {}, {} });
     Frame& f = rec.frames.back();
     ++f.arm;
     ctx.dev.stream = cond_stream(f.weave, f.arm);
@@ -1867,6 +1926,7 @@ void device_record_cond_arm(eg_ctx& ctx) {
 void device_record_cond_end(eg_ctx& ctx) {
     DeviceRecording& rec = recording_of(ctx);
     rec.shape.cond_end();
+    rec.log.push_back(Op{ Op::CondEnd, nullptr, {}, {} });
     const Frame f = rec.frames.back();
     rec.frames.pop_back();
     ctx.dev.stream = f.outer;
@@ -1881,10 +1941,10 @@ void device_record_cond_end(eg_ctx& ctx) {
 /** @brief eg_record_fork_begin on a device context: branch 0 is a stream that starts after everything recorded so far. */
 void device_record_fork_begin(eg_ctx& ctx) {
     DeviceRecording& rec = recording_of(ctx);
-    rec.launches_only = false;
     if (!pool_has(rec.pool, 1, 2))
         refuse(EG_NOT_WRITTEN, "eg_record_fork_begin: a device recording holds at most " + std::to_string(kRecordStreams) + " open arms and branches at once");
     rec.shape.fork_begin();
+    rec.log.push_back(Op{ Op::ForkBegin, nullptr, {}, {} });
     Current current(ctx.dev);
     Frame frame;
     frame.outer = ctx.dev.stream;
@@ -1900,6 +1960,7 @@ void device_record_fork_branch(eg_ctx& ctx) {
     if (!pool_has(rec.pool, 1, 1))
         refuse(EG_NOT_WRITTEN, "eg_record_fork_branch: a device recording holds at most " + std::to_string(kRecordStreams) + " open arms and branches at once");
     rec.shape.fork_branch();
+    rec.log.push_back(Op{ Op::ForkBranch, nullptr, {}, {} });
     Frame& f = rec.frames.back();
     Current current(ctx.dev);
     ctx.dev.stream = fork_branch(f.fork);
@@ -1914,6 +1975,7 @@ void device_record_fork_end(eg_ctx& ctx) {
         abort_recording(ctx);
         refuse(EG_BAD_REQUEST, race);
     }
+    rec.log.push_back(Op{ Op::ForkEnd, nullptr, {}, {} });
     const Frame f = rec.frames.back();
     rec.frames.pop_back();
     ctx.dev.stream = f.outer;
@@ -1933,80 +1995,9 @@ void device_record_wait(eg_ctx& ctx, std::int32_t n_planes, eg_plane_s* const* p
     if (!pool_has(rec.pool, 0, self))
         refuse(EG_NOT_WRITTEN, "eg_record_wait: a device recording holds at most " + std::to_string(kRecordEvents) + " events for its forks and waits");
     rec.shape.wait(std::vector<eg_plane_s*>(planes, planes + n_planes));
+    rec.log.push_back(Op{ Op::Wait, nullptr, {}, std::vector<eg_plane_s*>(planes, planes + n_planes) });
     Current current(ctx.dev);
     for (unsigned j = 0; j < self; ++j) fork_wait(f.fork, self, j);
-}
-
-/** @brief The innermost open WHILE of @p rec (null: none) and whether another encloses it. */
-const Frame* innermost_while(const DeviceRecording& rec, bool& nested) {
-    const Frame* found = nullptr;
-    nested = false;
-    for (std::size_t i = rec.frames.size(); i-- > 0;)
-        if (rec.frames[i].iteration != nullptr) {
-            nested = nested || found != nullptr;
-            found = found != nullptr ? found : &rec.frames[i];
-        }
-    return found;
-}
-
-void* device_record_scratch(eg_ctx& ctx, std::size_t bytes) {
-    DeviceRecording& rec = recording_of(ctx);
-    Current current(ctx.dev);
-    void* data = scratch_alloc(rec.pool, bytes, ctx.dev.ordinal);
-    rec.scratch.push_back(data);
-    return data;
-}
-
-std::int32_t device_record_save_test(eg_ctx& ctx, eg_plane_s* cell, std::int64_t cell_index, eg_plane_s* baseline, std::int64_t baseline_index) {
-    DeviceRecording& rec = recording_of(ctx);
-    bool nested = false;
-    const Frame* loop = innermost_while(rec, nested);
-    if (nested) refuse(EG_NOT_WRITTEN, "a saved test inside two nested WHILE bodies is not written");
-    const unsigned* c = test_word(ctx, cell, cell_index, "saved test cell");
-    const unsigned* b = baseline != nullptr ? test_word(ctx, baseline, baseline_index, "saved test baseline") : nullptr;
-    const unsigned capacity = loop != nullptr ? loop->cap : 1u;
-    void* buffer = device_record_scratch(ctx, static_cast<std::size_t>(capacity) * 2 * sizeof(unsigned));
-    rec.launches_only = false;
-    Current current(ctx.dev);
-    save_test_step(ctx.dev.stream, c, b, loop != nullptr ? loop->iteration : nullptr, static_cast<unsigned*>(buffer), capacity);
-    rec.saves.push_back({ buffer, capacity });
-    return static_cast<std::int32_t>(rec.saves.size()) - 1;
-}
-
-void device_record_loop_copy(eg_ctx& ctx, const void* src, void* buffer, std::size_t bytes) {
-    DeviceRecording& rec = recording_of(ctx);
-    bool nested = false;
-    const Frame* loop = innermost_while(rec, nested);
-    if (loop == nullptr) refuse(EG_NOT_WRITTEN, "a loop copy outside a WHILE body is not written");
-    if (nested) refuse(EG_NOT_WRITTEN, "a loop copy inside two nested WHILE bodies is not written");
-    rec.launches_only = false;
-    Current current(ctx.dev);
-    loop_copy_step(ctx.dev.stream, src, buffer, bytes, loop->iteration, loop->cap);
-}
-
-void device_saved_read(eg_ctx& ctx, const eg_graph* handle, DeviceSaved& out) {
-    const auto* graph = reinterpret_cast<const DeviceGraph*>(handle);
-    out = DeviceSaved();
-    std::vector<std::vector<std::uint32_t>> raw(graph->saves.size());
-    std::vector<ReadItem> items;
-    for (std::size_t s = 0; s < graph->saves.size(); ++s) {
-        raw[s].assign(static_cast<std::size_t>(graph->saves[s].capacity) * 2, 0u);
-        items.push_back({ raw[s].data(), graph->saves[s].buffer, raw[s].size() * sizeof(std::uint32_t) });
-    }
-    out.iterations.assign(graph->loops, 0u);
-    std::vector<std::uint32_t> states(static_cast<std::size_t>(graph->loops) * 2, 0u);
-    if (graph->loops != 0) items.push_back({ states.data(), graph->loop_cells, states.size() * sizeof(std::uint32_t) });
-    Current current(ctx.dev);
-    read_many(ctx.dev.stream, items);
-    for (std::size_t s = 0; s < raw.size(); ++s) {
-        out.cell.emplace_back();
-        out.baseline.emplace_back();
-        for (std::size_t k = 0; k < raw[s].size() / 2; ++k) {
-            out.cell.back().push_back(raw[s][2 * k]);
-            out.baseline.back().push_back(raw[s][2 * k + 1]);
-        }
-    }
-    for (unsigned i = 0; i < graph->loops; ++i) out.iterations[i] = states[2 * i + 1];
 }
 
 /** @brief Whether this context's driver has conditional arms (IF_ELSE, SWITCH): the capability bits' truth on a device context. */
@@ -2028,7 +2019,6 @@ void device_graph_describe(eg_ctx&, const eg_graph* handle, eg_graph_description
 /** @brief A host node on the capture in scope (device/Seam.h). Nothing in it makes a CUDA call. */
 void device_record_host_step(eg_ctx& ctx, void (*run)(void*, StepFailure&) noexcept, void* user, void (*release)(eg_ctx&, void*)) {
     DeviceRecording& rec = *ctx.dev_rec;
-    rec.launches_only = false;
     EG_DRIVER(cuLaunchHostFunc);
     if (!rec.failure) rec.failure = std::make_shared<StepFailure>();
     rec.hooks.push_back(std::make_unique<HostHook>(HostHook{ run, user, release, rec.failure }));
@@ -2040,21 +2030,100 @@ void device_record_host_step(eg_ctx& ctx, void (*run)(void*, StepFailure&) noexc
     }
 }
 
-/** @brief eg_record_end on a device context: end the capture and instantiate it (FAULT when the capture failed). */
+namespace {
+
+/** @brief Free what @p rec holds: its plan and transform references, its hooks and loop states. Run after the capture ended or was dropped. */
+void release_recording(eg_ctx& ctx, DeviceRecording& rec) {
+    release_hooks(ctx, rec.hooks);
+    for (eg_plan_s* p : rec.plans) plan_release(ctx, p);
+    for (eg_fft_s* f : rec.ffts) fft_release(ctx, f);
+    device_free(ctx, rec.loop_cells);
+    rec.loop_cells = nullptr;
+}
+
+/** @brief What the second capture of a EG_RECORD_DIFF recording adds, built from the tape @p diff (device memory made here, in @p owned, outside any
+ *  capture): a save slot for every conditional with tests, and the copies the tape keeps in front of each launch (one table per plane of a WHILE body). */
+void plan_diff_pass(eg_ctx& ctx, const GraphDiff& diff, std::size_t n_launches, DiffPass& pass, std::vector<void*>& owned) {
+    const ReversePlan& plan = diff.plan;
+    const auto grab = [&](std::size_t bytes) {
+        void* data = device_alloc(ctx, std::max<std::size_t>(bytes, 8), true);
+        owned.push_back(data);
+        return data;
+    };
+    std::map<int, unsigned> entries;                                            // per conditional node: its tests (one per iteration inside a loop)
+    for (const RTest& t : plan.tests) {
+        if (t.key.size() > 2) refuse(EG_NOT_WRITTEN, "eg_record_end: a test inside two nested WHILE loops is not written on a device");
+        ++entries[t.key.front()];
+    }
+    for (const auto& e : entries) pass.slots.push_back({ e.first, e.second, static_cast<unsigned*>(grab(static_cast<std::size_t>(e.second) * 3 * sizeof(unsigned))) });
+    pass.before.assign(n_launches, {});
+    std::map<std::pair<int, int>, std::vector<void*>> tables;                   // (launch, plane) in a loop: the copy of each iteration
+    std::map<int, unsigned> iterations;                                         // per launch in a loop: its iteration count
+    for (const RLeaf& l : plan.leaves) {
+        if (l.key.size() > 2) refuse(EG_NOT_WRITTEN, "eg_record_end: a launch inside two nested WHILE loops is not written on a device");
+        if (l.key.size() == 2) iterations[l.launch] = std::max<unsigned>(iterations[l.launch], static_cast<unsigned>(l.key[1]) + 1);
+    }
+    for (const Snapshot& snap : diff.snapshots) {
+        const RLeaf& leaf = plan.leaves[snap.node];
+        const DLTensor& t = diff.planes[static_cast<std::size_t>(snap.plane)]->tensor->dl_tensor;
+        const char* plane = static_cast<const char*>(t.data) + t.byte_offset;
+        auto& copies = pass.before[static_cast<std::size_t>(leaf.launch)];
+        if (leaf.key.size() == 1) {
+            copies.push_back({ plane, snap.size, const_cast<char*>(snap.bytes.data()), nullptr, 0 });
+            continue;
+        }
+        std::vector<void*>& table = tables[{ leaf.launch, snap.plane }];
+        if (table.empty()) {
+            table.assign(iterations[leaf.launch], grab(snap.size));              // an iteration with no copy of its own writes a spare
+            copies.push_back({ plane, snap.size, nullptr, nullptr, iterations[leaf.launch] });
+        }
+        table[static_cast<std::size_t>(leaf.key[1])] = const_cast<char*>(snap.bytes.data());
+    }
+    for (auto& entry : tables) {
+        void** device_table = static_cast<void**>(grab(entry.second.size() * sizeof(void*)));
+        device_write(ctx, device_table, entry.second.data(), entry.second.size() * sizeof(void*));
+        for (LeafCopy& c : pass.before[static_cast<std::size_t>(entry.first.first)])
+            if (c.direct == nullptr && c.table == nullptr && c.plane == static_cast<const char*>(diff.planes[static_cast<std::size_t>(entry.first.second)]->tensor->dl_tensor.data) +
+                                                              diff.planes[static_cast<std::size_t>(entry.first.second)]->tensor->dl_tensor.byte_offset)
+                c.table = device_table;
+    }
+}
+
+/** @brief Capture @p rec's calls again with @p pass's copies and saves in them: the capture of a EG_RECORD_DIFF recording. @p ctx.dev_rec is the new recording. */
+void capture_again(eg_ctx& ctx, const DeviceRecording& first, DeviceRecording& second) {
+    for (const Op& op : first.log) {
+        switch (op.kind) {
+            case Op::Launch: device_record_launch(ctx, *op.plan); break;
+            case Op::CondBegin: device_record_cond_begin(ctx, &op.cond); break;
+            case Op::CondArm: device_record_cond_arm(ctx); break;
+            case Op::CondEnd: device_record_cond_end(ctx); break;
+            case Op::ForkBegin: device_record_fork_begin(ctx); break;
+            case Op::ForkBranch: device_record_fork_branch(ctx); break;
+            case Op::ForkEnd: device_record_fork_end(ctx); break;
+            case Op::Wait: device_record_wait(ctx, static_cast<std::int32_t>(op.planes.size()), op.planes.data()); break;
+        }
+    }
+    (void)second;
+}
+
+}  // namespace
+
+/** @brief eg_record_end on a device context: end the capture and instantiate it (FAULT when the capture failed). With EG_RECORD_DIFF the shape's
+ *  reverse plan and the tape are made first, and the recording is captured again with the tape's copies and the tests' saves in it. */
 void device_record_end(eg_ctx& ctx, const eg_record_end_desc* desc, eg_graph** out) {
     if (out == nullptr) refuse(EG_BAD_REQUEST, "eg_record_end: out is NULL");
     *out = nullptr;
     if (ctx.dev_rec->shape.open()) refuse(EG_BAD_REQUEST, "eg_record_end: a conditional or fork is still open");
     bool diff_wanted = false;
+    ReversePlan reverse;
     if (desc != nullptr) {
         const eg_record_end_desc d = read_input(desc, "eg_record_end_desc");
         if ((d.flags & ~EG_RECORD_DIFF) != 0) refuse(EG_BAD_REQUEST, "eg_record_end_desc.flags: unknown bits " + std::to_string(d.flags & ~EG_RECORD_DIFF));
         diff_wanted = (d.flags & EG_RECORD_DIFF) != 0;
         if (!diff_wanted && d.n_vjps != 0) refuse(EG_BAD_REQUEST, "eg_record_end_desc.n_vjps: vjps without EG_RECORD_DIFF");
-        if (diff_wanted && !ctx.dev_rec->launches_only)
-            refuse(EG_NOT_WRITTEN, "eg_record_end: the recording holds a node that is not an eg_launch; EG_RECORD_DIFF records plain launches only");
+        if (diff_wanted) reverse = ctx.dev_rec->shape.reverse_plan();    // a refusal leaves the recording open, as the host's does
     }
-    const std::unique_ptr<DeviceRecording> rec(ctx.dev_rec);
+    std::unique_ptr<DeviceRecording> rec(ctx.dev_rec);
     ctx.dev_rec = nullptr;
     Current current(ctx.dev);
     DeviceLoop* loop = nullptr;
@@ -2071,46 +2140,62 @@ void device_record_end(eg_ctx& ctx, const eg_record_end_desc* desc, eg_graph** o
     rec->pool = nullptr;
     run_later(ctx, *rec);
     if (loop == nullptr) {
-        release_hooks(ctx, rec->hooks);
-        for (eg_plan_s* p : rec->plans) plan_release(ctx, p);
-        for (eg_fft_s* f : rec->ffts) fft_release(ctx, f);
-        device_free(ctx, rec->loop_cells);
-        for (void* p : rec->scratch) scratch_free(ctx.dev.stream, p);
+        release_recording(ctx, *rec);
         refuse(EG_FAULT, "eg_record_end: the device capture failed: " + failed);
     }
     auto graph = std::make_unique<DeviceGraph>();
     if (diff_wanted) {
-        // The capture just made holds the launches alone. The tape allocates (not allowed inside a capture), so it is planned
-        // now and the launches are captured again with the snapshot copies in front of the launches that overwrite a plane.
+        // The tape allocates (not allowed inside a capture), so it is planned now, and the calls are captured again with its copies and saves in them.
+        DiffPass pass;
+        std::unique_ptr<DeviceRecording> second;
         try {
-            graph->diff = diff_plan(ctx, rec->plans, *desc);
+            graph->diff = diff_plan(ctx, rec->plans, reverse, *desc);
             loop_free(loop);
             loop = nullptr;
-            rec->capture = capture_begin(rec->stream);
-            for (std::size_t i = 0; i < rec->plans.size(); ++i) {
-                for (const Snapshot& snap : graph->diff->snapshots) {
-                    if (snap.node != i) continue;
-                    const DLTensor& t = graph->diff->planes[static_cast<std::size_t>(snap.plane)]->tensor->dl_tensor;
-                    copy_step(rec->stream, const_cast<char*>(snap.bytes.data()), static_cast<char*>(t.data) + t.byte_offset, snap.size);
-                }
-                finished_zero(*rec->plans[i], rec->stream);
-                launch_on(*rec->plans[i], rec->stream);
-            }
-            loop = capture_end(rec->capture);
-            rec->capture = nullptr;
+            plan_diff_pass(ctx, *graph->diff, rec->plans.size(), pass, graph->buffers);
+            second = std::make_unique<DeviceRecording>();
+            second->stream = rec->stream;
+            second->loop_cells = device_alloc(ctx, kRecordedLoops * 2 * sizeof(unsigned), true);
+            second->pool = pool_new(kRecordStreams, kRecordEvents);
+            second->capture = capture_begin(second->stream);
+            second->dp = &pass;
+            ctx.dev_rec = second.get();
+            capture_again(ctx, *rec, *second);
+            ctx.dev_rec = nullptr;
+            loop = capture_end(second->capture);
+            second->capture = nullptr;
         } catch (...) {
+            const bool opened = second != nullptr && second->capture != nullptr;
+            ctx.dev_rec = nullptr;
+            ctx.dev.stream = rec->stream;
+            if (second != nullptr) {
+                for (Frame& f : second->frames) {
+                    cond_drop(f.weave);
+                    fork_drop(f.fork);
+                }
+                if (opened) capture_abort(second->capture);
+                pool_free(second->pool);
+                run_later(ctx, *second);
+                release_recording(ctx, *second);
+            }
             if (loop != nullptr) loop_free(loop);
-            if (rec->capture != nullptr) capture_abort(rec->capture);
             if (graph->diff != nullptr) diff_free(ctx, *graph->diff);
-            for (eg_plan_s* p : rec->plans) plan_release(ctx, p);
+            for (void* p : graph->buffers) device_free(ctx, p);
+            release_recording(ctx, *rec);
             throw;
         }
+        pool_free(second->pool);
+        run_later(ctx, *second);
+        for (eg_plan_s* p : rec->plans) plan_release(ctx, p);    // the second capture holds its own references
+        rec->plans.clear();
+        device_free(ctx, rec->loop_cells);
+        rec->loop_cells = nullptr;
+        graph->slots = pass.slots;
+        rec = std::move(second);
     }
     graph->loop = loop;
     graph->shape = std::move(rec->shape);
     graph->kernels = std::move(rec->kernels);
-    graph->scratch = std::move(rec->scratch);
-    graph->saves = std::move(rec->saves);
     graph->loops = rec->loops;
     if (rec->loops != 0) graph->loop_cells = rec->loop_cells;
     else device_free(ctx, rec->loop_cells);
@@ -2121,6 +2206,34 @@ void device_record_end(eg_ctx& ctx, const eg_record_end_desc* desc, eg_graph** o
     graph->failure = std::move(rec->failure);
     ctx.dev_graphs.insert(graph.get());
     *out = reinterpret_cast<eg_graph*>(graph.release());
+}
+
+/** @brief The tests the last replay of a device graph saved, into ``diff.saved``: every slot read in one sync, each test by its key (the conditional's
+ *  node ordinal, then the iteration of the WHILE around it or at it). */
+void device_diff_read_saved(eg_ctx& ctx, GraphDiff& diff) {
+    const DeviceGraph* graph = nullptr;
+    for (const DeviceGraph* g : ctx.dev_graphs)
+        if (g->diff.get() == &diff) graph = g;
+    if (graph == nullptr) return;
+    std::vector<std::vector<std::uint32_t>> raw(graph->slots.size());
+    std::vector<ReadItem> items;
+    for (std::size_t i = 0; i < graph->slots.size(); ++i) {
+        raw[i].assign(static_cast<std::size_t>(graph->slots[i].capacity) * 3, 0u);
+        items.push_back({ raw[i].data(), graph->slots[i].buffer, raw[i].size() * sizeof(std::uint32_t) });
+    }
+    Current current(ctx.dev);
+    read_many(ctx.dev.stream, items);
+    for (std::size_t t = 0; t < diff.plan.tests.size(); ++t) {
+        const std::vector<int>& key = diff.plan.tests[t].key;
+        for (std::size_t i = 0; i < graph->slots.size(); ++i) {
+            if (graph->slots[i].cond != key.front()) continue;
+            const std::size_t entry = key.size() > 1 ? static_cast<std::size_t>(key.back()) : 0;
+            TestSave& save = diff.saved[t];
+            save.evaluated = raw[i][3 * entry] != 0;
+            save.cell = static_cast<std::int32_t>(raw[i][3 * entry + 1]);
+            save.base = static_cast<std::int32_t>(raw[i][3 * entry + 2]);
+        }
+    }
 }
 
 /** @brief Whether @p graph is a device graph of @p ctx. */
@@ -2178,6 +2291,8 @@ void device_graph_launch(eg_ctx& ctx, eg_graph* handle) {
     Current current(ctx.dev);
     reapply_bindings(*graph);
     if (graph->diff != nullptr) diff_check_launch(*graph->diff);
+    for (const DiffSlot& slot : graph->slots)    // the tests this replay will save start as not evaluated
+        zero_bytes(ctx.dev.stream, slot.buffer, static_cast<std::size_t>(slot.capacity) * 3 * sizeof(unsigned));
     loop_launch(graph->loop, ctx.dev.stream);
     if (graph->diff != nullptr) diff_launched(*graph->diff);
 }
@@ -2206,7 +2321,7 @@ void device_graph_free(eg_ctx& ctx, eg_graph* handle) {
         loop_free(loop);
     });
     device_free(ctx, graph->loop_cells);
-    for (void* p : graph->scratch) scratch_free(ctx.dev.stream, p);
+    for (void* p : graph->buffers) device_free(ctx, p);
 }
 
 /** @brief At context free: end a capture in progress (dropping it) and free every device graph, without releasing

@@ -148,12 +148,6 @@ Bytes sum_over_samples(eg_ctx* dev, const Bytes& x, std::int64_t count, std::siz
 
 }  // namespace
 
-std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<eg_plan_s*>& launches, const eg_record_end_desc& desc) {
-    ReversePlan flat;                           // a recording of launches in a row: every launch is a leaf that always runs
-    for (std::size_t i = 0; i < launches.size(); ++i) flat.leaves.push_back({ static_cast<int>(i), {}, {} });
-    return diff_plan(ctx, launches, flat, desc);
-}
-
 bool leaf_ran(const GraphDiff& diff, std::size_t leaf) {
     for (const RGate& g : diff.plan.leaves[leaf].gates)
         if (!took(diff.plan.tests[static_cast<std::size_t>(g.test)], diff.saved[static_cast<std::size_t>(g.test)], g.arm)) return false;
@@ -280,6 +274,7 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
     GraphDiff& d = *tape;
     eg_ctx* const D = d.dev;       // a DEVICE graph: its buffers, vjp launches and sums are queued on the context's stream
     if (!d.launched) refuse(EG_BAD_REQUEST, "eg_graph_reverse: the graph was never launched (eg_graph_launch)");
+    if (D != nullptr) device_diff_read_saved(*D, d);    // the tests the last replay saw: one read-back
     for (const GraphDiff::PlanMark& m : d.marks) {
         if (m.plan->binds != m.binds)
             refuse(EG_BAD_REQUEST, "eg_graph_reverse: a plan of the graph (unit '" + m.plan->unit->name + "') was rebound (eg_bind, eg_clear) after its last launch");

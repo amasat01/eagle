@@ -194,19 +194,13 @@ void pool_free(DevicePool* pool) noexcept;
 /** @brief Whether @p pool still has @p streams streams and @p events events to hand out. */
 bool pool_has(const DevicePool* pool, unsigned streams, unsigned events);
 
-/** @brief Zeroed device memory of @p bytes for the recording @p pool belongs to, made while its capture is open: allocated by a thread of its own (the capturing
- *  thread may not allocate) on a stream that is not captured, and settled, so it is ready for the captured work on return; @p device is the context's. Free it with scratch_free. */
-void* scratch_alloc(DevicePool* pool, std::size_t bytes, int device);
-
-/** @brief Queue on @p stream the free of scratch_alloc memory, after the work queued there. */
-void scratch_free(std::uint64_t stream, void* data) noexcept;
-
-/** @brief Queue on @p stream (inside a capture) the save of one conditional test: entry ``min(*iter, capacity - 1)`` of @p dst (two words: the
- *  cell and the baseline, 0 for none) takes ``*cell`` and ``*baseline``. A null @p iter is entry 0. */
+/** @brief Queue on @p stream (inside a capture) the save of one conditional test: entry ``min(*iter, capacity - 1)`` of @p dst (three words: 1 for
+ *  "evaluated", the cell, the baseline or 0 for none) takes ``*cell`` and ``*baseline``. A null @p iter is entry 0. */
 void save_test_step(std::uint64_t stream, const unsigned* cell, const unsigned* baseline, const unsigned* iter, unsigned* dst, unsigned capacity);
 
-/** @brief Queue on @p stream (inside a capture) the copy of @p bytes at @p src into slot ``min(*iter, capacity - 1)`` of @p buffer (slots of @p bytes each). */
-void loop_copy_step(std::uint64_t stream, const void* src, void* buffer, std::size_t bytes, const unsigned* iter, unsigned capacity);
+/** @brief Queue on @p stream (inside a capture) the copy of @p bytes at @p src to ``table[min(*iter, capacity - 1)]``, @p table being a device array of
+ *  device addresses. */
+void table_copy_step(std::uint64_t stream, const void* src, std::size_t bytes, void* const* table, const unsigned* iter, unsigned capacity);
 
 /** @brief One device-to-host read of read_many. */
 struct ReadItem {
