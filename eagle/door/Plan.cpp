@@ -174,9 +174,9 @@ void check_plane(const eg_plan_s& plan, int slot, const eg_plane_s& plane) {
         }
         if (s.optional_made && elements(t) < s.min_elements)
             refuse(EG_BAD_REQUEST, what + ": the mix counters of a dispatch group hold at least " + std::to_string(s.min_elements) + " elements (one per branch)");
-        if (slot == plan.unit->index_map_slot && t.ndim != 1)
+        if (slot == set_map_slot(plan) && t.ndim != 1)
             refuse(EG_BAD_REQUEST, what + ": the index map is one dimension");
-        if (slot == plan.unit->index_count_slot && (t.ndim != 1 || t.shape[0] != 1))
+        if (slot == set_count_slot(plan) && (t.ndim != 1 || t.shape[0] != 1))
             refuse(EG_BAD_REQUEST, what + ": the index count is one cell, shape (1,)");
         if (slot == plan.unit->finish.steps_slot && (t.ndim != 1 || t.shape[0] != 1))
             refuse(EG_BAD_REQUEST, what + ": the steps word is one cell, shape (1,)");
@@ -293,9 +293,9 @@ void check_bind(const eg_ctx& ctx, const eg_plan_s& plan, const eg_bind_desc& d)
         if (s.role == EG_ROLE_NSAMPLES)
             refuse(EG_BAD_REQUEST, "slot " + std::to_string(slot) + " ('" + s.name +
                    "') is the sample count: eagle passes it, do not bind it");
-        if (slot == plan.unit->active_map_slot || slot == plan.unit->active_count_slot)
+        if (plan.active_owner != nullptr && (slot == plan.unit->active_map_slot || slot == plan.unit->active_count_slot))
             refuse(EG_BAD_REQUEST, "slot " + std::to_string(slot) + " ('" + s.name +
-                   "') is part of the active set: the runner makes it, do not pass it");
+                   "') is part of the active set of a runner: the runner makes it, do not pass it");
         if (s.made)
             refuse(EG_BAD_REQUEST, "slot " + std::to_string(slot) + " ('" + s.name +
                    "') is a companion or compensation plane: eagle makes it, do not pass it");
@@ -459,8 +459,8 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
             if (st.cell_row > 0 && !st.unit->cells.empty() && p.base % st.cell_row != 0)
                 refuse(EG_BAD_REQUEST, "unit '" + d.unit->name + "' stage '" + st.ref_name + "' reduces over samples in rows of " + std::to_string(st.cell_row) +
                        ": a partition starts on a multiple of it, got base " + std::to_string(p.base));
-    if (d.unit->index_count_slot >= 0 && parts.size() != 1)
-        refuse(EG_BAD_REQUEST, "unit '" + d.unit->name + "' reads an index set: one partition (positions of the set)");
+    if ((d.unit->index_count_slot >= 0 || d.unit->active_map_slot >= 0) && parts.size() != 1)
+        refuse(EG_BAD_REQUEST, "unit '" + d.unit->name + "' reads an index set or an active set: one partition (positions of the set)");
     static constexpr exec::Access kAccess[] = { exec::Access::SampleLocal,
         exec::Access::CrossSampleRead, exec::Access::CrossSampleWrite };
     try {

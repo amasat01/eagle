@@ -179,8 +179,8 @@ inline std::uint64_t run_plan(const eg_plan_s& plan, int threads) {
     if (plan.unit->seg.present) return run_segmented(plan, threads);
     if (!plan.unit->stages.empty()) return run_split(plan, threads);
     std::uint64_t tiles = 0;
-    if (plan.unit->index_count_slot >= 0) {    // an index set: its positions [base, base + count) of the plan's one partition, cut at the live count; the entry maps them itself
-        const eg_plane_s& c = *plan.bindings[plan.unit->index_count_slot].plane;
+    if (set_count_slot(plan) >= 0) {    // an index set or a caller's active set: its positions [base, base + count) of the plan's one partition, cut at the live count; the entry maps them itself
+        const eg_plane_s& c = *plan.bindings[static_cast<std::size_t>(set_count_slot(plan))].plane;
         const std::uint64_t live = *reinterpret_cast<const std::uint32_t*>(static_cast<const char*>(c.tensor->dl_tensor.data) +
                                                                           c.tensor->dl_tensor.byte_offset);
         check_index_live(plan, live);

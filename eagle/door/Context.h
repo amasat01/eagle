@@ -464,6 +464,21 @@ struct eg_plan_s {
     bool caller_ref = true;
 };
 
+/** @brief The slots a plain launch of @p p reads as its set of positions: an index set's, or the active set of a plan no runner owns
+ *  (the caller binds the map and the count); -1: none (a prefix set has a count and no map). */
+inline std::int32_t set_map_slot(const eg_plan_s& p) {
+    return p.unit->index_count_slot >= 0 ? p.unit->index_map_slot : p.active_owner == nullptr ? p.unit->active_map_slot : -1;
+}
+inline std::int32_t set_count_slot(const eg_plan_s& p) {
+    return p.unit->index_count_slot >= 0 ? p.unit->index_count_slot : p.active_owner == nullptr ? p.unit->active_count_slot : -1;
+}
+
+/** @brief The steps one launch advances the finisher of a step of @p n_plans plans: its own, but one when its steps are AUTO and the step has
+ *  several plans (the runner writes 1 into the steps word at every launch). */
+inline std::int64_t launch_steps(const eagle::door::FinishFacts& f, std::size_t n_plans) {
+    return f.steps == EG_STEPS_AUTO && n_plans > 1 ? 1 : f.steps;
+}
+
 namespace eagle {
 namespace door {
 

@@ -160,10 +160,11 @@ void run_auto(eg_runner_s& runner, int threads, std::int64_t& iterations, std::i
     eg_plan_s& first = *runner.plans[0];
     const FinishFacts& f = first.unit->finish;
     const std::int64_t n = first.n_samples, cap = runner.max_steps;
-    const std::int64_t cap_iterations = (cap + kAutoKMin - 1) / kAutoKMin + 1;
+    const bool one = runner.plans.size() > 1;    // a several-plan step: one step per launch
+    const std::int64_t cap_iterations = one ? cap : (cap + kAutoKMin - 1) / kAutoKMin + 1;
     std::int64_t k = kAutoK0, fin_at = first.finished, done = 0;
     std::int64_t& word = *static_cast<std::int64_t*>(steps_cell(first));
-    word = std::min(kAutoK0, cap);
+    word = one ? std::min<std::int64_t>(1, cap) : std::min(kAutoK0, cap);
     bool go = static_cast<std::int64_t>(first.finished) != n && cap > 0;
     ActiveState& a = runner.act;
     std::vector<Owned> owned;
@@ -178,7 +179,7 @@ void run_auto(eg_runner_s& runner, int threads, std::int64_t& iterations, std::i
     while (iterations < cap_iterations && go) {
         for (std::size_t i = 0; i < runner.plans.size(); ++i) {
             eg_plan_s& p = *runner.plans[i];
-            *static_cast<std::int64_t*>(steps_cell(p)) = word;
+            if (p.unit->finish.steps_slot >= 0) *static_cast<std::int64_t*>(steps_cell(p)) = word;
             if (!runner.active) {
                 host::run_plan(p, threads);
             } else if (a.count > 0) {
@@ -196,7 +197,7 @@ void run_auto(eg_runner_s& runner, int threads, std::int64_t& iterations, std::i
         const std::int64_t fin = first.finished;
         done += word;
         out.mapped += n - fin_at;
-        const std::int64_t next = eagle::policy::bandK(kAutoRate, fin - fin_at, n - fin, k, f.steps_max, kAutoKMin);
+        const std::int64_t next = one ? 1 : eagle::policy::bandK(kAutoRate, fin - fin_at, n - fin, k, f.steps_max, kAutoKMin);
         fin_at = fin;
         k = next;
         const std::int64_t left = cap - done;
@@ -347,7 +348,11 @@ void runner_free(eg_ctx& ctx, eg_runner_s* runner) {
     look_free(ctx, *runner);
     record_free(ctx, *runner);
     for (eg_plan_s* p : runner->plans) {
-        if (p->active_owner == runner) p->active_owner = nullptr;
+        if (p->active_owner == runner) {    // the map and count were the runner's own: the plan reads them no more
+            p->active_owner = nullptr;
+            p->bindings[static_cast<std::size_t>(p->unit->active_map_slot)].bound = false;
+            p->bindings[static_cast<std::size_t>(p->unit->active_count_slot)].bound = false;
+        }
         plan_release(ctx, p);
     }
     delete runner;

@@ -68,9 +68,14 @@ void check_plans(const eg_ctx& ctx, const eg_runner_desc& d) {
     if (first.n_samples > std::numeric_limits<std::uint32_t>::max())
         refuse(EG_BAD_REQUEST, "n_samples " + std::to_string(first.n_samples) + ": the finished counter "
                "is uint32");
-    if (d.n_plans > 1 && f.steps == EG_STEPS_AUTO)
-        refuse(EG_NOT_WRITTEN, "unit '" + first.unit->name + "': finish steps AUTO in a several-plan step is "
-               "not written in this build of the door");
+    if (d.n_plans > 1 && f.steps == EG_STEPS_AUTO) {    // one step per launch: the runner owns the steps word
+        if (first.bindings[static_cast<std::size_t>(f.steps_slot)].plane != nullptr)
+            refuse(EG_BAD_REQUEST, "unit '" + first.unit->name + "': finish steps AUTO in a several-plan step runs one step per launch, "
+                   "the runner writes the steps word: do not bind it");
+        if ((d.flags & EG_RUN_RECORD) || d.events == EG_EVENTS_REFINE)
+            refuse(EG_NOT_WRITTEN, "unit '" + first.unit->name + "': finish steps AUTO in a several-plan step is not recorded or refined "
+                   "in this build of the door");
+    }
     for (int i = 1; i < d.n_plans; ++i) {
         const eg_plan_s& p = *d.plans[i];
         if (p.n_samples != first.n_samples)
@@ -80,7 +85,7 @@ void check_plans(const eg_ctx& ctx, const eg_runner_desc& d) {
             refuse(EG_NOT_WRITTEN, "plans[" + std::to_string(i) + "] (unit '" + p.unit->name + "'): a second "
                    "finishing plan in one step is not written in this build of the door");
     }
-    if (d.n_plans > 1 && f.steps != 1)
+    if (d.n_plans > 1 && f.steps != 1 && f.steps != EG_STEPS_AUTO)
         refuse(EG_BAD_REQUEST, "unit '" + first.unit->name + "' advances " + std::to_string(f.steps) +
                " steps per launch, but each plan of a several-plan step takes one step per launch");
 }
@@ -173,6 +178,10 @@ bool check_active(const eg_runner_desc& d) {
         if (p.active_owner != nullptr)
             refuse(EG_BAD_REQUEST, "plans[" + std::to_string(i) + "] already reads the active set of another "
                    "runner");
+        if (p.bindings[static_cast<std::size_t>(p.unit->active_map_slot)].plane != nullptr ||
+            p.bindings[static_cast<std::size_t>(p.unit->active_count_slot)].plane != nullptr)
+            refuse(EG_BAD_REQUEST, "plans[" + std::to_string(i) + "] has an active map or count the caller bound: "
+                   "the runner makes the active set, so a plan it runs binds neither");
     }
     const std::int64_t group = d.plans[0]->unit->group;
     for (int i = 1; i < d.n_plans; ++i)
@@ -233,13 +242,14 @@ std::vector<Owned> owned_planes(const eg_runner_s& runner) {
 /** @brief Refuse an index set's live count above the entries its plan holds: the map's, else the sample count's. */
 void check_index_live(const eg_plan_s& plan, std::uint64_t live) {
     std::uint64_t limit = static_cast<std::uint64_t>(plan.n_samples);   // a prefix set: up to the sample count
-    if (plan.unit->index_map_slot >= 0) {
-        const DLTensor& m = plan.bindings[plan.unit->index_map_slot].plane->tensor->dl_tensor;
+    const std::int32_t map = set_map_slot(plan);
+    if (map >= 0) {
+        const DLTensor& m = plan.bindings[static_cast<std::size_t>(map)].plane->tensor->dl_tensor;
         limit = static_cast<std::uint64_t>(m.shape[0]);
     }
     if (live > limit)
         refuse(EG_BAD_REQUEST, "the index count " + std::to_string(live) + " is above the " +
-               (plan.unit->index_map_slot >= 0 ? "map's " : "sample count's ") + std::to_string(limit) + " entries");
+               (map >= 0 ? "map's " : "sample count's ") + std::to_string(limit) + " entries");
 }
 
 /** @brief The steps between two compactions of a fixed-step active set: @p d's ``every``, else the smallest

@@ -674,6 +674,11 @@ eg_status eg_plan_free(eg_ctx* ctx, eg_plan* plan);
  * it names: every other slot keeps its plane and its state between launches.
  * Refused BAD_REQUEST while recording (between eg_record_begin and
  * eg_record_end): bind before recording.
+ * A unit with an active set (its map and count slots) takes the caller's planes there on a plan no runner owns: the
+ * map one dimension of the slot's integer dtype, the count one cell (1,). A plain eg_launch then runs the positions
+ * the map lists, in the order of the map and in any order, up to the count (refused BAD_REQUEST by name when the count
+ * is above the map's length); each position at most once is the caller's promise, which is not scanned. A plan a
+ * runner owns refuses the slots, and eg_runner_new refuses a plan that holds the caller's map or count.
  * Replaces: ``Plan.bind``, ``_plan_binding.BoundPlan``, ``_plan_pack``,
  * ``marshal``, ``_lane_bind`` (team grids, chunk counts), ``_cell_rows``.
  * Calls today: nothing compiled (Python packs ``ctypes`` addresses).
@@ -804,6 +809,8 @@ eg_status eg_plan_counters(eg_ctx* ctx, const eg_plan* plan, struct eg_plan_coun
  * Calls today: ``band_k``, ``band_rate``, ``entry_ratio``, ``persist_*``,
  * ``dispatch_*``, ``diff_default_window``, ``diff_chunk_samples``
  * (eagle_core.cpp bindings of the C++ policies).
+ * A unit whose finish steps are AUTO runs one step per launch in a step of several plans (the runner writes 1 into
+ * its steps word; a caller-bound steps word is refused); a fixed K above 1 there is refused.
  * Status: OK; BAD_REQUEST (a plan without a finish, every/reorder on a plan
  * without an active set, record without its derived units); NOT_WRITTEN.
  */

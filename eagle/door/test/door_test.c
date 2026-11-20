@@ -1668,6 +1668,115 @@ static void run_auto_case(eg_ctx* ctx, eg_unit* unit, int active, eg_structure s
     check(eg_runner_free(ctx, r) == EG_OK && t[0].deleted == 1, "AUTO runner freed");
 }
 
+/* A caller's active set on a plan no runner owns: count1a over a map that is non-ascending, ends-only and longer than its count. */
+static void check_caller_active_set(eg_ctx* ctx) {
+    eg_unit* unit = NULL;
+    check(load(ctx, "count1a", 0xE1, &unit) == EG_OK, "caller active set: eg_unit_load count1a");
+    if (unit == NULL) return;
+    static double k[RN], limit[RN];
+    static unsigned char mask[RN];
+    static int32_t map[6];
+    static uint32_t live;
+    const eg_structure structures[2] = { EG_STRUCTURE_HOST_SERIAL, EG_STRUCTURE_HOST_TEAM };
+    const int32_t threads[2] = { 1, 3 };
+    for (int si = 0; si < 2; ++si) {
+        eg_host_threads(ctx, threads[si]);
+        for (int64_t i = 0; i < RN; ++i) k[i] = 0.0, limit[i] = 1000.0, mask[i] = 0;
+        map[0] = RN - 1, map[1] = 0, map[2] = RN - 2, map[3] = 1, map[4] = 7, map[5] = 8;
+        live = 4;
+        struct tensor t[3], tm, tc;
+        eg_plan* p = count_plan(ctx, unit, structures[si], k, limit, mask, t);
+        eg_plane *pm = wrap(ctx, &tm, map, 6, kDLInt, 32), *pc = wrap(ctx, &tc, &live, 1, kDLUInt, 32);
+        const int32_t slots[2] = { 4, 5 };
+        eg_plane* planes[2] = { pm, pc };
+        struct eg_bind_desc bd;
+        memset(&bd, 0, sizeof(bd));
+        bd.struct_size = sizeof(bd);
+        bd.n_planes = 2;
+        bd.plane_slots = slots;
+        bd.planes = planes;
+        char what[160];
+        snprintf(what, sizeof(what), "caller active set: the map and count bind on a plan no runner owns (%s)",
+                 structures[si] == EG_STRUCTURE_HOST_SERIAL ? "HOST_SERIAL" : "HOST_TEAM");
+        check(p && pm && pc && eg_bind(ctx, p, &bd) == EG_OK, what);
+        if (!p || !pm || !pc) continue;
+        int launched = 1;
+        for (int l = 0; l < 3; ++l) launched &= eg_launch(ctx, p, NULL) == EG_OK;
+        int values = 1;
+        for (int64_t i = 0; i < RN; ++i) {
+            const int listed = i == RN - 1 || i == 0 || i == RN - 2 || i == 1;
+            values &= k[i] == (listed ? 3.0 : 0.0);
+        }
+        snprintf(what, sizeof(what), "caller active set: three plain launches advance exactly the listed positions (%s)",
+                 structures[si] == EG_STRUCTURE_HOST_SERIAL ? "HOST_SERIAL" : "HOST_TEAM");
+        check(launched && values, what);
+        struct eg_runner_desc d = runner_desc(&p, 1, 100);
+        eg_runner* r = NULL;
+        check(eg_runner_new(ctx, &d, &r) == EG_BAD_REQUEST && reason_has(ctx, "the caller bound"),
+              "caller active set: eg_runner_new over a plan holding the caller's map and count refused BAD_REQUEST by name");
+        live = 7;
+        check(eg_launch(ctx, p, NULL) == EG_BAD_REQUEST && reason_has(ctx, "above the map's 6 entries"),
+              "caller active set: a count above the map's length refused BAD_REQUEST at launch, by name");
+        eg_plan_free(ctx, p);
+        eg_plane_free(ctx, pm);
+        eg_plane_free(ctx, pc);
+    }
+    eg_host_threads(ctx, 1);
+    eg_unit_free(ctx, unit);
+}
+
+/* A steps AUTO finisher beside a plain plan in one step runs one step per launch. */
+static void check_auto_several(eg_ctx* ctx, eg_unit* ua) {
+    static double k[RN], limit[RN], want_k[RN], x[RN], y[RN], want_y[RN];
+    static unsigned char mask[RN], mask0[RN];
+    struct tensor t[3], tx, ty, tb[3];
+    count_inputs(k, limit, mask);
+    memcpy(mask0, mask, RN);
+    int64_t launches = 0, finished = 0;
+    count_oracle(limit, mask0, 1, 100000, want_k, &launches, &finished);
+    const double a = 2.0, b = -1.5;
+    for (int64_t i = 0; i < RN; ++i) x[i] = (double)(i % 13) * 0.5, want_y[i] = a * x[i] + b;
+    eg_unit* ax = NULL;
+    eg_plan *pa = count_plan(ctx, ua, EG_STRUCTURE_HOST_TEAM, k, limit, mask, t), *pax = NULL;
+    eg_plane *px = wrap(ctx, &tx, x, RN, kDLFloat, 64), *py = wrap(ctx, &ty, y, RN, kDLFloat, 64);
+    int ok = pa && px && py && load(ctx, "axpb", 0xA1, &ax) == EG_OK && plan(ctx, ax, EG_STRUCTURE_HOST_TEAM, RN, 0, NULL, NULL, &pax) == EG_OK &&
+             bind(ctx, pax, py, px, &a, &b) == EG_OK;
+    check(ok, "steps AUTO beside a plain plan: the two plans built");
+    if (!ok) return;
+    eg_plan* two[2] = { pa, pax };
+    eg_runner* r = NULL;
+    struct eg_runner_desc d = runner_desc(two, 2, 100000);
+    struct eg_run_report rep;
+    memset(&rep, 0, sizeof(rep));
+    rep.struct_size = sizeof(rep);
+    eg_status s = eg_runner_new(ctx, &d, &r);
+    if (s == EG_OK) s = eg_run(ctx, r, &rep);
+    int planes_ok = memcmp(k, want_k, sizeof(k)) == 0 && memcmp(y, want_y, sizeof(y)) == 0;
+    check(s == EG_OK && planes_ok && (rep.flags & EG_REPORT_DONE) && rep.launches == launches && rep.steps == launches &&
+              rep.finished == (uint32_t)finished,
+          "steps AUTO in a several-plan step runs to done at one step per launch: report.steps == launches, k and y as the closed form");
+    eg_runner_free(ctx, r);
+    /* a steps word the caller bound is refused: the runner owns it here */
+    static double word[1];
+    struct tensor tw;
+    eg_plane* pw = wrap(ctx, &tw, word, 1, kDLInt, 64);
+    eg_plan* pb = count_plan(ctx, ua, EG_STRUCTURE_HOST_TEAM, k, limit, mask, tb);
+    const int32_t steps_slot = 4;
+    struct eg_bind_desc bd;
+    memset(&bd, 0, sizeof(bd));
+    bd.struct_size = sizeof(bd);
+    bd.n_planes = 1;
+    bd.plane_slots = &steps_slot;
+    bd.planes = &pw;
+    eg_plan* with_word[2] = { pb, pax };
+    d = runner_desc(with_word, 2, 100);
+    check(pw && pb && eg_bind(ctx, pb, &bd) == EG_OK && eg_runner_new(ctx, &d, &r) == EG_BAD_REQUEST && reason_has(ctx, "steps word"),
+          "steps AUTO in a several-plan step with a caller-bound steps word refused BAD_REQUEST by name");
+    eg_plan_free(ctx, pa), eg_plan_free(ctx, pb), eg_plan_free(ctx, pax);
+    eg_plane_free(ctx, px), eg_plane_free(ctx, py), eg_plane_free(ctx, pw);
+    eg_unit_free(ctx, ax);
+}
+
 static void check_auto(eg_ctx* ctx) {
     eg_unit *ua = NULL, *uaa = NULL;
     check(load(ctx, "countA", 0xF1, &ua) == EG_OK && load(ctx, "countAa", 0xF2, &uaa) == EG_OK,
@@ -1692,8 +1801,9 @@ static void check_auto(eg_ctx* ctx) {
     eg_runner* r = NULL;
     struct eg_runner_desc d = runner_desc(two, 2, 100);
     int ok = pa && pb;
-    check(ok && eg_runner_new(ctx, &d, &r) == EG_NOT_WRITTEN && reason_has(ctx, "steps AUTO in a several-plan step"),
-          "steps AUTO in a several-plan step refused NOT_WRITTEN");
+    check(ok && eg_runner_new(ctx, &d, &r) == EG_NOT_WRITTEN && reason_has(ctx, "second finishing plan"),
+          "a second finishing plan beside a steps AUTO plan refused NOT_WRITTEN");
+    check_auto_several(ctx, ua);
     eg_plan* pc2 = count_plan(ctx, uaa, EG_STRUCTURE_HOST_TEAM, k, limit, mask, t3);
     d = runner_desc(&pc2, 1, 100);
     d.every = 8;
@@ -4233,6 +4343,7 @@ int main(int argc, char** argv) {
     check_segmented_threads();
     check_active_set(ctx);
     check_auto(ctx);
+    check_caller_active_set(ctx);
     check_counters(ctx);
     check_cell_rows(ctx);
     check_slot_kinds(ctx);

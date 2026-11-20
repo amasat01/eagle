@@ -913,8 +913,8 @@ void device_launch(eg_plan_s& plan) {
     Current current(plan.ctx->dev);
     if (plan.unit->seg.present) { launch_segmented(plan); return; }
     if (!plan.unit->stages.empty()) { launch_split(plan); return; }
-    if (plan.unit->index_count_slot >= 0) {    // an index set: its live count is checked against the entries held (a device read), the kernel maps the lanes itself
-        const DLTensor& c = plan.bindings[static_cast<std::size_t>(plan.unit->index_count_slot)].plane->tensor->dl_tensor;
+    if (set_count_slot(plan) >= 0) {    // an index set or a caller's active set: its live count is checked against the entries held (a device read), the kernel maps the lanes itself
+        const DLTensor& c = plan.bindings[static_cast<std::size_t>(set_count_slot(plan))].plane->tensor->dl_tensor;
         unsigned live = 0;
         device_read(*plan.ctx, static_cast<char*>(c.data) + c.byte_offset, &live, sizeof(live));
         check_index_live(plan, live);
@@ -1353,7 +1353,10 @@ void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out)
         *out = runner;
         return;
     }
-    const std::int64_t k = d.plans[0]->unit->finish.steps;
+    const std::int64_t k = launch_steps(d.plans[0]->unit->finish, static_cast<std::size_t>(d.n_plans));
+    if (d.plans[0]->unit->finish.steps == EG_STEPS_AUTO && d.n_plans > 1 && (d.plans[0]->unit->active_map_slot >= 0 || (d.flags & EG_RUN_REORDER)))
+        refuse(EG_NOT_WRITTEN, "unit '" + d.plans[0]->unit->name + "': finish steps AUTO in a several-plan step with an active set on a device is not written in "
+               "this build of the door");
     if (k == EG_STEPS_AUTO) {    // the no-graph entries: no loop, no loop cells
         if (d.events == EG_EVENTS_REFINE)
             refuse(EG_NOT_WRITTEN, "events REFINE of an automatic unit on a device is not written in this build of the door");
@@ -1493,7 +1496,7 @@ void stepped_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
     Current current(ctx.dev);
     const DLTensor& t = first.bindings[static_cast<std::size_t>(f.mask_slot)].plane->tensor->dl_tensor;
     mask_count(stream, static_cast<const char*>(t.data) + t.byte_offset, n, t.dtype.bits / 8u, reinterpret_cast<unsigned*>(first.device_counter));
-    const std::int64_t cap = loop_cap(runner->max_steps, f.steps);
+    const std::int64_t cap = loop_cap(runner->max_steps, launch_steps(f, runner->plans.size()));
     unsigned finished = 0;
     std::int64_t launches = 0;
     cells_read(stream, first.device_counter, &finished, 1);
@@ -1503,12 +1506,12 @@ void stepped_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
         ++launches;
     }
     eg_run_report out{};
-    out.flags = (static_cast<std::int64_t>(finished) == n ? EG_REPORT_DONE : 0u) | (f.steps == 1 ? EG_REPORT_EXACT_STEPS : 0u);
+    out.flags = (static_cast<std::int64_t>(finished) == n ? EG_REPORT_DONE : 0u) | (launch_steps(f, runner->plans.size()) == 1 ? EG_REPORT_EXACT_STEPS : 0u);
     out.mode = EG_MODE_BAND;
     out.n = n;
     out.finished = finished;
     out.launches = launches;
-    out.steps = launches * f.steps;
+    out.steps = launches * launch_steps(f, runner->plans.size());
     out.mapped = launches * n;
     write_report(report, out);
 }
@@ -1534,7 +1537,7 @@ void device_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
     if (runner->dev.mode != EG_MODE_BAND) return fast_run(ctx, runner, report);
     eg_plan_s& first = *runner->plans[0];
     const FinishFacts& f = first.unit->finish;
-    const std::int64_t n = first.n_samples, k = f.steps;
+    const std::int64_t n = first.n_samples, k = launch_steps(f, runner->plans.size());
     const std::int64_t every = runner->active ? runner->act.every_steps : k;    // steps per loop iteration
     DeviceRun& r = runner->dev;
     const std::uint64_t stream = ctx.dev.stream;
@@ -1555,6 +1558,10 @@ void device_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
     const DLTensor& t = first.bindings[static_cast<std::size_t>(f.mask_slot)].plane->tensor->dl_tensor;
     if (runner->active && t.dtype.bits != 8)
         refuse(EG_BAD_REQUEST, "the mask of an active set on a device is a bool or uint8 plane, got " + std::to_string(t.dtype.bits) + " bits");
+    if (f.steps == EG_STEPS_AUTO) {    // a several-plan step: the finisher takes one step per launch, the runner writes its steps word
+        const unsigned one_step[2] = { 1, 0 };
+        cells_write(stream, reinterpret_cast<std::uint64_t>(steps_cell(first)), one_step, 2);
+    }
     mask_count(stream, static_cast<const char*>(t.data) + t.byte_offset, n, t.dtype.bits / 8u, counter);
     if (r.loop == nullptr) {
         const auto t0 = std::chrono::steady_clock::now();
