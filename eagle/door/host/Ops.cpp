@@ -11,6 +11,8 @@
 #include "eagle/reduce/canonical.h"
 
 
+#include <limits>
+
 namespace eagle {
 namespace door {
 namespace host {
@@ -77,14 +79,14 @@ T* mut_data_of(const eg_plane_s& p) {
 template <class T, class OP>
 void columns(const ReduceOp& r, int threads) {
     namespace canon = eagle::reduce::canonical;
-    const T* in = data_of<T>(*r.in);
+    const T* in = data_of<T>(*r.in) + r.first;
     T* out = mut_data_of<T>(*r.out);
     for (std::int64_t j = 0; j < r.cols; ++j) {
         const Column<T> x{ in + j * r.n };
         if constexpr (canon::compensated_v<T, OP>) {
             canon::Partial<T, OP> p;
             if (r.comp != nullptr && !r.pair) {
-                const Column<T> c{ data_of<T>(*r.comp) + j * r.n };
+                const Column<T> c{ data_of<T>(*r.comp) + r.first + j * r.n };
                 p = canon::partialRange<T, OP>(x, 0, r.n, c, threads);
             } else {
                 p = canon::partialRange<T, OP>(x, 0, r.n, {}, threads);
@@ -178,13 +180,33 @@ void reduce_exec(const ReduceOp& r, int threads) {
     }
 }
 
-/** @brief After one launch of @p plan: companions folded into their targets, then cell rows into cells. */
-void fold_plan(const eg_plan_s& plan, int threads) {
+namespace {
+
+/** @brief The identity of @p op over @p T: what a reduction over no sample is. */
+template <class T>
+T identity_of(std::int32_t op) {
+    if (op == EG_REDUCE_SUM) return T(0);
+    if (op == EG_REDUCE_ALL) return T(1);
+    const bool low = op == EG_REDUCE_MAX;
+    if constexpr (std::numeric_limits<T>::has_infinity)
+        return low ? -std::numeric_limits<T>::infinity() : std::numeric_limits<T>::infinity();
+    else
+        return low ? std::numeric_limits<T>::lowest() : std::numeric_limits<T>::max();
+}
+
+template <class T>
+void write_identity(const ReduceOp& r) {
+    T* out = mut_data_of<T>(*r.out);
+    for (std::int64_t j = 0; j < r.cols; ++j) out[j] = identity_of<T>(r.op);
+}
+
+}  // namespace
+
+void fold_plan(const eg_plan_s& plan, int threads, std::int64_t first_row, std::int64_t end_row) {
     for (const CompanionFacts& c : plan.unit->companions) {
         const std::int64_t size = elements(plan.bindings[c.target].plane->tensor->dl_tensor);
         exec::HostTeam::run_serial(c.fold, plan.params.data(), exec::Partition{ 0, size, size });
     }
-    if (plan.n_samples == 0) return;
     for (std::size_t i = 0; i < plan.unit->cells.size(); ++i) {
         const CellFacts& c = plan.unit->cells[i];
         eg_reduce_desc d{};
@@ -193,7 +215,20 @@ void fold_plan(const eg_plan_s& plan, int threads) {
         d.comp = plan.comps[i];
         d.out = plan.bindings[c.slot].plane;
         d.op = c.op;
-        reduce_exec(reduce_check(*plan.ctx, d), threads);
+        ReduceOp r = reduce_check(*plan.ctx, d);
+        if (end_row > first_row) {
+            r.first = first_row;
+            r.n = end_row - first_row;
+            reduce_exec(r, threads);
+            continue;
+        }
+        switch (r.code) {
+            case kF32: write_identity<float>(r); break;
+            case kF64: write_identity<double>(r); break;
+            case kI32: write_identity<std::int32_t>(r); break;
+            case kI64: write_identity<std::int64_t>(r); break;
+            default: write_identity<std::uint8_t>(r);
+        }
     }
 }
 

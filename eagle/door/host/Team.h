@@ -32,7 +32,8 @@ inline void run_prefix(const eg_plan_s& plan, int threads, std::int64_t end, std
         exec::HostTeam::run_serial(plan.unit->host_entry, plan.params.data(), part);
     else
         exec::HostTeam::run_team(plan.unit->host_entry, plan.params.data(), part, threads);
-    fold_plan(plan, threads);
+    const auto rows = rows_written(plan, base, end);
+    fold_plan(plan, threads, rows.first, rows.second);
 }
 
 /** @brief The cells of the plane an ordered scatter stage @p st adds into: the elements of the caller's plane bound to its target slot. */
@@ -181,6 +182,7 @@ inline std::uint64_t run_plan(const eg_plan_s& plan, int threads) {
         const exec::Partition& range = plan.parts[0];
         const std::int64_t end = std::min<std::int64_t>(range.base + range.count, static_cast<std::int64_t>(live));
         if (end > range.base) run_prefix(plan, threads, end, range.base);
+        else fold_plan(plan, threads, 0, 0);    // no position ran: a cell is the reduction over no lane
         return end > range.base ? 1 : 0;
     }
     for (const exec::Partition& part : plan.parts) {
@@ -191,7 +193,11 @@ inline std::uint64_t run_plan(const eg_plan_s& plan, int threads) {
             tiles += exec::HostTeam::run_team(plan.unit->host_entry, plan.params.data(), part, threads);
         }
     }
-    fold_plan(plan, threads);
+    std::int64_t lo = plan.n_samples, hi = 0;    // the span of the partitions: the rows a launch wrote lie in it
+    for (const exec::Partition& part : plan.parts)
+        if (part.count > 0) lo = std::min(lo, part.base), hi = std::max(hi, part.base + part.count);
+    const auto rows = plan.unit->cell_row > 0 ? rows_written(plan, lo, hi) : std::pair<std::int64_t, std::int64_t>{ 0, 0 };
+    fold_plan(plan, threads, rows.first, rows.second);
     return tiles;
 }
 

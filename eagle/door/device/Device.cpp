@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <limits>
 #include <memory>
 #include <cstring>
 
@@ -504,9 +505,20 @@ void device_unit_free(eg_unit_s& unit) noexcept {
     });
 }
 
-/** @brief Queue on @p stream the fold of cell @p i of @p plan: its rows (and the compensation rows of a sum) into @p out, by the canonical tree. */
-void fold_cell(const eg_plan_s& plan, std::size_t i, const DLTensor& rows, const eg_plane_s* comp, std::int32_t op, void* out, std::uint64_t stream) {
-    cell_fold(stream, rows.data, comp != nullptr ? comp->tensor->dl_tensor.data : nullptr, rows.shape[0], rows.dtype.bits,
+/** @brief Queue on @p stream the fold of cell @p i of @p plan: the rows [@p first, @p end) (and the compensation rows of a sum) into
+ *  @p out, by the canonical tree; with no row the cell takes the op's identity. */
+void fold_cell(const eg_plan_s& plan, std::size_t i, const DLTensor& rows, const eg_plane_s* comp, std::int32_t op, void* out, std::uint64_t stream,
+               std::int64_t first, std::int64_t end) {
+    const std::size_t bytes = rows.dtype.bits / 8;
+    if (end <= first) {
+        const double low = -std::numeric_limits<double>::infinity(), high = std::numeric_limits<double>::infinity();
+        const double value = op == EG_REDUCE_SUM ? 0.0 : op == EG_REDUCE_MAX ? low : high;
+        const float value32 = static_cast<float>(value);
+        write_bytes(stream, out, bytes == sizeof(float) ? static_cast<const void*>(&value32) : static_cast<const void*>(&value), bytes);
+        return;
+    }
+    const auto at = [&](const void* data) { return const_cast<char*>(static_cast<const char*>(data)) + static_cast<std::size_t>(first) * bytes; };
+    cell_fold(stream, at(rows.data), comp != nullptr ? at(comp->tensor->dl_tensor.data) : nullptr, end - first, rows.dtype.bits,
               op == EG_REDUCE_SUM ? 0 : op == EG_REDUCE_MAX ? 1 : 2, out, plan.work[2 * i]->tensor->dl_tensor.data,
               plan.work[2 * i + 1]->tensor->dl_tensor.data);
 }
@@ -516,7 +528,7 @@ void fold_cell(const eg_plan_s& plan, std::size_t i, const DLTensor& rows, const
  *  companion's fold function over its target and each cell's rows folded into the cell the caller bound
  *  (as the host's ``fold_plan``). A gemm unit the door routes queues its cuBLAS products instead, unless @p products is false
  *  (a runner's loop launches the kernel). */
-void launch_on(const eg_plan_s& plan, std::uint64_t stream, bool products = true) {
+void launch_on(const eg_plan_s& plan, std::uint64_t stream, bool products = true, std::int64_t live = -1) {
     const DeviceState& d = plan.ctx->dev;
     const eg_unit_s& u = *plan.unit;
     if (products && gemm_routed(plan)) {    // the stated products instead of the kernel
@@ -537,11 +549,15 @@ void launch_on(const eg_plan_s& plan, std::uint64_t stream, bool products = true
         const std::int64_t size = elements(plan.bindings[c.target].plane->tensor->dl_tensor);
         exec::DeviceKernel::run(reinterpret_cast<CUfunction>(c.device_fold), plan.params, exec::Partition{ 0, size, size }, s);
     }
-    if (plan.n_samples == 0) return;
+    std::int64_t lo = plan.n_samples, hi = 0;    // the span of the partitions, cut at an index set's live count: the rows a launch wrote lie in it
+    for (const exec::Partition& p : plan.parts)
+        if (p.count > 0) lo = std::min(lo, p.base), hi = std::max(hi, p.base + p.count);
+    if (live >= 0) hi = std::min(hi, live);
+    const auto written = rows_written(plan, lo, hi);
     for (std::size_t i = 0; i < u.cells.size(); ++i) {
         const DLTensor& rows = plan.rows[i]->tensor->dl_tensor;
         const DLTensor& out = plan.bindings[u.cells[i].slot].plane->tensor->dl_tensor;
-        fold_cell(plan, i, rows, plan.comps[i], u.cells[i].op, static_cast<char*>(out.data) + out.byte_offset, stream);
+        fold_cell(plan, i, rows, plan.comps[i], u.cells[i].op, static_cast<char*>(out.data) + out.byte_offset, stream, written.first, written.second);
     }
 }
 
@@ -673,7 +689,8 @@ void launch_split(const eg_plan_s& plan) {
             const SplitCell& sc = u.split_cells[c];
             if (sc.stage != static_cast<std::int32_t>(&st - u.stages.data())) continue;
             const eg_plane_s* o = sc.source >= 0 ? plan.bindings[static_cast<std::size_t>(sc.source)].plane : plan.outs[c];
-            fold_cell(plan, c, plan.rows[c]->tensor->dl_tensor, plan.comps[c], sc.op, static_cast<char*>(o->tensor->dl_tensor.data) + o->tensor->dl_tensor.byte_offset, d.stream);
+            fold_cell(plan, c, plan.rows[c]->tensor->dl_tensor, plan.comps[c], sc.op, static_cast<char*>(o->tensor->dl_tensor.data) + o->tensor->dl_tensor.byte_offset, d.stream,
+                      0, plan.rows[c]->tensor->dl_tensor.shape[0]);
         }
     }
 }
@@ -884,6 +901,8 @@ void device_launch(eg_plan_s& plan) {
         unsigned live = 0;
         device_read(*plan.ctx, static_cast<char*>(c.data) + c.byte_offset, &live, sizeof(live));
         check_index_live(plan, live);
+        launch_on(plan, plan.ctx->dev.stream, true, live);
+        return;
     }
     launch_on(plan, plan.ctx->dev.stream);
 }

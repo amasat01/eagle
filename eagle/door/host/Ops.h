@@ -7,6 +7,8 @@
 
 #include "eagle/door/Context.h"
 
+#include <utility>
+
 namespace eagle {
 namespace door {
 namespace host {
@@ -20,14 +22,16 @@ struct ReduceOp {
     bool pair = false;
     std::int32_t code = 0;        ///< the element type, see Ops.cpp
     std::int64_t n = 0, cols = 0;
+    std::int64_t first = 0;       ///< a one-column reduce reads the samples [first, first + n) of ``in`` (and ``comp``)
 };
 
 ReduceOp reduce_check(const eg_ctx& ctx, const eg_reduce_desc& desc);
 void reduce_exec(const ReduceOp& r, int threads);
 
-/** @brief After one launch of @p plan: run each companion's fold entry over its target, then fold each
- *  cell's rows into the cell the caller bound (the cell's op). */
-void fold_plan(const eg_plan_s& plan, int threads);
+/** @brief After one launch of @p plan: run each companion's fold entry over its target, then fold each cell's rows
+ *  [@p first_row, @p end_row) into the cell the caller bound (the cell's op). A cell is the reduction over the lanes
+ *  the launch ran: with no row written it takes the op's identity (0, +inf, -inf, true), never what it held. */
+void fold_plan(const eg_plan_s& plan, int threads, std::int64_t first_row, std::int64_t end_row);
 
 /** @brief Whether the memory of @p a and @p b overlaps. */
 bool overlaps(const DLTensor& a, const DLTensor& b);

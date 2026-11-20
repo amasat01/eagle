@@ -139,6 +139,20 @@ static const struct eg_unit_launch launch_prefix = {
     .index_count_slot = 2, .group = 1 };
 MADE_UNIT(unit_dprefix, "dprefix", 0xD6, "dprefix", prefix_body, launch_prefix);
 
+/* dprefixsum: a prefix set with a SUM cell of rows of 4 samples (slots tot, tot_comp, x, index_count). */
+ACC(slot_tot_c, "tot_comp");
+static const int32_t cell_psum_comp[] = { 1 };
+static const struct eg_unit_cell cell_psum = { .struct_size = sizeof(struct eg_unit_cell), .op = EG_REDUCE_SUM, .columns = 1,
+                                               .slots = cell_tot_slots, .name = "tot", .comp_slots = cell_psum_comp };
+static const struct eg_unit_cell* const cell_psum_list[] = { &cell_psum };
+static const struct eg_unit_slot* const psum_slots[] = { &slot_tot, &slot_tot_c, &slot_x, &slot_icount };
+static const struct eg_unit_body psum_body = { .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL,
+    .n_slots = 4, .n_cells = 1, .cell_row = 4, .slots = psum_slots, .cells = cell_psum_list };
+static const struct eg_unit_launch launch_psum = {
+    .struct_size = sizeof(struct eg_unit_launch), .active_map_slot = -1, .active_count_slot = -1, .index_map_slot = -1,
+    .index_count_slot = 3, .group = 1 };
+MADE_UNIT(unit_dprefixsum, "dprefixsum", 0xDB, "dprefixsum", psum_body, launch_psum);
+
 SLOT(slot_k, EG_ROLE_MUTABLE, EG_DTYPE_REAL, 0, NULL, "k");
 SLOT(slot_limit, EG_ROLE_PER_SAMPLE, EG_DTYPE_REAL, 0, NULL, "limit");
 SLOT(slot_mask, EG_ROLE_TERMINATED, EG_DTYPE_BOOL, 0, NULL, "mask");
@@ -305,12 +319,12 @@ AUTO_SET(scalar, 0x96);
 AUTO_SET(heavy, 0x97);
 
 static const struct eg_unit_meta* const units[] = { &unit_axpy, &unit_axpy64, &unit_boxdev, &unit_banded, &unit_nofn,
-                                                    &unit_noimg, &unit_dcells, &unit_dkeyed, &unit_dkeyednf, &unit_dkeyedh, &unit_fat129, &unit_ptx129, &unit_sass70, &unit_dprefix, &unit_dcount, &unit_dcount1, &unit_dcount1a, &unit_dauto, &unit_dautorange, &unit_dlookup,
+                                                    &unit_noimg, &unit_dcells, &unit_dkeyed, &unit_dkeyednf, &unit_dkeyedh, &unit_fat129, &unit_ptx129, &unit_sass70, &unit_dprefix, &unit_dprefixsum, &unit_dcount, &unit_dcount1, &unit_dcount1a, &unit_dauto, &unit_dautorange, &unit_dlookup,
                                                     &unit_sg_cls, &unit_sg_k0, &unit_sg_k1, &unit_sgf, &unit_dg_k0, &unit_dg_k1, &unit_dg_sweep, &unit_dgf,
                                                     &unit_sga_cls, &unit_sga_k0, &unit_sga_k1, &unit_sga_rare, &unit_sga_even, &unit_sga_scalar, &unit_sga_heavy };
 
 static const struct eg_library_meta library = {
-    .struct_size = sizeof(struct eg_library_meta), .schema_major = EG_META_SCHEMA_MAJOR, .n_units = 35, .units = units,
+    .struct_size = sizeof(struct eg_library_meta), .schema_major = EG_META_SCHEMA_MAJOR, .n_units = 36, .units = units,
 };
 
 __attribute__((visibility("default"))) const struct eg_library_meta* eg_unit_library_meta(void) { return &library; }

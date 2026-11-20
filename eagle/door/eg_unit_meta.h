@@ -193,7 +193,11 @@ struct eg_unit_companion {
 };
 
 /** A cell: a reduction over samples kept in rows of ``cell_row`` samples, folded
- *  into the cell between launches (eg_bind makes the rows; eg_launch folds). */
+ *  into the cell between launches (eg_bind makes the rows; eg_launch folds). A launch
+ *  writes the cell as the reduction over the lanes it RAN: the rows those lanes lie in
+ *  (an index or prefix set: its positions below the live count) fold, and over no lane
+ *  the cell takes the op's identity (sum 0, min +inf, max -inf, ALL true), never what it
+ *  held. Partitions that leave a gap between them are folded over their span. */
 struct eg_unit_cell {
     uint32_t struct_size;
     eg_reduce_op op;          /**< the fold (eg_door.h's reduce op); another op is refused NOT_WRITTEN */

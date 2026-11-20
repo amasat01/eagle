@@ -39,6 +39,21 @@ extern "C" __global__ void dcells(ScalarHandle tot, ScalarHandle mx, ScalarHandl
     }
 }
 
+// dprefixsum: the row of 4 samples a live lane leads sums the live lanes of the row (tot) and has no compensation (tot_comp).
+extern "C" __global__ void dprefixsum(ScalarHandle tot, ScalarHandle comp, ScalarHandle x, ScalarHandle cnt, long long base,
+                                      long long count, long long nSamples) {
+    const long long flat = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (flat >= count) return;
+    const long long i = base + flat;
+    const long long live = static_cast<long long>(*static_cast<const unsigned*>(cnt.data));
+    if (i % 4 != 0 || i >= live) return;
+    const double* xs = static_cast<const double*>(x.data);
+    double sum = 0.0;
+    for (long long j = i; j < i + 4 && j < live && j < nSamples; ++j) sum += xs[j];
+    static_cast<double*>(tot.data)[i / 4] = sum;
+    static_cast<double*>(comp.data)[i / 4] = 0.0;
+}
+
 // dkeyed: acc[i / 4] += x[i] and comp[i / 4] += 0.5 for the 4 samples of the key the lane leads; the fold:
 // acc += comp, comp = 0.125 over the target's slots.
 extern "C" __global__ void dkeyed(ScalarHandle acc, ScalarHandle comp, ScalarHandle x, long long base, long long count,

@@ -571,6 +571,43 @@ static void host_steps_in_graph(eg_ctx* ctx, const char* dev_lib, const char* ho
     cudaFree(dx), cudaFree(d1), cudaFree(d2), cudaFree(dc);
 }
 
+/* A launch writes each cell as the reduction over the lanes it RAN: a DEVICE prefix set of live count 8, 3, 0, 5, 0 over a SUM cell of rows
+ * of 4 gives the sum of the first count lanes (0 for none), never the cell's old value or a stale row. */
+static void cell_rows_device(eg_ctx* ctx, const char* dev_lib) {
+    enum { CN = 8 };
+    eg_unit* unit = NULL;
+    check(load(ctx, dev_lib, "dprefixsum", 0xDB, &unit) == EG_OK, "eg_unit_load dprefixsum (a prefix set with a SUM cell of rows of 4)");
+    if (unit == NULL) return;
+    double x[CN], tot = 0.0;
+    for (int i = 0; i < CN; ++i) x[i] = (double)(i + 1);
+    const double nine = 9.0;
+    double *dx = dev_doubles(x, CN), *dt = dev_doubles(&nine, 1);
+    uint32_t* dc = NULL;
+    cudaMalloc((void**)&dc, sizeof(uint32_t));
+    struct tensor tt, tx, tc;
+    eg_plane *pt = wrap(ctx, &tt, dt, 1, 1, 0, 1, 0), *px = wrap(ctx, &tx, dx, 1, CN, 0, 1, 0), *pc = wrap_typed(ctx, &tc, dc, kDLUInt, 32, 1, 1);
+    const int32_t slots[3] = { 0, 2, 3 };
+    eg_plane* planes[3] = { pt, px, pc };
+    eg_plan* p = NULL;
+    int ok = pt && px && pc && plan_n(ctx, unit, EG_STRUCTURE_DEVICE, CN, 0, NULL, NULL, &p) == EG_OK && bind_planes(ctx, p, 3, slots, planes) == EG_OK;
+    const uint32_t counts[5] = { 8, 3, 0, 5, 0 };
+    for (int k = 0; ok && k < 5; ++k) {
+        double want = 0.0;
+        for (uint32_t i = 0; i < counts[k]; ++i) want += x[i];
+        cudaMemcpy(dc, &counts[k], sizeof(uint32_t), cudaMemcpyHostToDevice);
+        cudaMemcpy(dt, &nine, sizeof(double), cudaMemcpyHostToDevice);
+        ok = eg_launch(ctx, p, NULL) == EG_OK && eg_sync(ctx) == EG_OK;
+        cudaMemcpy(&tot, dt, sizeof(double), cudaMemcpyDeviceToHost);
+        ok = ok && tot == want;
+        if (!ok) printf("      count %u: cell %.17g, want %.17g\n", counts[k], tot, want);
+    }
+    check(ok, "a DEVICE SUM cell over a prefix set of live count 8, 3, 0, 5, 0: the sum of the lanes that ran, 0 for none");
+    if (p) eg_plan_free(ctx, p);
+    eg_plane_free(ctx, pt), eg_plane_free(ctx, px), eg_plane_free(ctx, pc);
+    eg_unit_free(ctx, unit);
+    cudaFree(dx), cudaFree(dt), cudaFree(dc);
+}
+
 /* eg_plane_new / eg_plane_dlpack on a device context: a DEVICE plane (kDLCUDA) and a PINNED plane (kDLCUDAHost) by their export fields and
  * the driver's own reading of the pointers; a DEVICE launch on made planes against the plain-C oracle (bitwise); the refusals of the
  * device kinds. */
@@ -1843,6 +1880,7 @@ int main(int argc, char** argv) {
     lookup_device(ctx, dev_lib);
     figures_device(ctx, dev_lib);
     host_steps_in_graph(ctx, dev_lib, host_lib);
+    cell_rows_device(ctx, dev_lib);
     reset_device(ctx, dev_lib);
     check_segmented_device(ctx, dev_lib);
     check_auto_device(ctx, dev_lib);

@@ -34,6 +34,7 @@ struct eg_unit_meta;
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include <unistd.h>
@@ -725,6 +726,14 @@ eg_status call(eg_ctx* ctx, F&& body, bool in_child = false, bool in_refused = f
         }
     }
     return status;
+}
+
+/** @brief The rows of a unit's cells that a launch over the samples [@p base, @p end) wrote: [first, end) in rows of
+ *  ``cell_row`` samples; empty when the launch ran no lane. A cell is the reduction over the rows written. */
+inline std::pair<std::int64_t, std::int64_t> rows_written(const eg_plan_s& plan, std::int64_t base, std::int64_t end) {
+    const std::int64_t row = plan.unit->cell_row;
+    if (end <= base || row < 1) return { 0, 0 };
+    return { base / row, (end + row - 1) / row };
 }
 
 /** @brief Refuse @p handle unless @p set (a context's registry) holds it. */

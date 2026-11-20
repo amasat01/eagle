@@ -15,6 +15,8 @@
  *  - "mix2": count1 over two AUTO dispatch groups (k 2 and 3) whose mix counters the entry fills: group a counts the live samples
  *    with limit >= 6 (cell 1) or below (cell 0), group b the live samples by limit mod 3.
  *  - "widesum": y[e] = theta[3e] + 10 theta[3e + 1] + 100 theta[3e + 2], each read clamped to the WIDE_IN handle's extent.
+ *  - "prefixsum": a prefix set (the live count is its last slot) with a SUM cell of rows of 4 samples: row r holds the sum of the
+ *    lanes 4r .. 4r + 3 it ran.
  *  - "axpb_split": the "axpb" body named as a one-stage split unit.
  *  - "count1a", "count3a": the same finishing units reading an active set: the
  *    two LOOKUP slots after the counter hold the live sample slots (int32)
@@ -78,6 +80,7 @@ EG_FIXTURE_EXPORT void tick_host(void* const* params, int64_t base, int64_t coun
 EG_FIXTURE_EXPORT void spans_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void mix2_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void widesum_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void prefixsum_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void count1_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void count3_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void count1a_host(void* const* params, int64_t base, int64_t count, int64_t n);
@@ -328,6 +331,18 @@ void shr_host(void* const* params, int64_t base, int64_t count, int64_t n) {
 }
 
 /* Index sets: thread t serves lane map[t] (lanes) or lane t (prefix): y[lane] = 2 * x[lane] + 1. */
+/* thread t serves lane t: tot[t / 4] sums the lanes of its row that ran; params tot, tot_c, x, count */
+void prefixsum_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    double* tot = (double*)((const struct fixture_handle*)params[0])->data;
+    double* comp = (double*)((const struct fixture_handle*)params[1])->data;
+    const double* x = (const double*)((const struct fixture_handle*)params[2])->data;
+    (void)n;
+    for (int64_t t = base; t < base + count; ++t) {
+        if (t % 4 == 0) tot[t / 4] = 0.0, comp[t / 4] = 0.0;
+        tot[t / 4] += x[t];
+    }
+}
+
 /* rows of 4 samples: tot[r] = min of x, mx[r] = max of x; params tot, mx, x */
 void cells_host(void* const* params, int64_t base, int64_t count, int64_t n) {
     double* tot = (double*)((const struct fixture_handle*)params[0])->data;
@@ -913,6 +928,7 @@ static const struct eg_unit_meta unit_shr = {
 SLOT_OF(slot_tot, EG_ROLE_ACCUM_OUT, EG_DTYPE_REAL, "tot");
 SLOT_OF(slot_tot_c, EG_ROLE_ACCUM_OUT, EG_DTYPE_REAL, "tot_comp");
 SLOT_OF(slot_mx, EG_ROLE_ACCUM_OUT, EG_DTYPE_REAL, "mx");
+SLOT_OF(slot_icount_ps, EG_ROLE_LOOKUP, EG_DTYPE_UINT32, "index_count");
 SLOT_OF(slot_acc, EG_ROLE_ACCUM_OUT, EG_DTYPE_REAL, "acc");
 SLOT_OF(slot_acc_c, EG_ROLE_ACCUM_OUT, EG_DTYPE_REAL, "acc_c");
 static const int32_t cell_tot_slots[] = { 0 }, cell_mx_slots[] = { 1 };
@@ -938,6 +954,20 @@ static const struct eg_unit_meta unit_cellsum = {
     .struct_size = sizeof(struct eg_unit_meta), .name = "cellsum", .digest = DIGEST(0x6a), .pattern = EG_PATTERN_PURE,
     .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "cells_host", .device_image_format = EG_IMAGE_NONE,
     .body = &cellsum_body, .launch = &launch };
+static const int32_t cell_prefix_comp[] = { 1 };
+static const struct eg_unit_cell cell_prefix_sum = { .struct_size = sizeof(struct eg_unit_cell), .op = EG_REDUCE_SUM, .internal = 0,
+                                                     .columns = 1, .slots = cell_tot_slots, .name = "tot", .comp_slots = cell_prefix_comp };
+static const struct eg_unit_cell* const cell_prefix_list[] = { &cell_prefix_sum };
+static const struct eg_unit_slot* const prefixsum_slots[] = { &slot_tot, &slot_tot_c, &slot_x, &slot_icount_ps };
+static const struct eg_unit_body prefixsum_body = { .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL,
+    .n_slots = 4, .n_cells = 1, .cell_row = 4, .slots = prefixsum_slots, .cells = cell_prefix_list };
+static const struct eg_unit_launch launch_prefixsum = {
+    .struct_size = sizeof(struct eg_unit_launch), .n_lane_axes = 0, .block = 0, .active_map_slot = -1,
+    .active_count_slot = -1, .index_map_slot = -1, .index_count_slot = 3, .n_plane_axes = 0, .group = 1 };
+static const struct eg_unit_meta unit_prefixsum = {
+    .struct_size = sizeof(struct eg_unit_meta), .name = "prefixsum", .digest = DIGEST(0xBC), .pattern = EG_PATTERN_PURE,
+    .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "prefixsum_host", .device_image_format = EG_IMAGE_NONE,
+    .body = &prefixsum_body, .launch = &launch_prefixsum };
 static const struct eg_unit_companion comp_acc = { .struct_size = sizeof(struct eg_unit_companion), .slot = 1, .target_slot = 0,
                                                    .host_fold_entry = "keyed__fold_acc_host", .device_fold_function = NULL };
 static const struct eg_unit_companion comp_none = { .struct_size = sizeof(struct eg_unit_companion), .slot = 1, .target_slot = 0,
@@ -1115,7 +1145,7 @@ static const struct eg_unit_body mix2_body = { .struct_size = sizeof(struct eg_u
     .slots = mix2_slots, .n_dispatches = 2, .dispatches = mix2_list };
 SEG_UNIT(unit_mix2, "mix2", 0xBA, "mix2_host", mix2_body, launch, &finish1);
 
-static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &unit_tick, &unit_spans, &unit_widesum, &unit_mix2, &unit_split, &unit_count1,
+static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &unit_tick, &unit_spans, &unit_prefixsum, &unit_widesum, &unit_mix2, &unit_split, &unit_count1,
                                                     &unit_count3, &unit_count1a, &unit_count3a, &unit_countA, &unit_countAa, &unit_vecs, &unit_count1i,
                                                     &unit_count1ia, &unit_count1e, &unit_lanes, &unit_prefix, &unit_count1g, &unit_widemul,
                                                     &unit_gathb, &unit_gatha, &unit_gathn, &unit_boxed, &unit_boxbad, &unit_shr, &unit_cells, &unit_keyed,
@@ -1128,7 +1158,7 @@ static const struct eg_library_meta library = {
     .struct_size = sizeof(struct eg_library_meta),
     .schema_major = EG_META_SCHEMA_MAJOR,
     .schema_minor = 0,
-    .n_units = 55,
+    .n_units = 56,
     .units = units,
 };
 

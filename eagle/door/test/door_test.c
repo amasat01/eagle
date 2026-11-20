@@ -3834,6 +3834,47 @@ static void check_counters(eg_ctx* ctx) {
     check_counters_mix(ctx);
 }
 
+/* A launch writes each cell as the reduction over the lanes it RAN: a prefix set of live count 8, then 3, 0 and 5, over a SUM cell of
+ * rows of 4, gives the sum of the first count lanes each time (the identity 0 for none), never the cell's old value or a stale row. */
+static void check_cell_rows(eg_ctx* ctx) {
+    enum { N = 8 };
+    eg_unit* unit = NULL;
+    check(load(ctx, "prefixsum", 0xBC, &unit) == EG_OK, "eg_unit_load prefixsum (a prefix set with a SUM cell of rows of 4)");
+    if (unit == NULL) return;
+    double x[N], tot = 0.0;
+    uint32_t count = 0;
+    for (int i = 0; i < N; ++i) x[i] = (double)(i + 1);
+    struct tensor tt, tx, tc;
+    eg_plane *pt = wrap(ctx, &tt, &tot, 1, kDLFloat, 64), *px = wrap(ctx, &tx, x, N, kDLFloat, 64), *pc = wrap(ctx, &tc, &count, 1, kDLUInt, 32);
+    const int32_t slots[3] = { 0, 2, 3 };
+    eg_plane* planes[3] = { pt, px, pc };
+    struct eg_bind_desc bd;
+    memset(&bd, 0, sizeof(bd));
+    bd.struct_size = sizeof(bd);
+    bd.n_planes = 3;
+    bd.plane_slots = slots;
+    bd.planes = planes;
+    const uint32_t counts[5] = { 8, 3, 0, 5, 0 };
+    for (int si = 0; si < 2; ++si) {
+        eg_plan* p = NULL;
+        int ok = pt && px && pc && plan(ctx, unit, si == 0 ? EG_STRUCTURE_HOST_SERIAL : EG_STRUCTURE_HOST_TEAM, N, 0, NULL, NULL, &p) == EG_OK &&
+                 eg_bind(ctx, p, &bd) == EG_OK;
+        for (int k = 0; ok && k < 5; ++k) {
+            count = counts[k];
+            tot = 9.0;    /* what the cell held: never part of the result */
+            double want = 0.0;
+            for (uint32_t i = 0; i < count; ++i) want += x[i];
+            ok = eg_launch(ctx, p, NULL) == EG_OK && tot == want;
+            if (!ok) printf("      count %u: cell %.17g, want %.17g\n", count, tot, want);
+        }
+        check(ok, si == 0 ? "a SUM cell over a prefix set of live count 8, 3, 0, 5, 0 (SERIAL): the sum of the lanes that ran, 0 for none"
+                          : "a SUM cell over a prefix set of live count 8, 3, 0, 5, 0 (TEAM): the sum of the lanes that ran, 0 for none");
+        eg_plan_free(ctx, p);
+    }
+    eg_plane_free(ctx, pt), eg_plane_free(ctx, px), eg_plane_free(ctx, pc);
+    eg_unit_free(ctx, unit);
+}
+
 int main(int argc, char** argv) {
     if (argc != 5) {
         fprintf(stderr, "usage: %s <fixture> <wrong size> <no size block> <v1 tag>\n", argv[0]);
@@ -3868,6 +3909,7 @@ int main(int argc, char** argv) {
     check_active_set(ctx);
     check_auto(ctx);
     check_counters(ctx);
+    check_cell_rows(ctx);
     check_slot_kinds(ctx);
     check_mask_dtypes(ctx);
     check_index_sets(ctx);
