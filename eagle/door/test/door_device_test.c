@@ -1639,6 +1639,7 @@ static void checked_run_device(eg_ctx* ctx, const char* dev_lib) {
     static struct dscat_rig r;
     int ok = dcount_new(ctx, count, 0, 0.0, &c) == EG_OK && dscat_make(ctx, &r, checked, DN);
     if (!ok) {
+        reason_has(ctx, "\x01");    /* names the refused call when a plan or plane could not be made (an allocation on a busy shared card) */
         check(0, "device run with a checked plan: plans made");
         return;
     }
