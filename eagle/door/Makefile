@@ -120,7 +120,7 @@ LIB := $(OUT)/libeagle_door.$(SOEXT)
 FIXTURE := $(OUT)/libfixture_unit.so
 TEST := $(OUT)/door_test
 
-.PHONY: all lib symbols confined test check-inputs check-cuda pairs pair-reverse pair-reverse-active pair-reverse-timed pair-reverse-ps pair-reverse-fused pair-reverse-kstep pair-reverse-kstep-auto pair-reverse-param pair-device-reverse-param pair-reverse-kstep3 pair-reverse-kstep7 pair-reverse-kstep8 pair-reverse-reorder pair-reverse-t0 pair-reverse-counter pair-refine pair-refine-reverse pair-refine-pend pair-refine-reverse-pend pair-refine-reverse-grid pair-refine-reverse-grid-refused pair-status-grid pair-status-tangent pair-status-two device pair-device-reverse pair-device-refine pair-device-refine-reverse $(PAIR_UNITS:%=pair-%) $(PAIR_DEVICE_UNITS:%=pair-device-%)
+.PHONY: all lib symbols confined test check-inputs check-cuda pairs pair-reverse pair-reverse-active pair-reverse-timed pair-reverse-ps pair-reverse-fused pair-reverse-kstep pair-reverse-kstep-auto pair-reverse-param pair-device-reverse-param pair-reverse-kstep3 pair-reverse-kstep7 pair-reverse-kstep8 pair-reverse-reorder pair-reverse-t0 pair-reverse-counter pair-refine pair-refine-reverse pair-refine-graph pair-device-refine-graph pair-refine-pend pair-refine-reverse-pend pair-refine-reverse-grid pair-refine-reverse-grid-refused pair-status-grid pair-status-tangent pair-status-two device pair-device-reverse pair-device-refine pair-device-refine-reverse $(PAIR_UNITS:%=pair-%) $(PAIR_DEVICE_UNITS:%=pair-device-%)
 all: test
 
 check-inputs:
@@ -543,6 +543,16 @@ pair-refine-reverse: symbols $(OUT)/libpair_refine.so $(REFINE_REVERSE_TEST)
 	$(REFINE_REVERSE_TEST) $(OUT)/libpair_refine.so $(ORACLE_evrr) $(DIGEST_ev) $(DIGEST_ev_tape) $(DIGEST_ev_newton) $(DIGEST_ev_guard) \
 	  $(DIGEST_ev_step_vjp) $(DIGEST_ev_refine_vjp)
 
+# pair-refine-graph, pair-device-refine-graph: two recorded refine runs of ev_osc with a reset launch between them in one EG_RECORD_DIFF graph; the
+# reverse against central differences of the whole graph (host library, then the device library on a DEVICE context through the GPU pool).
+REFINE_GRAPH_TEST := $(OUT)/refine_graph_test
+$(REFINE_GRAPH_TEST): test/refine_graph_test.c $(LIB)
+	$(CC) $(DEPFLAGS) $(CFLAGS_C) -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -lm -pthread
+
+pair-refine-graph: symbols $(OUT)/libpair_refine.so $(GRAPH_FIXTURE) $(REFINE_GRAPH_TEST)
+	$(REFINE_GRAPH_TEST) $(OUT)/libpair_refine.so $(GRAPH_FIXTURE) $(DIGEST_ev) $(DIGEST_ev_tape) $(DIGEST_ev_newton) $(DIGEST_ev_guard) \
+	  $(DIGEST_ev_step_vjp) $(DIGEST_ev_refine_vjp)
+
 PAIR_TEST := $(OUT)/pair_test
 
 $(PAIR_TEST): test/pair_test.c $(LIB)
@@ -827,6 +837,9 @@ DEVICE_RRF_TEST := $(OUT)/device_refine_reverse_test
 $(DEVICE_RRF_TEST): test/device_refine_reverse_test.c $(LIB) | check-cuda
 	$(CC) $(DEPFLAGS) $(CFLAGS_C) -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door \
 	  -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
+pair-device-refine-graph: symbols $(OUT)/libpair_dev_rrf_osc.so $(GRAPH_FIXTURE) $(REFINE_GRAPH_TEST)
+	$(REFINE_GRAPH_TEST) $(OUT)/libpair_dev_rrf_osc.so $(GRAPH_FIXTURE) $(DIGEST_ev) $(DIGEST_ev_tape) $(DIGEST_ev_newton) $(DIGEST_ev_guard) \
+	  $(DIGEST_ev_step_vjp) $(DIGEST_ev_refine_vjp) device
 pair-device-refine-reverse: symbols $(foreach c,osc pend grid,$(OUT)/libpair_dev_rrf_$(c).so) $(DEVICE_RRF_TEST)
 
 # pair-refine-pend, pair-refine-reverse-pend: the pendulum (ev_pend, the old path's second event model, a 0.05, c 0.2) over its own
