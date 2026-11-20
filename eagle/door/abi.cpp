@@ -276,7 +276,6 @@ EG_EXPORT eg_status eg_graph_describe(eg_ctx* ctx, const eg_graph* graph, struct
 EG_EXPORT eg_status eg_graph_free(eg_ctx* ctx, eg_graph* graph) {
     if (graph == nullptr) return EG_OK;
     return door::call(ctx, [graph](eg_ctx& c) {
-        door::check_graph_unheld(c, graph);
         if (door::device_graph(c, graph)) door::device_graph_free(c, graph);
         else door::graph_free(c, graph);
     });

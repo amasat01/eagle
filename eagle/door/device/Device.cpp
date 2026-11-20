@@ -109,6 +109,8 @@ GraphDiff* device_graph_diff(eg_ctx&, eg_graph*) { return nullptr; }
 bool device_graph(const eg_ctx&, const eg_graph*) { return false; }
 void device_graph_launch(eg_ctx&, eg_graph*) {}
 void device_graph_free(eg_ctx&, eg_graph*) {}
+void device_graph_retain(eg_graph*) {}
+void device_graph_release(eg_ctx&, eg_graph*) {}
 void device_graphs_drop(eg_ctx&) noexcept {}
 void device_stream_use(eg_ctx&, std::uint64_t) { device_group_check("eg_stream_use"); }
 void device_group_check(const char* call) {
@@ -347,6 +349,8 @@ struct DeviceRecording {
 
 /** @brief A recorded device graph: the instantiated capture and the plans whose bindings it holds by value. */
 struct DeviceGraph {
+    int refs = 1;                                       ///< the caller's reference plus one per runner that runs it as its step graph
+    bool caller_ref = true;
     std::vector<void*> buffers;                         ///< device memory the graph owns beside its tape (save slots, copy tables), freed with it
     std::vector<DiffSlot> slots;                        ///< a EG_RECORD_DIFF graph's saved tests
     unsigned loops = 0;                                 ///< its WHILE conditionals
@@ -1507,6 +1511,7 @@ void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out)
         runner->dev.stepped = true;
         runner->step_graph = d.step_graph;
         ctx.runners.insert(runner);
+        if (d.step_graph != nullptr) step_graph_retain(ctx, d.step_graph);
         for (eg_plan_s* p : runner->plans) ++p->refs;
         *out = runner;
         return;
@@ -1586,6 +1591,7 @@ void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out)
         delete runner;
         throw;
     }
+    if (runner->step_graph != nullptr) step_graph_retain(ctx, runner->step_graph);
     for (eg_plan_s* p : runner->plans) {
         ++p->refs;
         if (active) {
@@ -2498,6 +2504,16 @@ GraphDiff* device_graph_diff(eg_ctx&, eg_graph* graph) { return reinterpret_cast
 /** @brief eg_graph_free of a device graph: drop its plan references and its instantiated capture. */
 void device_graph_free(eg_ctx& ctx, eg_graph* handle) {
     auto* graph = reinterpret_cast<DeviceGraph*>(handle);
+    if (!graph->caller_ref) refuse(EG_BAD_REQUEST, "graph: already freed by the caller");
+    graph->caller_ref = false;
+    device_graph_release(ctx, handle);
+}
+
+void device_graph_retain(eg_graph* handle) { ++reinterpret_cast<DeviceGraph*>(handle)->refs; }
+
+void device_graph_release(eg_ctx& ctx, eg_graph* handle) {
+    auto* graph = reinterpret_cast<DeviceGraph*>(handle);
+    if (--graph->refs > 0) return;
     ctx.dev_graphs.erase(graph);
     const std::unique_ptr<DeviceGraph> owned(graph);
     if (!graph->hooks.empty()) {    // replays may still be queued: their host nodes run before the references go

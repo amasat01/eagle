@@ -150,10 +150,10 @@ void check_step_graph(eg_ctx& ctx, const eg_runner_desc& d, bool device) {
     if ((d.flags & EG_RUN_RECORD) || d.events == EG_EVENTS_REFINE)
         refuse(EG_NOT_WRITTEN, "step_graph in a recorded or refined run: reversing the per-step graph is not written in this build "
                "of the door");
-    const std::int64_t k = launch_steps(d.plans[0]->unit->finish, static_cast<std::size_t>(d.n_plans));
-    if (k != 1)
-        refuse(EG_BAD_REQUEST, "step_graph: the graph runs once per step, so the plans must advance one step per launch (unit '" +
-               d.plans[0]->unit->name + "' advances " + (k == EG_STEPS_AUTO ? "an automatic count of" : std::to_string(k)) + " steps)");
+    const std::int64_t f1 = d.plans[0]->unit->finish.steps;
+    if (f1 != 1)
+        refuse(EG_BAD_REQUEST, "step_graph: the graph runs once per step, so each plan must advance exactly one step per launch (unit '" +
+               d.plans[0]->unit->name + "' takes " + (f1 == EG_STEPS_AUTO ? "an automatic count of" : std::to_string(f1)) + " steps)");
     eg_graph_description desc{};
     desc.struct_size = sizeof(desc);
     if (on_device) device_graph_describe(ctx, graph, &desc);
@@ -192,11 +192,14 @@ void check_runner(eg_ctx& ctx, eg_runner_desc& d, bool device, KeptDerived& kept
     resolve_steps_reverse(ctx, d, device, kept);
 }
 
-/** @brief Refuse freeing @p graph while a runner of @p ctx holds it as its step_graph. */
-void check_graph_unheld(const eg_ctx& ctx, const eg_graph_s* graph) {
-    for (const eg_runner_s* r : ctx.runners)
-        if (r->step_graph == graph)
-            refuse(EG_BAD_REQUEST, "eg_graph_free: the graph is the step_graph of a runner; free the runner first");
+void step_graph_retain(const eg_ctx& ctx, eg_graph_s* graph) {
+    if (device_graph(ctx, graph)) device_graph_retain(graph);
+    else graph_retain(graph);
+}
+
+void step_graph_release(eg_ctx& ctx, eg_graph_s* graph) {
+    if (device_graph(ctx, graph)) device_graph_release(ctx, graph);
+    else graph_release(ctx, graph);
 }
 
 /** @brief The active set the plans read, or none: all of them or none must read one. */

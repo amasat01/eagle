@@ -563,7 +563,7 @@ struct eg_runner_s {
     eagle::door::DeviceRun dev;               ///< a DEVICE runner's loop and cells
     eagle::door::RunRecord* record = nullptr; ///< EG_RUN_RECORD: the derived plans and the last record
     eagle::door::AutoLook* look = nullptr;    ///< a runner over an AUTO group that names its segmented set: the look that decides each run
-    eg_graph_s* step_graph = nullptr;         ///< the graph run once per step (not owned: eg_graph_free refuses while a runner holds it)
+    eg_graph_s* step_graph = nullptr;         ///< the graph run once per step (one reference held, released with the runner)
 };
 
 namespace eagle {
@@ -899,6 +899,12 @@ float sample_sum(const float* x, std::int64_t count, int threads);
 void bind_value(eg_plan_s& p, int slot, const void* value, std::size_t bytes);
 void graph_launch(eg_ctx& ctx, eg_graph_s* graph);
 void graph_free(eg_ctx& ctx, eg_graph_s* graph);
+/** @brief A reference to host graph @p graph for a runner that runs it per step, and its release (the last one frees the graph). */
+void graph_retain(eg_graph_s* graph);
+void graph_release(eg_ctx& ctx, eg_graph_s* graph);
+/** @brief Hold and release a step graph, host or device (a graph freed by its caller lives until its last runner is freed). */
+void step_graph_retain(const eg_ctx& ctx, eg_graph_s* graph);
+void step_graph_release(eg_ctx& ctx, eg_graph_s* graph);
 void graph_describe(eg_ctx& ctx, const eg_graph_s* graph, eg_graph_description* out);
 void record_drop_all(eg_ctx& ctx);
 bool device_planes(const eg_ctx& ctx, const char* op, std::initializer_list<const eg_plane_s*> planes);
@@ -911,7 +917,6 @@ struct KeptDerived {
     std::vector<eg_unit*> units;
 };
 void check_runner(eg_ctx& ctx, eg_runner_desc& d, bool device, KeptDerived& kept);
-void check_graph_unheld(const eg_ctx& ctx, const eg_graph_s* graph);
 /** @brief A plane the reorder moves: its first byte and element size. */
 struct Owned {
     char* data;

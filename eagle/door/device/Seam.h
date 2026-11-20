@@ -69,6 +69,9 @@ void device_record_host_step(eg_ctx& ctx, void (*run)(void* user, StepFailure& f
 bool device_graph(const eg_ctx& ctx, const eg_graph* graph);
 void device_graph_launch(eg_ctx& ctx, eg_graph* graph);
 void device_graph_free(eg_ctx& ctx, eg_graph* graph);
+/** @brief A runner's reference to device graph @p graph as its step graph, and its release (the last reference frees the graph). */
+void device_graph_retain(eg_graph* graph);
+void device_graph_release(eg_ctx& ctx, eg_graph* graph);
 void device_graphs_drop(eg_ctx& ctx) noexcept;
 void device_stream_use(eg_ctx& ctx, std::uint64_t stream);
 void device_quiet(const eg_ctx& ctx, const char* call, eg_status status, const char* why);

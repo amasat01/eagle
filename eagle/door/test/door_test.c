@@ -1136,13 +1136,14 @@ static void step_graph_case(eg_ctx* ctx, eg_unit* axpb, eg_unit* cu, eg_structur
         d.every = every;
         d.step_graph = g;
         s = g ? eg_runner_new(ctx, &d, &r) : EG_FAULT;
+        if (s == EG_OK && graphed == 2) s = eg_graph_free(ctx, g);    /* the runner's reference keeps the graph alive */
         struct eg_run_report rep;
         memset(&rep, 0, sizeof(rep));
         rep.struct_size = sizeof(rep);
         if (s == EG_OK) s = eg_run(ctx, r, &rep);
         *launches = rep.launches;
         if (s == EG_OK) s = eg_runner_free(ctx, r);
-        if (s == EG_OK) s = eg_graph_free(ctx, g);
+        if (s == EG_OK && graphed != 2) s = eg_graph_free(ctx, g);
     } else if (s == EG_OK) {
         step_work_plain(ctx, &w, plain_steps);
     }
@@ -1186,6 +1187,14 @@ static void check_step_graph(eg_ctx* ctx, eg_unit* axpb) {
         check(ran_g && launches == want_launches && memcmp(yg, y0, sizeof(yg)) == 0 && memcmp(kg, want_k, sizeof(kg)) == 0,
               "a step graph whose conditional cell is clear leaves y untouched and the plans' k as the closed form");
     }
+    {   /* the graph freed by its caller before the run: the runner holds it */
+        int64_t launches = 0, ignore = 0;
+        int ran_g = 0, ran_p = 0;
+        step_graph_case(ctx, axpb, c1, EG_STRUCTURE_HOST_TEAM, 3, 0, 1, 2, 0, 0, yg, kg, &launches, &ran_g);
+        step_graph_case(ctx, axpb, c1, EG_STRUCTURE_HOST_TEAM, 3, 0, 1, 0, 0, launches, yp, kp, &ignore, &ran_p);
+        check(ran_g && ran_p && launches == want_launches && memcmp(yg, yp, sizeof(yg)) == 0 && memcmp(kg, kp, sizeof(kg)) == 0,
+              "eg_graph_free of a step graph before the run: the runner's reference keeps it, values bitwise the plain loop");
+    }
     {   /* an active set: the graph runs ahead of each launch, so as often as the plain loop steps */
         int64_t launches = 0;
         int ran_g = 0;
@@ -1224,10 +1233,10 @@ static void check_step_graph(eg_ctx* ctx, eg_unit* axpb) {
         all = all && eg_runner_new(ctx, &d, &r) == EG_BAD_REQUEST && r == NULL && reason_has(ctx, "one step per launch");
         d = runner_desc(&pc, 1, 1000);
         d.step_graph = g;
-        all = all && eg_runner_new(ctx, &d, &r) == EG_OK && eg_graph_free(ctx, g) == EG_BAD_REQUEST && reason_has(ctx, "free the runner first");
-        all = all && eg_runner_free(ctx, r) == EG_OK && eg_graph_free(ctx, g) == EG_OK;
+        all = all && eg_runner_new(ctx, &d, &r) == EG_OK && eg_graph_free(ctx, g) == EG_OK;
+        all = all && eg_graph_free(ctx, g) == EG_BAD_REQUEST && reason_has(ctx, "already freed") && eg_runner_free(ctx, r) == EG_OK;
         check(all, "a step graph: reorder refused for a per-sample plane only the graph touches, a K=3 unit refused, the graph "
-                   "held by its runner until the runner is freed, each by name");
+                   "freed once by the caller while its runner holds it, each by name");
         eg_plan_free(ctx, pa);
         eg_plan_free(ctx, pc);
         eg_plan_free(ctx, pa1);

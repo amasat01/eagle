@@ -555,6 +555,15 @@ void graph_describe(eg_ctx& ctx, const eg_graph_s* graph, eg_graph_description* 
 
 void graph_free(eg_ctx& ctx, eg_graph_s* graph) {
     check_handle(ctx.graphs, graph, "graph");
+    if (!graph->caller_ref) refuse(EG_BAD_REQUEST, "graph: already freed by the caller");
+    graph->caller_ref = false;
+    graph_release(ctx, graph);
+}
+
+void graph_retain(eg_graph_s* graph) { ++graph->refs; }
+
+void graph_release(eg_ctx& ctx, eg_graph_s* graph) {
+    if (--graph->refs > 0) return;
     ctx.graphs.erase(graph);
     release(ctx, graph->nodes);
     if (graph->diff != nullptr) diff_free(ctx, *graph->diff);

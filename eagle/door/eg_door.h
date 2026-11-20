@@ -377,16 +377,19 @@ struct eg_runner_desc {
                                              on every launch, on the planes it was recorded over. It may hold launches, copies, reduces, transforms,
                                              products, forks and, on the host, conditionals; never a run of a runner (a device graph
                                              with a conditional is NOT_WRITTEN: the driver refuses a conditional node inside the loop's
-                                             own conditional body). The plans must advance one step per launch (finish steps 1, or a several-plan
-                                             step): a unit that advances K > 1 steps per launch, or an automatic count, is BAD_REQUEST.
+                                             own conditional body). Each plan must advance exactly one step per launch (finish steps 1): a unit that
+                                             advances K > 1 steps per launch, or an automatic count, is BAD_REQUEST, as the per-step hook
+                                             nodes of eagle's Python runner were (read, not run: it refused them the same way).
                                              On the host the graph is replayed ahead of each launch, with an active set ahead of each of
                                              the ``every`` launches between compactions, over all samples, not the live prefix, and
                                              stops with the plans when every sample finished. On a device it is captured into the loop
-                                             as a child graph, so it runs for each launch of every whole interval the loop runs, the
-                                             last one included even when the batch finished inside it, and a plan of it rebound after the
+                                             as a child graph of the loop body, so it runs wherever the plans do: for each launch of every
+                                             whole interval the loop runs, the last one included even when the batch finished inside it
+                                             (eagle's Python device loop captured its hook nodes in the same body, read, not run), and a plan of it rebound after the
                                              first run makes the loop capture again at the next run; a device graph holding host nodes
-                                             is BAD_REQUEST. The runner holds the graph without a reference: eg_graph_free of it is
-                                             BAD_REQUEST until the runner is freed. BAD_REQUEST too: a graph of another context or side,
+                                             is BAD_REQUEST. The runner holds a reference to the graph, released at eg_runner_free:
+                                             eg_graph_free drops the caller's reference and the graph lives until its last runner is
+                                             freed. BAD_REQUEST too: a graph of another context or side,
                                              a graph ended with EG_RECORD_DIFF, and, with EG_RUN_REORDER, a per-sample plane only the
                                              graph touches (the reorder moves the plans' planes, not it). With EG_RUN_RECORD or events
                                              REFINE it is NOT_WRITTEN: a recording run stores nothing of the graph and so cannot reverse

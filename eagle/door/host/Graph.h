@@ -144,5 +144,7 @@ struct eg_graph_s {
     std::vector<eagle::door::Node> nodes;
     std::unique_ptr<eagle::door::GraphDiff> diff;   ///< set when ended with EG_RECORD_DIFF
     eagle::door::GraphShape shape;                  ///< what eg_graph_describe returns
+    int refs = 1;                                   ///< the caller's reference plus one per runner that runs it as its step graph
+    bool caller_ref = true;
     mutable std::unique_ptr<eagle::door::DescribeStore> described;   ///< the arrays of the last description
 };

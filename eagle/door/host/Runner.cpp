@@ -281,6 +281,7 @@ void runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out) {
         delete runner;
         throw;
     }
+    if (runner->step_graph != nullptr) step_graph_retain(ctx, runner->step_graph);
     for (eg_plan_s* p : runner->plans) {
         ++p->refs;
         if (active) {
@@ -346,6 +347,7 @@ void runner_reset(eg_ctx& ctx, eg_runner_s* runner) {
 /** @brief eg_runner_free: drop the runner's plan references. */
 void runner_free(eg_ctx& ctx, eg_runner_s* runner) {
     ctx.runners.erase(runner);
+    if (runner->step_graph != nullptr) step_graph_release(ctx, runner->step_graph);
     look_free(ctx, *runner);
     record_free(ctx, *runner);
     for (eg_plan_s* p : runner->plans) {

@@ -1454,10 +1454,11 @@ static int dsteps_case(eg_ctx* ctx, eg_unit* unit, eg_unit* plain, int64_t every
         memset(&rep, 0, sizeof(rep));
         rep.struct_size = sizeof(rep);
         s = g ? eg_runner_new(ctx, &d, &r) : EG_FAULT;
+        if (s == EG_OK && graphed == 2) s = eg_graph_free(ctx, g);    /* the runner's reference keeps the graph alive */
         if (s == EG_OK) s = eg_run(ctx, r, &rep);
         if (s == EG_OK) s = eg_sync(ctx);
         if (s == EG_OK) s = eg_runner_free(ctx, r);
-        if (s == EG_OK) s = eg_graph_free(ctx, g);
+        if (s == EG_OK && graphed != 2) s = eg_graph_free(ctx, g);
     } else if (s == EG_OK) {
         for (int64_t st = 0; s == EG_OK && st < plain_steps; ++st) {
             s = eg_copy(ctx, q->pl[0], q->pl[6]);
@@ -1501,6 +1502,14 @@ static void step_graph_device(eg_ctx* ctx, const char* dev_lib) {
         dsteps_free(ctx, &g);
         dsteps_free(ctx, &p);
     }
+    {   /* the graph freed by its caller before the run: the runner holds it */
+        int ok = dsteps_case(ctx, plain, plain, 0, 0, 1, 2, 0, &g) && dsteps_case(ctx, plain, plain, 0, 0, 1, 0, need, &p);
+        ok = ok && memcmp(g.k, p.k, sizeof(g.k)) == 0 && memcmp(g.k2, p.k2, sizeof(g.k2)) == 0 && memcmp(g.kc, p.kc, sizeof(g.kc)) == 0 &&
+             memcmp(g.k2, want_k2, sizeof(g.k2)) == 0;
+        check(ok, "eg_graph_free of a device step graph before the run: the runner's reference keeps it, values bitwise the plain loop");
+        dsteps_free(ctx, &g);
+        dsteps_free(ctx, &p);
+    }
     {   /* a conditional: refused by name, nothing left held */
         eg_status s = dsteps_new(ctx, plain, plain, 1, &g);
         eg_graph* graph = s == EG_OK ? dsteps_record(ctx, &g, 1) : NULL;
@@ -1541,9 +1550,10 @@ static void step_graph_device(eg_ctx* ctx, const char* dev_lib) {
         int ok = graph != NULL && refused(eg_runner_new(ctx, &d, &r), EG_BAD_REQUEST, ctx, "only the step_graph touches") && r == NULL;
         d.flags = 0;
         d.reorder_theta = 0;
-        ok = ok && eg_runner_new(ctx, &d, &r) == EG_OK && refused(eg_graph_free(ctx, graph), EG_BAD_REQUEST, ctx, "free the runner first");
-        ok = ok && eg_runner_free(ctx, r) == EG_OK && eg_graph_free(ctx, graph) == EG_OK;
-        check(ok, "a device step graph: reorder refused for a per-sample plane only the graph touches, the graph held by its runner, by name");
+        ok = ok && eg_runner_new(ctx, &d, &r) == EG_OK && eg_graph_free(ctx, graph) == EG_OK &&
+             refused(eg_graph_free(ctx, graph), EG_BAD_REQUEST, ctx, "already freed");
+        ok = ok && eg_runner_free(ctx, r) == EG_OK;
+        check(ok, "a device step graph: reorder refused for a per-sample plane only the graph touches, the graph freed once while its runner holds it, by name");
         dsteps_free(ctx, &g);
     }
     eg_unit_free(ctx, plain);
