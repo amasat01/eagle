@@ -3762,10 +3762,36 @@ static void check_counters_finished(eg_ctx* ctx) {
         int64_t masked = 0;
         ok = eg_launch(ctx, p, NULL) == EG_OK && counters_of(ctx, p, &c, NULL, 0, &n_mix) == EG_OK;
         for (int64_t i = 0; i < RN; ++i) masked += mask[i] != 0;
-        ok = ok && c.finished == masked && masked == count_at_most(limit, launch) && c.steps == -1 && n_mix == 0 &&
-             c.struct_size == sizeof(c);
+        ok = ok && masked == count_at_most(limit, launch) && c.finished == masked - count_at_most(limit, launch - 1) &&
+             c.steps == -1 && n_mix == 0 && c.struct_size == sizeof(c);
     }
-    check(ok, "eg_plan_counters: after each of 3 launches the finished counter equals the mask count (limit <= launch), no steps word, no mix");
+    check(ok, "eg_plan_counters: each of 3 launches reads the samples that launch finished (limit in (launch - 1, launch]), no steps word, no mix");
+    eg_plan_free(ctx, p);
+
+    count_inputs(k, limit, mask);    /* every 97th sample's mask set before the first launch */
+    int64_t preset = 0, summed = 0, masked = 0;
+    for (int64_t i = 0; i < RN; ++i) preset += mask[i] != 0;
+    p = count_plan(ctx, c1, EG_STRUCTURE_HOST_TEAM, k, limit, mask, t);
+    ok = p != NULL && preset > 0;
+    for (int launch = 1; ok && launch <= 50; ++launch) {
+        ok = eg_launch(ctx, p, NULL) == EG_OK && counters_of(ctx, p, &c, NULL, 0, &n_mix) == EG_OK;
+        summed += c.finished;
+    }
+    for (int64_t i = 0; i < RN; ++i) masked += mask[i] != 0;
+    check(ok && masked == RN && summed == RN - preset,
+          "eg_plan_counters: samples masked before the first launch are not counted; the 50 per-launch figures add up to the rest");
+    eg_plan_free(ctx, p);
+
+    count_inputs(k, limit, mask);
+    memset(mask, 0, sizeof(mask));
+    p = count_plan(ctx, c1, EG_STRUCTURE_HOST_SERIAL, k, limit, mask, t);
+    eg_graph* g = NULL;
+    ok = p != NULL && eg_record_begin(ctx) == EG_OK && eg_launch(ctx, p, NULL) == EG_OK && eg_record_end(ctx, &g) == EG_OK;
+    for (int replay = 1; ok && replay <= 3; ++replay)
+        ok = eg_graph_launch(ctx, g) == EG_OK && counters_of(ctx, p, &c, NULL, 0, &n_mix) == EG_OK &&
+             c.finished == count_at_most(limit, replay) - count_at_most(limit, replay - 1);
+    check(ok, "eg_plan_counters: each replay of a recorded launch reads the samples that replay finished");
+    eg_graph_free(ctx, g);
     eg_plan_free(ctx, p);
 
     int64_t word = 2;
@@ -3782,8 +3808,8 @@ static void check_counters_finished(eg_ctx* ctx) {
           "a bound steps word: a plain launch steps every sample by the caller's 2, and the counters read it back");
     word = 5;
     ok = eg_launch(ctx, p, NULL) == EG_OK && counters_of(ctx, p, &c, NULL, 0, &n_mix) == EG_OK && c.steps == 5 &&
-         c.finished == count_at_most(limit, 7.0);
-    check(ok, "a bound steps word is read at each launch (5 more steps: finished = limit <= 7)");
+         c.finished == count_at_most(limit, 7.0) - count_at_most(limit, 2.0);
+    check(ok, "a bound steps word is read at each launch (5 more steps: this launch finished limit in (2, 7])");
     eg_plan_free(ctx, p);
     eg_plane_free(ctx, pw);
 

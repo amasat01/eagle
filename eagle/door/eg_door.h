@@ -749,6 +749,10 @@ eg_status eg_banded_pack_scalar(eg_ctx* ctx, double x, uint64_t* out);
  * Launch the bound plan once over each of its partitions. ``*tiles`` gets the
  * host tiles run (0 for DEVICE). A DEVICE plan of a unit with a gemm record
  * (eg_unit_meta.h) queues its cuBLAS products instead of a kernel.
+ * Counters count per launch: eagle zeroes its own finished counter and its own mix counters at the start of each
+ * eg_launch (and of each replay of a recorded one), so ``eg_plan_counters`` reads what this launch counted; samples
+ * finished before it (a mask set at bind) are not counted. A mix plane the caller binds is never zeroed: the unit adds
+ * into it. Inside ``eg_run`` the finished counter keeps counting over the runner's batch (``eg_runner_reset`` clears it).
  * Replaces: ``BoundPlan.launch`` / ``Plan.run`` / ``exec.HostTeam.run``.
  * Calls today: ``eagle::exec::HostTeam::run`` (HostTeam.h) via
  * ``_core.run_host`` (eagle_core.cpp); ``run_serial`` for HOST_SERIAL.
@@ -768,7 +772,8 @@ eg_status eg_launch(eg_ctx* ctx, eg_plan* plan, uint64_t* tiles);
 eg_status eg_plan_entry_figures(eg_ctx* ctx, const eg_plan* plan, struct eg_entry_figures* out);
 
 /**
- * Read a plan's counters now: the finished counter (``out->finished``, -1 when the unit finishes nothing), the steps
+ * Read a plan's counters now (per launch: see ``eg_launch``): the finished counter (``out->finished``, the samples the
+ * last launch finished, -1 when the unit finishes nothing), the steps
  * word of a unit with steps AUTO (``out->steps``, -1 when it has none), and the mix counters of every AUTO dispatch
  * group, concatenated in the unit's dispatch order, k per group, into ``mix``. Two-call protocol as ``eg_error``:
  * ``*n_mix`` always gets the count; with ``mix_cap`` 0 nothing is written; with ``0 < mix_cap < *n_mix`` the call is

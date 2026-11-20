@@ -915,7 +915,7 @@ void launch(eg_ctx& ctx, eg_plan_s* plan, std::uint64_t* tiles) {
             if (tiles != nullptr) *tiles = 0;
             return;
         }
-        device_launch(*plan);
+        device_launch_call(*plan);
         if (tiles != nullptr) *tiles = 0;
         return;
     }
@@ -923,6 +923,7 @@ void launch(eg_ctx& ctx, eg_plan_s* plan, std::uint64_t* tiles) {
         if (tiles != nullptr) *tiles = 0;
         return;
     }
+    plan->finished = 0;    // an eg_launch counts the samples it finishes: eg_plan_counters reads this launch's count
     const std::uint64_t run = host::run_plan(*plan, host::team_threads(ctx));
     if (tiles != nullptr) *tiles = run;
 }

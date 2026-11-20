@@ -831,6 +831,22 @@ static void figures_device(eg_ctx* ctx, const char* dev_lib) {
     check(p != NULL && eg_plan_counters(ctx, p, &counters, NULL, 0, &n_mix) == EG_OK && counters.finished == FN && counters.steps == -1 && n_mix == 0,
           "eg_plan_counters on a DEVICE plan after eg_run: the finished counter is the mask count, no steps word, no mix (a synchronous device read)");
     if (r) eg_runner_free(ctx, r);
+    int64_t at[4] = { 0, 0, 0, 0 };    /* at[L]: the samples of limit L, each finished by the L-th launch from k = 0 */
+    for (int i = 0; i < FN; ++i) ++at[(int)limit[i]];
+    cudaMemset(dk, 0, FN * sizeof(double));
+    cudaMemset(dm, 0, FN);
+    ok = p != NULL;
+    for (int launch = 1; ok && launch <= 3; ++launch)
+        ok = eg_launch(ctx, p, NULL) == EG_OK && eg_plan_counters(ctx, p, &counters, NULL, 0, &n_mix) == EG_OK && counters.finished == at[launch];
+    check(ok, "eg_plan_counters on a DEVICE plan: each of 3 eg_launch calls reads the samples that launch finished");
+    cudaMemset(dk, 0, FN * sizeof(double));
+    cudaMemset(dm, 0, FN);
+    eg_graph* g = NULL;
+    ok = p != NULL && eg_record_begin(ctx) == EG_OK && eg_launch(ctx, p, NULL) == EG_OK && eg_record_end(ctx, &g) == EG_OK;
+    for (int replay = 1; ok && replay <= 3; ++replay)
+        ok = eg_graph_launch(ctx, g) == EG_OK && eg_plan_counters(ctx, p, &counters, NULL, 0, &n_mix) == EG_OK && counters.finished == at[replay];
+    check(ok, "eg_plan_counters on a DEVICE plan: each replay of a recorded launch reads the samples that replay finished");
+    if (g) eg_graph_free(ctx, g);
     if (p) eg_plan_free(ctx, p);
     eg_plane_free(ctx, pk);
     eg_plane_free(ctx, pl);

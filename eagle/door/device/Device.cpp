@@ -48,6 +48,7 @@ void device_plan_check(const eg_ctx&, const eg_unit_s&) {
 void device_gemm_ready(eg_ctx&) {}
 void device_gemm_run(eg_ctx&, const eg_gemm_s&, eg_plane_s*, eg_plane_s*, eg_plane_s*) {}
 void device_launch(eg_plan_s&) {}
+void device_launch_call(eg_plan_s&) {}
 void device_classify(eg_plan_s&) {}
 void device_loop_drop(eg_runner_s&) {}
 void device_sync(eg_ctx&) {}
@@ -907,6 +908,23 @@ void device_launch(eg_plan_s& plan) {
     launch_on(plan, plan.ctx->dev.stream);
 }
 
+namespace {
+
+/** @brief Queue the zeroing of @p plan's eagle-made finished counter on @p stream (none: nothing). */
+void finished_zero(const eg_plan_s& plan, std::uint64_t stream) {
+    if (plan.device_counter != 0) zero_bytes(stream, reinterpret_cast<void*>(plan.device_counter), sizeof(unsigned));
+}
+
+}  // namespace
+
+void device_launch_call(eg_plan_s& plan) {
+    {
+        Current current(plan.ctx->dev);
+        finished_zero(plan, plan.ctx->dev.stream);
+    }
+    device_launch(plan);
+}
+
 /** @brief Queue the classify unit of the static SEGMENTED plan @p plan over every sample (a runner's look at the start of a run). */
 void device_classify(eg_plan_s& plan) {
     Current current(plan.ctx->dev);
@@ -1611,6 +1629,7 @@ void device_record_launch(eg_ctx& ctx, eg_plan_s& plan) {
     rec.plans.push_back(&plan);
     ++plan.refs;
     Current current(ctx.dev);
+    finished_zero(plan, rec.stream);    // each replay counts from zero, as eg_launch does
     launch_on(plan, rec.stream);
 }
 

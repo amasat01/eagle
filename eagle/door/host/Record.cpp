@@ -169,6 +169,7 @@ void replay(eg_ctx& ctx, const std::vector<Node>& nodes) {
         switch (n.kind) {
             case Node::Launch:
                 check_bound(*n.plan);
+                n.plan->finished = 0;    // a replayed launch counts from zero, as eg_launch does
                 host::run_plan(*n.plan, host::team_threads(ctx));
                 break;
             case Node::Run: run_loop(ctx, n.runner, nullptr); break;
