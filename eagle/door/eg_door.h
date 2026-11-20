@@ -462,15 +462,21 @@ struct eg_reduce_desc {
 /** ``eg_cond_desc.flags``: IF, IF_ELSE and WHILE test the cell for zero instead of non-zero. SWITCH refuses it. */
 #define EG_COND_NEGATE (1u << 0)
 
-/** INPUT to ``eg_record_cond_begin``. */
+/** INPUT to ``eg_record_cond_begin``. The test reads ``cell[cell_index]`` and, when ``baseline`` is set, ``baseline[baseline_index]``
+ *  (both at replay time): IF, IF_ELSE and WHILE take the arm when ``cell[cell_index] != baseline[baseline_index]`` (``!= 0`` with no
+ *  baseline), or when they are equal under EG_COND_NEGATE. SWITCH takes ``cell[cell_index]`` as the arm index and refuses a
+ *  baseline. A ``struct_size`` that ends before ``max_iters`` reads 0, before ``cell_index`` reads index 0 and no baseline. */
 struct eg_cond_desc {
     uint32_t struct_size;
     uint32_t flags;          /**< EG_COND_NEGATE, or 0 */
     eg_cond_kind kind;
     int32_t n_arms;          /**< SWITCH only: arm count */
-    eg_plane* cell;          /**< a one-element int32 or uint32 plane (a mask reduction or a kernel writes uint32): truth, or the arm index */
+    eg_plane* cell;          /**< a one-dimensional int32 or uint32 plane (a mask reduction or a kernel writes uint32): truth, or the arm index */
     int64_t max_iters;       /**< WHILE only: the loop stops without error after this many iterations; 0: no cap. Another kind refuses
-                                  a nonzero value. A struct_size that ends before this member reads 0. */
+                                  a nonzero value. */
+    int64_t cell_index;      /**< the element of ``cell`` the test reads: 0 or more, below its length */
+    eg_plane* baseline;      /**< NULL: compare with 0; else a plane of the dtype of ``cell`` (IF, IF_ELSE, WHILE only) */
+    int64_t baseline_index;  /**< the element of ``baseline`` read; ignored without a baseline */
 };
 
 /** OUTPUT of ``eg_device_props`` (device group). */
@@ -1114,9 +1120,9 @@ eg_status eg_record_fork_branch(eg_ctx* ctx);
  * Close the last branch and join: the next node waits for every branch. Before joining, the door checks the hazards between
  * the branches: two nodes in different branches of this fork that touch overlapping memory, at least one of them writing,
  * with no ``eg_record_wait`` between them, are a race and refused BAD_REQUEST naming both node ordinals (0-based, in
- * recording order, a conditional's own test counting as a node of the cell it reads), both slots and the hazard (RAW, WAR or
+ * recording order, a conditional's own test counting as a node reading its cell and baseline), both slots and the hazard (RAW, WAR or
  * WAW). The hazards come from each node's slots (a unit slot's role: read, write or both) and from the memory of the planes
- * (eagle/graph/Edges.h). Replay: the branches may run at the same time (a device graph: parallel branches; the host: in
+ * (eagle/graph/Edges.h). A refused race ends the recording. Replay: the branches may run at the same time (a device graph: parallel branches; the host: in
  * recording order, one legal schedule); the values equal the run in recording order. Status: OK; BAD_REQUEST (no fork open,
  * a conditional still open inside the branch, an empty branch, a race).
  */
