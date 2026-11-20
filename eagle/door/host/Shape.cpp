@@ -77,7 +77,7 @@ int GraphShape::add(eg_gnode_kind kind, std::string label, std::string unit, std
     Node& n = nodes_[static_cast<std::size_t>(ordinal)];
     n.facts = facts;
     if (kind == EG_GNODE_LAUNCH) n.launch = launches_++;
-    else if (kind == EG_GNODE_RUN || kind == EG_GNODE_COPY || kind == EG_GNODE_REDUCE || kind == EG_GNODE_FFT || kind == EG_GNODE_GEMM) n.other = others_++;
+    else if (kind == EG_GNODE_RUN || kind == EG_GNODE_COPY || kind == EG_GNODE_REDUCE || kind == EG_GNODE_FFT || kind == EG_GNODE_GEMM || kind == EG_GNODE_HOST) n.other = others_++;
     return ordinal;
 }
 
@@ -263,7 +263,7 @@ ReversePlan GraphShape::reverse_plan() const {
 void GraphShape::describe(DescribeStore& store, std::uint32_t flags, eg_graph_description& out) const {
     const int n = static_cast<int>(nodes_.size());
     const auto at = [](int i) { return static_cast<std::size_t>(i); };
-    const auto executes = [](eg_gnode_kind k) { return k <= EG_GNODE_GEMM || k == EG_GNODE_COND; };
+    const auto executes = [](eg_gnode_kind k) { return k <= EG_GNODE_GEMM || k == EG_GNODE_COND || k == EG_GNODE_HOST; };
     store = DescribeStore();
     std::vector<eg_graph_edge>& edges = store.edges;
     const auto edge = [&](int from, int to, int kind, int from_slot = -1, int to_slot = -1, eg_plane* plane = nullptr) {

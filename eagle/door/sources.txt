@@ -14,6 +14,7 @@ host/Reverse.cpp
 host/Ops.cpp
 host/Fft.cpp
 host/Gemm.cpp
+host/HostNode.cpp
 host/Record.cpp
 host/Shape.cpp
 host/GraphReverse.cpp

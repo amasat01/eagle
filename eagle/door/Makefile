@@ -243,7 +243,7 @@ $(GRAPH_FIXTURE): test/fixture_graph.c $(if $(CUDA),$(OUT)/fixture_graph.fatbin)
 	$(CC) $(DEPFLAGS) $(CFLAGS_C) $(if $(CUDA),-DEG_GRAPH_IMAGE) -fPIC -shared -fvisibility=hidden -o $@ $< $(if $(CUDA),$(OUT)/fixture_graph_image.o)
 
 $(GRAPH_TEST): test/graph_reverse_test.c $(LIB)
-	$(CC) $(DEPFLAGS) $(CFLAGS_C) -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -lm -pthread
+	$(CC) $(DEPFLAGS) $(CFLAGS_C) $(if $(CUDA),-DEG_TEST_CUDA -isystem $(CUDA)/include) -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
 
 # The gemm unit record: its fixture library (test/fixture_gemm.c), the host rows, and the device rows with the
 # missing-cuBLAS shim (device targets only).

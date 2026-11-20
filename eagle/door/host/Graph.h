@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -26,12 +27,15 @@ inline bool writes_role(std::int32_t r) { return r == EG_ROLE_MUTABLE || r == EG
 
 /** @brief One recorded call, or one conditional with an arm list per arm. */
 struct Node {
-    enum Kind { Launch, Run, Reduce, Copy, Fft, Gemm, Cond } kind = Launch;
+    enum Kind { Launch, Run, Reduce, Copy, Fft, Gemm, Cond, Host } kind = Launch;
     eg_plan_s* plan = nullptr;
     eg_runner_s* runner = nullptr;
     host::ReduceOp reduce;
     eg_fft_s* fft = nullptr;
     eg_gemm_s* gemm = nullptr;
+    eg_host_node_s* host = nullptr;             ///< a host call's node
+    std::vector<eg_plane_s*> hplanes;           ///< a host call's declared planes, in declaration order
+    std::vector<std::uint32_t> haccess;         ///< and how each is declared (EG_ACCESS_READ, EG_ACCESS_WRITE or both)
     eg_plane_s* rhs = nullptr;                  ///< a product's B (its A is ``src``, its C ``dst``)
     eg_plane_s* src = nullptr;                  ///< a copy's source, a transform's input
     eg_plane_s* dst = nullptr;                  ///< a copy's target, a transform's output
@@ -72,6 +76,13 @@ struct VjpLink {
     bool scatter = false;                       ///< GRAD: the vjp slot is an ACCUM_OUT, a cross-sample scatter-add
 };
 
+/** @brief How a host call's declared plane is seen by its vjp: its index in GraphDiff::planes (-1: untracked, it has no value or adjoint the vjp needs) and its declared access. */
+struct HostArg {
+    int plane = -1;
+    std::uint32_t access = 0;
+    bool real = false;                          ///< a float plane: it has an adjoint
+};
+
 /** @brief One leaf's accesses and what reverses it: a launch has its vjp, the other calls the transposes the door makes at eg_record_end
  *  (a copy and a sum reduce need none). A call with no float plane has no adjoint and is left with no accesses. */
 struct DiffNode {
@@ -86,6 +97,8 @@ struct DiffNode {
     eg_fft_s *fft = nullptr, *adjoint = nullptr;    ///< a transform (a reference is held) and the transform that is its adjoint (made here, freed with the tape)
     eg_gemm_s gemm, gemm_a, gemm_b;             ///< a product, and the products that give the gradients of its A and of its B
     eg_runner_s* runner = nullptr;              ///< a run (a recorded runner: the graph's node holds its reference)
+    eg_host_node_s* host = nullptr;             ///< a host call: its node (the recorded graph holds the reference)
+    std::vector<HostArg> args;                  ///< a host call: one per declared plane
     std::vector<int> slots;                     ///< a run: the primal slot of each entry of ``reads``; the first ``writes.size()`` are the states it overwrites
 };
 
@@ -124,6 +137,24 @@ struct GraphDiff {
     std::vector<PlanMark> marks;
 };
 
+
+/** @brief The words that name host call @p n in a description, a race and a failure. */
+std::string host_node_label(const Node& n);
+/** @brief The planes host call @p n touches, as the shape records them: a plane declared READ is read, WRITE is written, both is in place. */
+std::vector<PlaneUse> host_node_uses(const Node& n);
+/** @brief Check a host call's request (handles, the access of each plane, no plane twice) and make its node; nothing is held yet. */
+Node host_node_check(eg_ctx& ctx, eg_host_node_s* node, std::int32_t n_planes, eg_plane_s* const* planes, const std::uint32_t* access);
+/** @brief Run host call @p n now on the calling thread: on a device context the stream is synchronized first; the callback runs with the context marked busy.
+ *  A nonzero return is EG_FAULT "host node '<name>' failed (<code>)". */
+void host_node_run(eg_ctx& ctx, const Node& n);
+/** @brief Call the vjp of host node @p node with the four arrays (host/HostNode.cpp), under the same rules; a failure is EG_FAULT naming the node. */
+void host_vjp_run(eg_ctx& ctx, const eg_host_node_s& node, std::int32_t n, const void* const* primals, const void* const* adjoints_in, void* const* adjoints_out);
+/** @brief Take / drop the references a recorded node holds (its plans, runner, transform, product, planes and host node). */
+void node_hold(const Node& n);
+void node_drop(eg_ctx& ctx, const Node& n);
+/** @brief eg_host_call while a device recording is open: the capture ends before the call and the call becomes a step of the graph that eg_graph_launch runs between
+ *  that capture and the next; refused NOT_WRITTEN inside a conditional arm, a fork branch or a WHILE (device/Device.cpp). */
+void device_record_host_node(eg_ctx& ctx, Node&& node);
 
 /** @brief The tape of a graph ended with EG_RECORD_DIFF (host/GraphReverse.cpp): @p plan from GraphShape::reverse_plan, @p launches by launch ordinal and @p others (copies, reduces, transforms and products) by their ordinal; refuses what the reverse does not cover. */
 std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<eg_plan_s*>& launches, const std::vector<const Node*>& others, const ReversePlan& plan, const eg_record_end_desc& desc);

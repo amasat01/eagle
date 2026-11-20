@@ -184,6 +184,7 @@ std::string leaf_name(const Node& n, std::size_t ordinal) {
                              : n.kind == Node::Copy   ? "eg_copy"
                              : n.kind == Node::Reduce ? "eg_reduce"
                              : n.kind == Node::Fft    ? "eg_fft_run"
+                             : n.kind == Node::Host   ? "eg_host_call"
                                                       : "eg_gemm_run";
     return std::string("eg_record_end: ") + what + " (leaf " + std::to_string(ordinal) + ")";
 }
@@ -211,6 +212,30 @@ void other_leaf(eg_ctx& ctx, const Node& n, DiffNode& dn, std::size_t ordinal, c
                 dn.slots.push_back(slot);
                 read(plane_at(slot), primal.unit->slots[static_cast<std::size_t>(slot)].name.c_str());
             }
+            return;
+        }
+        case Node::Host: {
+            // A float plane has an adjoint: read in, written out; a plane with no adjoint is tracked only for its value (a read, kept for the vjp) or for the copy a later overwrite needs.
+            dn.host = n.host;
+            for (std::size_t j = 0; j < n.hplanes.size(); ++j) {
+                eg_plane_s* p = n.hplanes[j];
+                const bool reads = (n.haccess[j] & EG_ACCESS_READ) != 0, writes = (n.haccess[j] & EG_ACCESS_WRITE) != 0;
+                const std::string who = at + " planes[" + std::to_string(j) + "]";
+                HostArg arg;
+                arg.access = n.haccess[j];
+                arg.real = floats(p);
+                if (arg.real || reads || (writes && kept.count(p) != 0)) arg.plane = track(p, writes, who, who);
+                if (arg.real) {
+                    if (reads) dn.reads.push_back(arg.plane);
+                    if (writes) dn.writes.push_back(arg.plane);
+                } else {
+                    if (reads) dn.kept_reads.push_back(arg.plane);
+                    if (writes && arg.plane >= 0) dn.overwrites.push_back(arg.plane);
+                }
+                dn.args.push_back(arg);
+            }
+            dn.valued = dn.reads;
+            dn.valued.insert(dn.valued.end(), dn.kept_reads.begin(), dn.kept_reads.end());
             return;
         }
         case Node::Copy:
@@ -282,7 +307,10 @@ std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<eg_plan_s*>&
     diff->nodes.resize(launches.size() + others.size());
     diff->plan = plan;
     diff->saved.resize(plan.tests.size());
-    const bool device = !launches.empty() ? launches.front()->structure == EG_STRUCTURE_DEVICE : !others.empty() && tensor(*(others.front()->kind == Node::Reduce ? others.front()->reduce.out : others.front()->dst)).device.device_type != kDLCPU;
+    // the side of the first leaf that names a plane: a host call may name none
+    const auto leaf_plane = [](const Node& n) -> const eg_plane_s* { return n.kind == Node::Reduce ? n.reduce.out : n.kind == Node::Host ? (n.hplanes.empty() ? nullptr : n.hplanes.front()) : n.dst; };
+    const bool device = !launches.empty() ? launches.front()->structure == EG_STRUCTURE_DEVICE
+                                          : !others.empty() && leaf_plane(*others.front()) != nullptr && tensor(*leaf_plane(*others.front())).device.device_type != kDLCPU;
     if (device) diff->dev = &ctx;
     try {
         std::vector<std::string> first_user;       // per plane: who named it first, for the overlap reason
@@ -311,6 +339,10 @@ std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<eg_plan_s*>&
                     kept.insert(lp.bindings[static_cast<std::size_t>(l.of_slot)].plane);
             }
         }
+        for (const Node* o : others)    // a host call's vjp reads the values of its int planes: they are kept like a vjp's
+            if (o->kind == Node::Host && o->host->vjp != nullptr)
+                for (std::size_t j = 0; j < o->hplanes.size(); ++j)
+                    if (tensor(*o->hplanes[j]).dtype.code != kDLFloat && (o->haccess[j] & EG_ACCESS_READ) != 0) kept.insert(o->hplanes[j]);
         for (std::size_t i = 0; i < launches.size(); ++i) {
             const eg_plan_s& plan = *launches[i];
             const std::string at = "eg_record_end: launch " + std::to_string(i);
@@ -362,6 +394,9 @@ std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<eg_plan_s*>&
             for (int m = loop.first_leaf; m < loop.first_leaf + loop.cap * loop.per_iter; ++m) {
                 const DiffNode& node = diff->nodes[static_cast<std::size_t>(plan.leaves[static_cast<std::size_t>(m)].node)];
                 if (node.writes.empty() && node.overwrites.empty()) continue;
+                if (node.kind == Node::Host)
+                    refuse(EG_NOT_WRITTEN, "eg_record_end: host node '" + node.host->name + "' writes planes the tape tracks inside a WHILE body; the loop's window rebuilds its states by "
+                           "re-running the body and does not call a host node again");
                 if (node.kind != Node::Launch && !node.overwrites.empty())    // the window rebuild re-launches plans; it has no re-run of an int copy
                     refuse(EG_NOT_WRITTEN, "eg_record_end: leaf " + std::to_string(plan.leaves[static_cast<std::size_t>(m)].node) + " overwrites an int plane a vjp reads inside a WHILE body; "
                            "only a launch may write it there (the loop's window rebuilds its states by re-launching the body)");
@@ -680,7 +715,6 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
     };
     // The adjoints @p adjoint of the planes the run, copy, sum reduce, transform or product @p node (leaf @p i) wrote, pulled back to what it read.
     const auto transpose = [&](const DiffNode& node, std::size_t i, std::vector<Bytes>& adjoint, int taint) {
-        Bytes& dy = adjoint.front();
         const auto give = [&](int plane, Bytes bytes) {
             Contribution c;
             c.node = static_cast<int>(i);
@@ -688,6 +722,39 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
             c.bytes = std::move(bytes);
             pending[static_cast<std::size_t>(plane)].push_back(std::move(c));
         };
+        if (node.kind == Node::Host) {          // the caller's vjp over the primals as read, the adjoints of what it wrote, and zeroed adjoints for what it read
+            const eg_host_node_s& host = *node.host;
+            if (host.vjp == nullptr) refuse(EG_BAD_REQUEST, "eg_graph_reverse: a gradient flows through host node '" + host.name + "' (leaf " + std::to_string(d.plan.leaves[i].node) + "), which has no vjp");
+            const std::size_t n = node.args.size();
+            std::vector<const void*> primals(n, nullptr), adjoints_in(n, nullptr);
+            std::vector<void*> adjoints_out(n, nullptr);
+            std::vector<std::unique_ptr<View>> views;
+            std::vector<Bytes> grads(n);
+            const auto view = [&](int plane, void* data) -> void* {
+                views.push_back(std::make_unique<View>(plane_of(plane), data));
+                return &views.back()->get()->tensor->dl_tensor;
+            };
+            for (std::size_t j = 0; j < n; ++j) {
+                const HostArg& a = node.args[j];
+                if (a.plane < 0) continue;
+                if ((a.access & EG_ACCESS_READ) != 0) primals[j] = view(a.plane, value_of(a.plane, i));
+                if (!a.real) continue;
+                if ((a.access & EG_ACCESS_WRITE) != 0) {
+                    const std::size_t at = static_cast<std::size_t>(std::find(node.writes.begin(), node.writes.end(), a.plane) - node.writes.begin());
+                    adjoints_in[j] = view(a.plane, adjoint[at].data());
+                }
+                if ((a.access & EG_ACCESS_READ) != 0) {
+                    grads[j] = Bytes(byte_count(plane_of(a.plane)), D);
+                    adjoints_out[j] = view(a.plane, grads[j].data());
+                }
+            }
+            if (D != nullptr) device_sync(*D);  // the primals and adjoints are ready before the caller's code reads them
+            host_vjp_run(ctx, host, static_cast<std::int32_t>(n), primals.data(), adjoints_in.data(), adjoints_out.data());
+            for (std::size_t j = 0; j < n; ++j)
+                if (adjoints_out[j] != nullptr) give(node.args[j].plane, std::move(grads[j]));
+            return;
+        }
+        Bytes& dy = adjoint.front();
         const int in = node.reads.front(), out = node.writes.front();
         switch (node.kind) {
             case Node::Copy: give(in, std::move(dy)); break;

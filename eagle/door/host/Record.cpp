@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Host recording: between eg_record_begin and eg_record_end the recordable
-// calls (eg_launch, eg_run, eg_reduce, eg_copy, eg_fft_run, eg_gemm_run) and conditionals are kept as
+// calls (eg_launch, eg_run, eg_reduce, eg_copy, eg_fft_run, eg_gemm_run, eg_host_call) and conditionals are kept as
 // an ordered tree of nodes instead of running; eg_graph_launch replays it in
 // C. A node holds a reference to each plan, runner and plane it names (the
 // plan, runner, transform plan and plane counts of slice 1), so a recorded graph outlives the
@@ -31,6 +31,7 @@ std::vector<eg_plane_s*> planes_of(const Node& n) {
         case Node::Fft: return { n.src, n.dst };
         case Node::Gemm: return { n.src, n.rhs, n.dst };
         case Node::Cond: return { n.cell, n.baseline };
+        case Node::Host: return n.hplanes;
         default: return {};
     }
 }
@@ -40,6 +41,7 @@ void retain(const Node& n) {
     if (n.runner != nullptr) ++n.runner->refs;
     if (n.fft != nullptr) ++n.fft->refs;
     if (n.gemm != nullptr) ++n.gemm->refs;
+    if (n.host != nullptr) ++n.host->refs;
     for (eg_plane_s* p : planes_of(n))
         if (p != nullptr) ++p->refs;
 }
@@ -50,6 +52,7 @@ void release(eg_ctx& ctx, const std::vector<Node>& nodes) {
         if (n.runner != nullptr) runner_release(ctx, n.runner);
         if (n.fft != nullptr) fft_release(ctx, n.fft);
         if (n.gemm != nullptr) gemm_release(ctx, n.gemm);
+        if (n.host != nullptr) host_node_release(ctx, n.host);
         for (eg_plane_s* p : planes_of(n))
             if (p != nullptr) plane_release(ctx, p);
         for (const std::vector<Node>& arm : n.arms) release(ctx, arm);
@@ -101,6 +104,7 @@ std::string describe(const Node& n) {
         case Node::Fft: return "eg_fft_run";
         case Node::Gemm: return "eg_gemm_run";
         case Node::Cond: return "a conditional";
+        case Node::Host: return host_node_label(n);
     }
     return "a host step";
 }
@@ -146,6 +150,7 @@ std::vector<PlaneUse> uses_of(const Node& n) {
             add(n.cell, "cell", 0);
             add(n.baseline, "baseline", 0);
             break;
+        case Node::Host: return host_node_uses(n);
     }
     return uses;
 }
@@ -153,6 +158,7 @@ std::vector<PlaneUse> uses_of(const Node& n) {
 /** @brief The unit a launch runs, or a run's first plan's; empty for the other calls. */
 std::string unit_name(const Node& n) {
     if (n.plan != nullptr) return n.plan->unit->name;
+    if (n.host != nullptr) return n.host->name;
     return n.runner != nullptr && !n.runner->plans.empty() ? n.runner->plans.front()->unit->name : std::string();
 }
 
@@ -180,6 +186,7 @@ eg_gnode_kind gnode_kind(const Node& n) {
         case Node::Fft: return EG_GNODE_FFT;
         case Node::Gemm: return EG_GNODE_GEMM;
         case Node::Cond: return EG_GNODE_COND;
+        case Node::Host: return EG_GNODE_HOST;
     }
     return EG_GNODE_LAUNCH;
 }
@@ -223,6 +230,10 @@ void record_host_step(eg_ctx& ctx, Node&& node) {
 /** @brief Record @p node when @p ctx is recording; false when it is not (the caller runs it). A device recording keeps
  *  it as a host node of the capture. */
 bool record(eg_ctx& ctx, Node&& node) {
+    if (ctx.dev_rec != nullptr && node.kind == Node::Host) {
+        device_record_host_node(ctx, std::move(node));
+        return true;
+    }
     if (ctx.dev_rec != nullptr) {
         device_shape(ctx).add(gnode_kind(node), describe(node), unit_name(node), uses_of(node), facts_of(node));
         record_host_step(ctx, std::move(node));
@@ -297,6 +308,7 @@ void run_node(eg_ctx& ctx, const Node& n, Tape* tape) {
         case Node::Copy: host::copy_exec(*n.src, *n.dst); break;
         case Node::Fft: host::fft_exec(*n.fft, *n.src, *n.dst, host::team_threads(ctx)); break;
         case Node::Gemm: host::gemm_exec(*n.gemm, *n.src, *n.rhs, *n.dst); break;
+        case Node::Host: host_node_run(ctx, n); break;
         case Node::Cond: {
             // int32 or uint32: equal or not, or an arm index, reads the same bits
             const auto cell = [&] { return element(*n.cell, n.cell_index); };
@@ -394,6 +406,16 @@ bool record_gemm(eg_ctx& ctx, eg_gemm_s* gemm, eg_plane_s* a, eg_plane_s* b, eg_
     n.dst = c;
     return record(ctx, std::move(n));
 }
+
+/** @brief eg_host_call: check, then keep it while recording, else run it. */
+void host_call(eg_ctx& ctx, eg_host_node_s* node, std::int32_t n_planes, eg_plane_s* const* planes, const std::uint32_t* access) {
+    Node n = host_node_check(ctx, node, n_planes, planes, access);
+    if (!record(ctx, std::move(n))) host_node_run(ctx, n);
+}
+
+void node_hold(const Node& n) { retain(n); }
+
+void node_drop(eg_ctx& ctx, const Node& n) { release(ctx, std::vector<Node>{ n }); }
 
 void record_begin(eg_ctx& ctx) {
     if (ctx.rec != nullptr) refuse(EG_BAD_REQUEST, "eg_record_begin: already recording");

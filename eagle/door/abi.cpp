@@ -186,6 +186,21 @@ EG_EXPORT eg_status eg_gemm_free(eg_ctx* ctx, eg_gemm* gemm) {
         door::gemm_release(c, gemm);
     });
 }
+EG_EXPORT eg_status eg_host_node_new(eg_ctx* ctx, const struct eg_host_node_desc* desc, eg_host_node** out) {
+    return door::call(ctx, [&](eg_ctx& c) { door::host_node_new(c, desc, out); });
+}
+EG_EXPORT eg_status eg_host_node_free(eg_ctx* ctx, eg_host_node* node) {
+    if (node == nullptr) return EG_OK;
+    return door::call(ctx, [node](eg_ctx& c) {
+        door::check_handle(c.host_nodes, node, "host node");
+        if (!node->caller_ref) door::refuse(EG_BAD_REQUEST, "host node: already freed by the caller");
+        node->caller_ref = false;
+        door::host_node_release(c, node);
+    });
+}
+EG_EXPORT eg_status eg_host_call(eg_ctx* ctx, eg_host_node* node, int32_t n_planes, eg_plane* const* planes, const uint32_t* access) {
+    return door::call(ctx, [&](eg_ctx& c) { door::host_call(c, node, n_planes, planes, access); });
+}
 EG_EXPORT eg_status eg_record_begin(eg_ctx* ctx) {
     return door::call(ctx, [](eg_ctx& c) {
         if (c.dev.ordinal >= 0) door::device_record_begin(c);    // a device context records by capture

@@ -92,6 +92,7 @@ DeviceRun::~DeviceRun() = default;
 void device_record_begin(eg_ctx&) {}
 void device_record_launch(eg_ctx&, eg_plan_s&) {}
 void device_record_run(eg_ctx&, eg_runner_s*) {}
+void device_record_host_node(eg_ctx&, Node&&) {}
 void device_record_host_step(eg_ctx&, void (*)(void*, StepFailure&) noexcept, void*, void (*)(eg_ctx&, void*)) {}
 void device_record_end(eg_ctx&, const eg_record_end_desc*, eg_graph**) {}
 void device_record_abort(eg_ctx&) {}
@@ -319,11 +320,13 @@ struct DiffPass {
     std::map<int, std::vector<LeafCopy>> checkpoints;   ///< per windowed WHILE (its node ordinal): the planes its body writes, kept at the start of each window
 };
 
-/** @brief One step of a device graph that holds a run: an instantiated capture, or the run of a DEVICE runner that eg_graph_launch runs eagerly
- *  between two captures (it reads back and synchronizes, which a captured graph cannot). Exactly one member is set. */
+/** @brief One step of a device graph that holds a run or a host call: an instantiated capture, the run of a DEVICE runner or a host call that
+ *  eg_graph_launch runs eagerly between two captures (a run reads back and synchronizes, a host call is the caller's code, which a captured graph
+ *  cannot hold). Exactly one member is set. */
 struct Piece {
     DeviceLoop* loop = nullptr;
     eg_runner_s* runner = nullptr;                      ///< one reference, held by the recording and then by the graph
+    std::shared_ptr<Node> host;                         ///< a host call, holding its references (node_hold) until the graph drops the step
 };
 
 struct DeviceRecording {
@@ -750,7 +753,7 @@ namespace {
 
 /** @brief The description kind of the copy, reduce, transform or product kind @p k of a leaf. */
 eg_gnode_kind gnode_kind_of(Node::Kind k) {
-    return k == Node::Copy ? EG_GNODE_COPY : k == Node::Reduce ? EG_GNODE_REDUCE : k == Node::Fft ? EG_GNODE_FFT : EG_GNODE_GEMM;
+    return k == Node::Copy ? EG_GNODE_COPY : k == Node::Reduce ? EG_GNODE_REDUCE : k == Node::Fft ? EG_GNODE_FFT : k == Node::Host ? EG_GNODE_HOST : EG_GNODE_GEMM;
 }
 
 /** @brief How a unit slot's role touches its plane (graph::PlaneRef access: 0 read, 1 write, 2 in place); -1: not a plane. */
@@ -1978,9 +1981,33 @@ void device_record_run(eg_ctx& ctx, eg_runner_s* runner) {
     ++rec.others;
     DeviceCapture* ended = rec.capture;
     rec.capture = nullptr;
-    rec.pieces.push_back({ capture_end(ended), nullptr });
+    rec.pieces.push_back({ capture_end(ended), nullptr, nullptr });
     ++runner->refs;
-    rec.pieces.push_back({ nullptr, runner });
+    rec.pieces.push_back({ nullptr, runner, nullptr });
+    rec.capture = capture_begin(rec.stream);
+}
+
+/** @brief eg_host_call of a device recording: the capture ends here and the call becomes a step of the graph, which eg_graph_launch runs on its own thread
+ *  (after synchronizing the stream) between this capture and the next, as it does a run. */
+void device_record_host_node(eg_ctx& ctx, Node&& node) {
+    DeviceRecording& rec = *ctx.dev_rec;
+    if (!rec.frames.empty())
+        refuse(EG_NOT_WRITTEN, "recording " + host_node_label(node) + " inside a conditional arm, a fork branch or a WHILE of a device recording: a host node is a step of the graph between two "
+               "captures and cannot be a node inside one; record it outside them");
+    note_node(ctx, EG_GNODE_HOST, host_node_label(node), host_node_uses(node), node.host->name);
+    Current current(ctx.dev);
+    if (rec.dp != nullptr) diff_copies(ctx, rec, rec.dp->launches + rec.others);
+    Op op;
+    op.kind = Op::Leaf;
+    op.leaf = node;
+    rec.log.push_back(std::move(op));
+    ++rec.others;
+    auto step = std::make_shared<Node>(std::move(node));
+    DeviceCapture* ended = rec.capture;
+    rec.capture = nullptr;
+    rec.pieces.push_back({ capture_end(ended), nullptr, nullptr });
+    node_hold(*step);
+    rec.pieces.push_back({ nullptr, nullptr, std::move(step) });
     rec.capture = capture_begin(rec.stream);
 }
 
@@ -2010,6 +2037,7 @@ void drop_pieces(eg_ctx& ctx, std::vector<Piece>& pieces, bool release) noexcept
         loop_free(p.loop);
         p.loop = nullptr;
         if (release && p.runner != nullptr) runner_release(ctx, p.runner);
+        if (release && p.host) node_drop(ctx, *p.host);
     }
     if (release) pieces.clear();
 }
@@ -2311,6 +2339,7 @@ void replay_leaf(eg_ctx& ctx, const Op& op) {
         case Node::Reduce: device_reduce_leaf(ctx, n.reduce); break;
         case Node::Fft: device_fft_run(ctx, *n.fft, n.src, n.dst); break;
         case Node::Run: device_record_run(ctx, n.runner); break;
+        case Node::Host: device_record_host_node(ctx, Node(n)); break;
         default: device_gemm_run(ctx, op.product, n.src, n.rhs, n.dst);
     }
 }
@@ -2379,7 +2408,7 @@ void device_record_end(eg_ctx& ctx, const eg_record_end_desc* desc, eg_graph** o
         release_recording(ctx, *rec);
         refuse(EG_FAULT, "eg_record_end: the device capture failed: " + failed);
     }
-    rec->pieces.push_back({ loop, nullptr });
+    rec->pieces.push_back({ loop, nullptr, nullptr });
     loop = nullptr;
     auto graph = std::make_unique<DeviceGraph>();
     if (diff_wanted) {
@@ -2408,7 +2437,7 @@ void device_record_end(eg_ctx& ctx, const eg_record_end_desc* desc, eg_graph** o
             DeviceCapture* ended = second->capture;
             second->capture = nullptr;
             loop = capture_end(ended);
-            second->pieces.push_back({ loop, nullptr });
+            second->pieces.push_back({ loop, nullptr, nullptr });
             loop = nullptr;
         } catch (...) {
             const bool opened = second != nullptr && second->capture != nullptr;
@@ -2545,6 +2574,7 @@ void device_graph_launch(eg_ctx& ctx, eg_graph* handle) {
         zero_bytes(ctx.dev.stream, slot.buffer, static_cast<std::size_t>(slot.capacity) * 3 * sizeof(unsigned));
     for (const Piece& piece : graph->pieces) {    // the captures and the runs between them, in the order recorded
         if (piece.loop != nullptr) loop_launch(piece.loop, ctx.dev.stream);
+        else if (piece.host) host_node_run(ctx, *piece.host);
         else run_from_start(ctx, piece.runner);
     }
     if (graph->diff != nullptr) diff_launched(*graph->diff);
@@ -2579,8 +2609,10 @@ void device_graph_release(eg_ctx& ctx, eg_graph* handle) {
     if (graph->diff != nullptr) diff_free(ctx, *graph->diff);
     eg_ctx* c = &ctx;
     std::vector<Piece> pieces = std::move(graph->pieces);
-    for (Piece& p : pieces)
+    for (Piece& p : pieces) {
         if (p.runner != nullptr) runner_release(ctx, p.runner);
+        if (p.host) node_drop(ctx, *p.host);
+    }
     now_or_after_capture(ctx, [c, pieces] {
         Current current(c->dev);
         for (const Piece& p : pieces) loop_free(p.loop);

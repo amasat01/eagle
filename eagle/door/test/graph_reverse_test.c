@@ -12,6 +12,10 @@
 #include <math.h>
 #include <stdlib.h>
 
+#ifdef EG_TEST_CUDA
+#include <cuda_runtime_api.h>
+#endif
+
 #define N 7
 
 /* A context, the fixture library, and (on a DEVICE context) the planes the rows made: each row builds host arrays, keeps device
@@ -2104,6 +2108,409 @@ static void policy_row(struct rig* host, const struct units* uh, struct rig* dev
     free(x);
 }
 
+/* ---- host nodes: the caller's callback and its vjp as leaves of the graph and of the reverse -------------------------------------------- */
+
+/* Read or write @p n doubles (or int32) of a view the door hands a callback: host memory, or a device plane through the CUDA runtime. */
+static void view_copy(const void* view, void* host, size_t bytes, int to_view) {
+    const DLTensor* t = (const DLTensor*)view;
+    char* data = (char*)t->data + t->byte_offset;
+#ifdef EG_TEST_CUDA
+    if (t->device.device_type == kDLCUDA) {
+        if (to_view) cudaMemcpy(data, host, bytes, cudaMemcpyHostToDevice);
+        else cudaMemcpy(host, data, bytes, cudaMemcpyDeviceToHost);
+        return;
+    }
+#endif
+    if (to_view) memcpy(data, host, bytes);
+    else memcpy(host, data, bytes);
+}
+static void view_get(const void* view, double* out) { view_copy(view, out, N * sizeof(double), 0); }
+static void view_put(const void* view, const double* in) { view_copy(view, (void*)in, N * sizeof(double), 1); }
+static void view_get_i32(const void* view, int32_t* out) { view_copy(view, out, N * sizeof(int32_t), 0); }
+
+/* What a callback records about the calls it saw. */
+struct host_state {
+    int calls, vjp_calls;
+    int layout_ok;      /* the vjp saw NULL entries exactly where the declaration says and zeroed adjoints_out */
+    int fail_code;      /* nonzero: the callback returns it */
+};
+
+/* z = y^2 over planes {y READ, z WRITE}. */
+static int32_t hn_square(void* user, int32_t n, const void* const* planes) {
+    struct host_state* st = (struct host_state*)user;
+    double y[N], z[N];
+    ++st->calls;
+    if (n != 2) return 1;
+    view_get(planes[0], y);
+    for (int i = 0; i < N; ++i) z[i] = y[i] * y[i];
+    view_put(planes[1], z);
+    return st->fail_code;
+}
+/* The vjp of hn_square: dy = 2 y dz, written into the zeroed adjoints_out[0]. */
+static int32_t hn_square_vjp(void* user, int32_t n, const void* const* primals, const void* const* adjoints_in, void* const* adjoints_out) {
+    struct host_state* st = (struct host_state*)user;
+    double y[N], dz[N], dy[N], zero[N];
+    ++st->vjp_calls;
+    st->layout_ok = n == 2 && primals[0] && !primals[1] && !adjoints_in[0] && adjoints_in[1] && adjoints_out[0] && !adjoints_out[1];
+    if (!st->layout_ok) return 1;
+    view_get(primals[0], y);
+    view_get(adjoints_in[1], dz);
+    view_get(adjoints_out[0], zero);
+    for (int i = 0; i < N; ++i) {
+        st->layout_ok = st->layout_ok && zero[i] == 0.0;
+        dy[i] = 2.0 * y[i] * dz[i];
+    }
+    view_put(adjoints_out[0], dy);
+    return 0;
+}
+
+/* y = y^2 in place over {y READ|WRITE}. */
+static int32_t hn_square_in_place(void* user, int32_t n, const void* const* planes) {
+    struct host_state* st = (struct host_state*)user;
+    double y[N];
+    ++st->calls;
+    if (n != 1) return 1;
+    view_get(planes[0], y);
+    for (int i = 0; i < N; ++i) y[i] *= y[i];
+    view_put(planes[0], y);
+    return 0;
+}
+/* Its vjp: the primal is the y the node read (before it overwrote it), dy = 2 y dy_out; adjoints_in and adjoints_out both name the one plane. */
+static int32_t hn_square_in_place_vjp(void* user, int32_t n, const void* const* primals, const void* const* adjoints_in, void* const* adjoints_out) {
+    struct host_state* st = (struct host_state*)user;
+    double y[N], dy[N];
+    ++st->vjp_calls;
+    st->layout_ok = n == 1 && primals[0] && adjoints_in[0] && adjoints_out[0];
+    if (!st->layout_ok) return 1;
+    view_get(primals[0], y);
+    view_get(adjoints_in[0], dy);
+    for (int i = 0; i < N; ++i) dy[i] *= 2.0 * y[i];
+    view_put(adjoints_out[0], dy);
+    return 0;
+}
+
+/* y = n x over {x READ, n READ (int32), y WRITE}, and its vjp dx = n dy: the int plane has no adjoint view. */
+static int32_t hn_int_scale(void* user, int32_t n, const void* const* planes) {
+    struct host_state* st = (struct host_state*)user;
+    double x[N], y[N];
+    int32_t k[N];
+    ++st->calls;
+    if (n != 3) return 1;
+    view_get(planes[0], x);
+    view_get_i32(planes[1], k);
+    for (int i = 0; i < N; ++i) y[i] = k[i] * x[i];
+    view_put(planes[2], y);
+    return 0;
+}
+static int32_t hn_int_scale_vjp(void* user, int32_t n, const void* const* primals, const void* const* adjoints_in, void* const* adjoints_out) {
+    struct host_state* st = (struct host_state*)user;
+    double dy[N], dx[N];
+    int32_t k[N];
+    ++st->vjp_calls;
+    st->layout_ok = n == 3 && primals[0] && primals[1] && !primals[2] && !adjoints_in[0] && !adjoints_in[1] && adjoints_in[2] && adjoints_out[0] && !adjoints_out[1] && !adjoints_out[2];
+    if (!st->layout_ok) return 1;
+    view_get_i32(primals[1], k);
+    view_get(adjoints_in[2], dy);
+    for (int i = 0; i < N; ++i) dx[i] = k[i] * dy[i];
+    view_put(adjoints_out[0], dx);
+    return 0;
+}
+
+/* s = 3 y over {y READ, s WRITE}, with no vjp. */
+static int32_t hn_triple(void* user, int32_t n, const void* const* planes) {
+    struct host_state* st = (struct host_state*)user;
+    double y[N], s[N];
+    ++st->calls;
+    if (n != 2) return 1;
+    view_get(planes[0], y);
+    for (int i = 0; i < N; ++i) s[i] = 3.0 * y[i];
+    view_put(planes[1], s);
+    return 0;
+}
+
+/* y *= 3 in place over {y READ|WRITE}. */
+static int32_t hn_triple_in_place(void* user, int32_t n, const void* const* planes) {
+    struct host_state* st = (struct host_state*)user;
+    double y[N];
+    ++st->calls;
+    if (n != 1) return 1;
+    view_get(planes[0], y);
+    for (int i = 0; i < N; ++i) y[i] *= 3.0;
+    view_put(planes[0], y);
+    return 0;
+}
+
+static eg_host_node* host_node(eg_ctx* ctx, const char* name, eg_host_fn fn, eg_host_vjp_fn vjp, struct host_state* st) {
+    struct eg_host_node_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.name = name;
+    d.fn = fn;
+    d.vjp = vjp;
+    d.user = st;
+    eg_host_node* node = NULL;
+    return eg_host_node_new(ctx, &d, &node) == EG_OK ? node : NULL;
+}
+
+static eg_status host_call(eg_ctx* ctx, eg_host_node* node, int32_t n, eg_plane* const* planes, const uint32_t* access) { return eg_host_call(ctx, node, n, planes, access); }
+
+#define R_ EG_ACCESS_READ
+#define W_ EG_ACCESS_WRITE
+#define RW_ (EG_ACCESS_READ | EG_ACCESS_WRITE)
+
+/* y = w x, then a host node z = y^2 (with a vjp), J = sum z: the node is a leaf of the reverse, and dJ/dx = 2 w^2 x, dJ/dw = sum 2 w x^2, the closed form of chain_row
+ * with the second launch replaced by the caller's function. */
+static void host_leaf_row(struct rig* r, const struct units* u) {
+    eg_ctx* ctx = r->ctx;
+    double x[N], y[N], z[N], w[1], one[N], gx[N], gw[1], wx[N], ww[1] = { 0.0 };
+    struct tensor tx, ty, tz, tw, t1, tgx, tgw;
+    fill(x, w, 0.5);
+    for (int i = 0; i < N; ++i) one[i] = 1.0;
+    eg_plane *px = mk(r, &tx, N, x), *py = mk(r, &ty, N, y), *pz = mk(r, &tz, N, z), *pw = mk(r, &tw, 1, w), *p1 = mk(r, &t1, N, one);
+    eg_plane *pgx = mk(r, &tgx, N, gx), *pgw = mk(r, &tgw, 1, gw);
+    eg_plane* a[] = { px, pw, py };
+    eg_plan* f = plan_with(r, u->scale, 3, a, NULL);
+    const struct eg_node_vjp vjps[] = { { 0, u->scale_vjp } };
+    struct host_state st = { 0 };
+    eg_host_node* node = host_node(ctx, "square", hn_square, hn_square_vjp, &st);
+    eg_plane* decl[] = { py, pz };
+    const uint32_t access[] = { R_, W_ };
+    eg_graph* graph = NULL;
+    up(r);
+    int ok = f && node && eg_record_begin(ctx) == EG_OK && eg_launch(ctx, f, NULL) == EG_OK && host_call(ctx, node, 2, decl, access) == EG_OK && st.calls == 0 &&
+             end_diff(ctx, 1, vjps, &graph) == EG_OK && eg_graph_launch(ctx, graph) == EG_OK;
+    eg_plane *in[] = { px, pw }, *gr[] = { pgx, pgw };
+    ok = ok && reverse(ctx, graph, pz, p1, 2, in, gr) == EG_OK;
+    down(r);
+    for (int i = 0; i < N; ++i) {
+        wx[i] = 2.0 * w[0] * w[0] * x[i];
+        ww[0] += 2.0 * w[0] * x[i] * x[i];
+    }
+    verdict(r, ok && st.calls == 1 && st.vjp_calls == 1 && st.layout_ok && close_to(gx, wx, N) && close_to(gw, ww, 1),
+            "eg_graph_reverse through a host node with a vjp (y = w x, z = host y^2): the vjp saw the primal, the adjoint of z and a zeroed adjoint_out, and dJ/dx, dJ/dw match the closed form");
+    struct eg_graph_description desc;
+    memset(&desc, 0, sizeof(desc));
+    desc.struct_size = sizeof(desc);
+    verdict(r, eg_graph_describe(ctx, graph, &desc) == EG_OK && desc.n_nodes == 2 && desc.nodes[0].kind == EG_GNODE_LAUNCH && desc.nodes[1].kind == EG_GNODE_HOST &&
+                   strcmp(desc.nodes[1].unit, "square") == 0 && desc.nodes[1].n_planes == 2 && desc.nodes[1].access[0] == 1 && desc.nodes[1].access[1] == 2 && desc.n_levels == 2,
+            "eg_graph_describe of a DIFF graph with a host node: EG_GNODE_HOST named 'square', a read and a written plane, two levels");
+    eg_graph_free(ctx, graph);
+    eg_host_node_free(ctx, node);
+    eg_plan_free(ctx, f);
+    release(r);
+}
+
+/* y = w x, then a host node y <- y^2 in place (read, then overwritten), J = sum y: its vjp needs the y it read, which the graph copied before the node
+ * overwrote it. dJ/dx = 2 w^2 x, dJ/dw = sum 2 w x^2. */
+static void host_in_place_row(struct rig* r, const struct units* u) {
+    eg_ctx* ctx = r->ctx;
+    double x[N], y[N], w[1], one[N], gx[N], gw[1], wx[N], ww[1] = { 0.0 };
+    struct tensor tx, ty, tw, t1, tgx, tgw;
+    fill(x, w, 0.5);
+    for (int i = 0; i < N; ++i) one[i] = 1.0;
+    eg_plane *px = mk(r, &tx, N, x), *py = mk(r, &ty, N, y), *pw = mk(r, &tw, 1, w), *p1 = mk(r, &t1, N, one), *pgx = mk(r, &tgx, N, gx), *pgw = mk(r, &tgw, 1, gw);
+    eg_plane* a[] = { px, pw, py };
+    eg_plan* f = plan_with(r, u->scale, 3, a, NULL);
+    const struct eg_node_vjp vjps[] = { { 0, u->scale_vjp } };
+    struct host_state st = { 0 };
+    eg_host_node* node = host_node(ctx, "square_in_place", hn_square_in_place, hn_square_in_place_vjp, &st);
+    eg_plane* decl[] = { py };
+    const uint32_t access[] = { RW_ };
+    eg_graph* graph = NULL;
+    up(r);
+    int ok = f && node && eg_record_begin(ctx) == EG_OK && eg_launch(ctx, f, NULL) == EG_OK && host_call(ctx, node, 1, decl, access) == EG_OK &&
+             end_diff(ctx, 1, vjps, &graph) == EG_OK && eg_graph_launch(ctx, graph) == EG_OK;
+    eg_plane *in[] = { px, pw }, *gr[] = { pgx, pgw };
+    ok = ok && reverse(ctx, graph, py, p1, 2, in, gr) == EG_OK;
+    down(r);
+    for (int i = 0; i < N; ++i) {
+        wx[i] = 2.0 * w[0] * w[0] * x[i];
+        ww[0] += 2.0 * w[0] * x[i] * x[i];
+    }
+    verdict(r, ok && st.layout_ok && close_to(gx, wx, N) && close_to(gw, ww, 1),
+            "eg_graph_reverse through a host node that overwrites its input in place (y <- y^2): the vjp read the y the node read, and dJ/dx, dJ/dw match the closed form");
+    eg_graph_free(ctx, graph);
+    eg_host_node_free(ctx, node);
+    eg_plan_free(ctx, f);
+    release(r);
+}
+
+/* y = n x in a host node over {x, n (int32), y}, with n overwritten by a later eg_copy: the vjp reads the n the node read (kept before the overwrite),
+ * gets NULL for the int plane's adjoints, and dJ/dx = n. */
+static void host_int_row(struct rig* r) {
+    eg_ctx* ctx = r->ctx;
+    double x[N], y[N], seed[N], gx[N], want[N];
+    int32_t n[N], later[N];
+    struct tensor tx, ty, ts, tg, tn, tl;
+    for (int i = 0; i < N; ++i) {
+        x[i] = 0.5 + 0.25 * i;
+        seed[i] = 1.0;
+        n[i] = 2 + i % 5;
+        later[i] = 100 + i;
+        want[i] = (double)n[i];
+        gx[i] = y[i] = 0.0;
+    }
+    eg_plane *px = mk(r, &tx, N, x), *py = mk(r, &ty, N, y), *ps = mk(r, &ts, N, seed), *pg = mk(r, &tg, N, gx);
+    eg_plane *pn = mk_i32(r, &tn, N, n), *pl = mk_i32(r, &tl, N, later);
+    struct host_state st = { 0 };
+    eg_host_node* node = host_node(ctx, "int_scale", hn_int_scale, hn_int_scale_vjp, &st);
+    eg_plane* decl[] = { px, pn, py };
+    const uint32_t access[] = { R_, R_, W_ };
+    eg_graph* g = NULL;
+    up(r);
+    int ok = node && eg_record_begin(ctx) == EG_OK && host_call(ctx, node, 3, decl, access) == EG_OK && eg_copy(ctx, pl, pn) == EG_OK && end_diff(ctx, 0, NULL, &g) == EG_OK;
+    eg_plane *in[] = { px }, *gr[] = { pg };
+    ok = ok && eg_graph_launch(ctx, g) == EG_OK && reverse(ctx, g, py, ps, 1, in, gr) == EG_OK;
+    down(r);
+    verdict(r, ok && st.layout_ok && close_to(gx, want, N) && n[N - 1] == later[N - 1],
+            "eg_graph_reverse through a host node reading an int32 plane that a later eg_copy overwrites: the vjp read the n the node read, the int plane has NULL adjoint entries, dJ/dx = n");
+    eg_graph_free(ctx, g);
+    eg_host_node_free(ctx, node);
+    release(r);
+}
+
+/* A host node with no vjp: refused by name when a gradient flows through it; skipped when no seeded output depends on what it writes (y = w x, side plane s = 3 y
+ * by the node: seeding y gives dJ/dx = w and the node's callback ran in the forward only; seeding s is refused). */
+static void host_no_vjp_row(struct rig* r, const struct units* u) {
+    eg_ctx* ctx = r->ctx;
+    double x[N], y[N], s[N], w[1], one[N], gx[N], gw[1], wx[N];
+    struct tensor tx, ty, ts, tw, t1, tgx, tgw;
+    fill(x, w, 0.5);
+    for (int i = 0; i < N; ++i) one[i] = 1.0;
+    eg_plane *px = mk(r, &tx, N, x), *py = mk(r, &ty, N, y), *ps = mk(r, &ts, N, s), *pw = mk(r, &tw, 1, w), *p1 = mk(r, &t1, N, one), *pgx = mk(r, &tgx, N, gx);
+    eg_plane* pgw = mk(r, &tgw, 1, gw);
+    eg_plane* a[] = { px, pw, py };
+    eg_plan* f = plan_with(r, u->scale, 3, a, NULL);
+    const struct eg_node_vjp vjps[] = { { 0, u->scale_vjp } };
+    struct host_state st = { 0 };
+    eg_host_node* node = host_node(ctx, "triple", hn_triple, NULL, &st);
+    eg_plane* decl[] = { py, ps };
+    const uint32_t access[] = { R_, W_ };
+    eg_graph* graph = NULL;
+    up(r);
+    int ok = f && node && eg_record_begin(ctx) == EG_OK && eg_launch(ctx, f, NULL) == EG_OK && host_call(ctx, node, 2, decl, access) == EG_OK &&
+             end_diff(ctx, 1, vjps, &graph) == EG_OK && eg_graph_launch(ctx, graph) == EG_OK;
+    eg_plane *in[] = { px, pw }, *gr[] = { pgx, pgw };
+    ok = ok && reverse(ctx, graph, py, p1, 1, in, gr) == EG_OK;
+    down(r);
+    for (int i = 0; i < N; ++i) wx[i] = w[0];
+    verdict(r, ok && st.calls == 1 && close_to(gx, wx, N),
+            "eg_graph_reverse with a host node that has no vjp and writes what no seeded output depends on: the node is skipped and dJ/dx = w");
+    verdict(r, ok && refused(reverse(ctx, graph, ps, p1, 1, in, gr), EG_BAD_REQUEST, ctx, "host node 'triple'") && reason_has(ctx, "has no vjp"),
+            "eg_graph_reverse seeded on what a host node with no vjp writes: refused BAD_REQUEST naming the node");
+    eg_graph_free(ctx, graph);
+    eg_host_node_free(ctx, node);
+    eg_plan_free(ctx, f);
+    release(r);
+}
+
+/* On the host, a host node that writes planes inside a WHILE body of a DIFF recording is refused NOT_WRITTEN by name at eg_record_end, the recording left open
+ * (a device recording refuses the node at the call, see device_host_scope_row). */
+static void host_while_refusal_row(struct rig* r, const struct units* u) {
+    eg_ctx* ctx = r->ctx;
+    double x[N], y[N], a[1] = { 0.9 };
+    int32_t c[N];
+    struct tensor tx, ty, tc;
+    fill(x, a, 0.5);
+    for (int i = 0; i < N; ++i) c[i] = 1;
+    eg_plane *px = mk(r, &tx, N, x), *py = mk(r, &ty, N, y), *pc = mk_i32(r, &tc, N, c);
+    (void)u;
+    struct host_state st = { 0 };
+    eg_host_node* node = host_node(ctx, "square_in_place", hn_square_in_place, hn_square_in_place_vjp, &st);
+    eg_plane* decl[] = { py };
+    const uint32_t access[] = { RW_ };
+    eg_graph *g = NULL, *plain = NULL;
+    int ok = px && node && pc && eg_record_begin(ctx) == EG_OK && cond_open(ctx, EG_COND_WHILE, 0, pc, 0, 3) == EG_OK && host_call(ctx, node, 1, decl, access) == EG_OK &&
+             eg_record_cond_end(ctx) == EG_OK;
+    ok = ok && refused(end_diff(ctx, 0, NULL, &g), EG_NOT_WRITTEN, ctx, "host node 'square_in_place'") && g == NULL && eg_record_end(ctx, NULL, &plain) == EG_OK;
+    verdict(r, ok, "EG_RECORD_DIFF over a host node that writes inside a WHILE body: refused NOT_WRITTEN naming the node; the recording stays open and ends plain");
+    eg_graph_free(ctx, plain);
+    eg_host_node_free(ctx, node);
+    release(r);
+}
+
+/* launch (y = w x) -> host node (y *= 3) -> launch (z = y^2), recorded plain and replayed twice, against the same work done eagerly: bitwise equal. On a DEVICE
+ * context the host node is a segment between two captures. */
+static void host_segment_row(struct rig* r, const struct units* u) {
+    eg_ctx* ctx = r->ctx;
+    double x[N], w[1], yr[N], zr[N], yd[N], zd[N];
+    struct tensor tx, tw, tyr, tzr, tyd, tzd;
+    fill(x, w, 0.5);
+    memset(yr, 0, sizeof(yr));
+    memset(yd, 0, sizeof(yd));
+    memset(zr, 0, sizeof(zr));
+    memset(zd, 0, sizeof(zd));
+    eg_plane *px = mk(r, &tx, N, x), *pw = mk(r, &tw, 1, w), *pyr = mk(r, &tyr, N, yr), *pzr = mk(r, &tzr, N, zr), *pyd = mk(r, &tyd, N, yd), *pzd = mk(r, &tzd, N, zd);
+    eg_plane *a1[] = { px, pw, pyr }, *b1[] = { pyr, pzr }, *a2[] = { px, pw, pyd }, *b2[] = { pyd, pzd };
+    eg_plan *f1 = plan_with(r, u->scale, 3, a1, NULL), *g1 = plan_with(r, u->square, 2, b1, NULL), *f2 = plan_with(r, u->scale, 3, a2, NULL), *g2 = plan_with(r, u->square, 2, b2, NULL);
+    struct host_state sr = { 0 }, sd = { 0 };
+    eg_host_node *nr = host_node(ctx, "triple_in_place", hn_triple_in_place, NULL, &sr), *nd = host_node(ctx, "triple_in_place", hn_triple_in_place, NULL, &sd);
+    eg_plane *dr[] = { pyr }, *dd[] = { pyd };
+    const uint32_t access[] = { RW_ };
+    eg_graph* graph = NULL;
+    up(r);
+    int ok = f1 && g1 && f2 && g2 && nr && nd && eg_record_begin(ctx) == EG_OK && eg_launch(ctx, f1, NULL) == EG_OK && host_call(ctx, nr, 1, dr, access) == EG_OK &&
+             eg_launch(ctx, g1, NULL) == EG_OK && eg_record_end(ctx, NULL, &graph) == EG_OK && sr.calls == 0;
+    for (int rep = 0; ok && rep < 2; ++rep)
+        ok = eg_graph_launch(ctx, graph) == EG_OK && eg_launch(ctx, f2, NULL) == EG_OK && host_call(ctx, nd, 1, dd, access) == EG_OK && eg_launch(ctx, g2, NULL) == EG_OK;
+    down(r);
+    verdict(r, ok && sr.calls == 2 && sd.calls == 2 && memcmp(yr, yd, sizeof(yr)) == 0 && memcmp(zr, zd, sizeof(zr)) == 0 && yr[1] != 0.0,
+            "launch -> host node -> launch recorded and replayed twice equals the same work done eagerly, bitwise");
+    eg_graph_free(ctx, graph);
+    eg_host_node_free(ctx, nr);
+    eg_host_node_free(ctx, nd);
+    eg_plan_free(ctx, f1);
+    eg_plan_free(ctx, g1);
+    eg_plan_free(ctx, f2);
+    eg_plan_free(ctx, g2);
+    release(r);
+}
+
+/* On a DEVICE context a host node is a step between two captures: refused NOT_WRITTEN by name inside an IF arm, a fork branch and a WHILE, the recording left open. */
+static void device_host_scope_row(struct rig* r, const struct units* u) {
+    eg_ctx* ctx = r->ctx;
+    double x[N], w[1], y1[N], y2[N];
+    int32_t flag[1] = { 1 };
+    struct tensor tx, tw, ty1, ty2, tf;
+    fill(x, w, 0.5);
+    eg_plane *px = mk(r, &tx, N, x), *pw = mk(r, &tw, 1, w), *py1 = mk(r, &ty1, N, y1), *py2 = mk(r, &ty2, N, y2), *pf = mk_i32(r, &tf, 1, flag);
+    eg_plane *s1[] = { px, pw, py1 }, *s2[] = { px, pw, py2 };
+    eg_plan *f1 = plan_with(r, u->scale, 3, s1, NULL), *f2 = plan_with(r, u->scale, 3, s2, NULL);
+    struct host_state st = { 0 };
+    eg_host_node* node = host_node(ctx, "square_in_place", hn_square_in_place, NULL, &st);
+    eg_plane* decl[] = { py1 };
+    const uint32_t access[] = { RW_ };
+    eg_graph* open = NULL;
+    static const char scope[] = "inside a conditional arm, a fork branch or a WHILE";
+    int ok = f1 && f2 && node && eg_record_begin(ctx) == EG_OK && cond_open(ctx, EG_COND_IF, 0, pf, 0, 0) == EG_OK;
+    verdict(r, ok && refused(host_call(ctx, node, 1, decl, access), EG_NOT_WRITTEN, ctx, "host node 'square_in_place'") && reason_has(ctx, scope) && eg_launch(ctx, f1, NULL) == EG_OK &&
+                   eg_record_cond_end(ctx) == EG_OK && eg_record_end(ctx, NULL, &open) == EG_OK,
+            "a host node inside an IF arm of a device recording: refused NOT_WRITTEN by name, the recording left open");
+    eg_graph_free(ctx, open);
+    ok = ok && eg_record_begin(ctx) == EG_OK && eg_record_fork_begin(ctx) == EG_OK;
+    verdict(r, ok && refused(host_call(ctx, node, 1, decl, access), EG_NOT_WRITTEN, ctx, scope) && eg_launch(ctx, f1, NULL) == EG_OK && eg_record_fork_branch(ctx) == EG_OK &&
+                   eg_launch(ctx, f2, NULL) == EG_OK && eg_record_fork_end(ctx) == EG_OK && eg_record_end(ctx, NULL, &open) == EG_OK,
+            "a host node inside a fork branch of a device recording: refused NOT_WRITTEN by name, the recording left open");
+    eg_graph_free(ctx, open);
+    ok = ok && eg_record_begin(ctx) == EG_OK && cond_open(ctx, EG_COND_WHILE, 0, pf, 0, 3) == EG_OK;
+    verdict(r, ok && refused(host_call(ctx, node, 1, decl, access), EG_NOT_WRITTEN, ctx, scope) && eg_launch(ctx, f1, NULL) == EG_OK && eg_record_cond_end(ctx) == EG_OK &&
+                   eg_record_end(ctx, NULL, &open) == EG_OK,
+            "a host node inside a WHILE of a device recording: refused NOT_WRITTEN by name, the recording left open");
+    eg_graph_free(ctx, open);
+    eg_host_node_free(ctx, node);
+    eg_plan_free(ctx, f1);
+    eg_plan_free(ctx, f2);
+    release(r);
+}
+
+static void host_node_rows(struct rig* r, const struct units* u) {
+    host_leaf_row(r, u);
+    host_in_place_row(r, u);
+    host_int_row(r);
+    host_no_vjp_row(r, u);
+    host_segment_row(r, u);
+}
+
 static struct units load_units(struct rig* r) {
     const struct units u = { load(r, "scale", 0x10), load(r, "scale_vjp", 0x11), load(r, "square", 0x12), load(r, "square_vjp", 0x13),
                              load(r, "mul2", 0x14), load(r, "mul2_vjp", 0x15), load(r, "uscale", 0x16), load(r, "uscale_vjp", 0x17),
@@ -2146,6 +2553,8 @@ int main(int argc, char** argv) {
     leaf_rows(&host, &u);
     int_read_rows(&host, &u);
     run_rows(&host, &u);
+    host_node_rows(&host, &u);
+    host_while_refusal_row(&host, &u);
 
     int32_t devices = 0;
     if (eg_device_count(ctx, &devices) != EG_OK || devices < 1) {
@@ -2163,6 +2572,8 @@ int main(int argc, char** argv) {
         leaf_rows(&dev, &du);
         int_read_rows(&dev, &du);
         run_rows(&dev, &du);
+        host_node_rows(&dev, &du);
+        device_host_scope_row(&dev, &du);
         policy_row(&host, &u, &dev, &du);
         eg_ctx_free(dctx);
     }

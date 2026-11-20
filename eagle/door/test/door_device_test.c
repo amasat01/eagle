@@ -571,6 +571,98 @@ static void host_steps_in_graph(eg_ctx* ctx, const char* dev_lib, const char* ho
     cudaFree(dx), cudaFree(d1), cudaFree(d2), cudaFree(dc);
 }
 
+/* ---- host nodes on a device context ---- */
+
+struct node_log {
+    int calls, device_views, released;
+};
+
+/* y *= 3 in place over HN device doubles, through the CUDA runtime: the view is device memory the door made ready by synchronizing the stream. */
+static int32_t node_triple(void* user, int32_t n, const void* const* planes) {
+    struct node_log* log = (struct node_log*)user;
+    const DLTensor* t = (const DLTensor*)planes[0];
+    double y[64];
+    ++log->calls;
+    if (n != 1) return 1;
+    log->device_views += t->device.device_type == kDLCUDA;
+    char* data = (char*)t->data + t->byte_offset;
+    cudaMemcpy(y, data, sizeof(y), cudaMemcpyDeviceToHost);
+    for (int i = 0; i < 64; ++i) y[i] *= 3.0;
+    cudaMemcpy(data, y, sizeof(y), cudaMemcpyHostToDevice);
+    return 0;
+}
+
+static void node_release(void* user) { ++((struct node_log*)user)->released; }
+
+/* launch (p1 = 2 x + 1) -> host node (p1 *= 3) -> launch (p2 = 2 p1 + 1): the node is a segment between two captures; recorded and replayed, bitwise equal to the same
+ * work done eagerly; the description names it; a node inside a fork branch is refused by name; the release runs once. */
+static void host_nodes_device(eg_ctx* ctx, const char* dev_lib) {
+    enum { HN = 64, REPLAYS = 3 };
+    eg_unit* dp = NULL;
+    check(load(ctx, dev_lib, "dprefix", 0xD6, &dp) == EG_OK, "eg_unit_load dprefix for host nodes in a device graph");
+    if (dp == NULL) return;
+    double x[HN], got[HN], want[HN], eager[HN];
+    for (int i = 0; i < HN; ++i) x[i] = 0.5 * i - 7.0, want[i] = 2.0 * (3.0 * (2.0 * x[i] + 1.0)) + 1.0;
+    uint32_t count = HN;
+    double *dx = dev_doubles(x, HN), *d1 = dev_doubles(NULL, HN), *d2 = dev_doubles(NULL, HN);
+    uint32_t* dc = NULL;
+    cudaMalloc((void**)&dc, sizeof(count));
+    cudaMemcpy(dc, &count, sizeof(count), cudaMemcpyHostToDevice);
+    struct tensor tx, t1, t2, tc;
+    eg_plane *px = wrap(ctx, &tx, dx, 1, HN, 0, 1, 0), *p1 = wrap(ctx, &t1, d1, 1, HN, 0, 1, 0), *p2 = wrap(ctx, &t2, d2, 1, HN, 0, 1, 0),
+             *pc = wrap_typed(ctx, &tc, dc, kDLUInt, 32, 1, 1);
+    eg_plan *a = NULL, *b = NULL;
+    const int32_t slots[3] = { 0, 1, 2 };
+    eg_plane* a_planes[3] = { p1, px, pc };
+    eg_plane* b_planes[3] = { p2, p1, pc };
+    struct node_log log = { 0 };
+    struct eg_host_node_desc nd;
+    memset(&nd, 0, sizeof(nd));
+    nd.struct_size = sizeof(nd);
+    nd.name = "triple";
+    nd.fn = node_triple;
+    nd.user = &log;
+    nd.release = node_release;
+    eg_host_node* node = NULL;
+    int ok = px && p1 && p2 && pc && plan_n(ctx, dp, EG_STRUCTURE_DEVICE, HN, 0, NULL, NULL, &a) == EG_OK && plan_n(ctx, dp, EG_STRUCTURE_DEVICE, HN, 0, NULL, NULL, &b) == EG_OK &&
+             bind_planes(ctx, a, 3, slots, a_planes) == EG_OK && bind_planes(ctx, b, 3, slots, b_planes) == EG_OK && eg_host_node_new(ctx, &nd, &node) == EG_OK;
+    check(ok, "host nodes: two device plans, a host node and the planes made on a device context");
+    if (!ok) return;
+    eg_plane* decl[1] = { p1 };
+    const uint32_t rw = EG_ACCESS_READ | EG_ACCESS_WRITE;
+    ok = eg_launch(ctx, a, NULL) == EG_OK && eg_host_call(ctx, node, 1, decl, &rw) == EG_OK && eg_launch(ctx, b, NULL) == EG_OK && eg_sync(ctx) == EG_OK;
+    cudaMemcpy(eager, d2, sizeof(eager), cudaMemcpyDeviceToHost);
+    check(ok && log.calls == 1 && log.device_views == 1 && memcmp(eager, want, sizeof(want)) == 0,
+          "an eager host call between two device launches: the callback saw a device plane with the first launch's values, and the chain equals the closed form bitwise");
+    cudaMemset(d1, 0, sizeof(got));
+    cudaMemset(d2, 0, sizeof(got));
+    cudaDeviceSynchronize();
+    log.calls = 0;
+    eg_graph* g = NULL;
+    ok = eg_record_begin(ctx) == EG_OK && eg_launch(ctx, a, NULL) == EG_OK && eg_host_call(ctx, node, 1, decl, &rw) == EG_OK && eg_launch(ctx, b, NULL) == EG_OK &&
+         eg_record_end(ctx, NULL, &g) == EG_OK && log.calls == 0;
+    for (int k = 0; ok && k < REPLAYS; ++k) ok = eg_graph_launch(ctx, g) == EG_OK && eg_sync(ctx) == EG_OK;
+    cudaMemcpy(got, d2, sizeof(got), cudaMemcpyDeviceToHost);
+    check(ok && log.calls == REPLAYS && memcmp(got, eager, sizeof(got)) == 0,
+          "launch -> host node -> launch recorded on a device context and replayed 3 times: the callback ran once per replay and the values equal the eager work, bitwise");
+    struct eg_graph_description d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    ok = ok && eg_graph_describe(ctx, g, &d) == EG_OK && d.n_nodes == 3 && d.nodes[1].kind == EG_GNODE_HOST && d.nodes[1].unit != NULL && strcmp(d.nodes[1].unit, "triple") == 0 &&
+         d.nodes[1].n_planes == 1 && d.nodes[1].planes[0] == p1 && d.nodes[1].access[0] == 3;
+    check(ok, "eg_graph_describe of a device graph: the host node is EG_GNODE_HOST named 'triple' over its declared plane");
+    ok = eg_record_begin(ctx) == EG_OK && eg_record_fork_begin(ctx) == EG_OK && eg_launch(ctx, a, NULL) == EG_OK && eg_record_fork_branch(ctx) == EG_OK;
+    check(ok && refused(eg_host_call(ctx, node, 1, decl, &rw), EG_NOT_WRITTEN, ctx, "host node 'triple'") && reason_has(ctx, "a fork branch") && eg_record_abort(ctx) == EG_OK,
+          "a host node inside a fork branch of a device recording is refused NOT_WRITTEN by name");
+    check(eg_host_node_free(ctx, node) == EG_OK && log.released == 0 && eg_graph_free(ctx, g) == EG_OK && log.released == 1,
+          "a host node freed while a device graph holds it is released once, when the graph is freed");
+    eg_plan_free(ctx, a);
+    eg_plan_free(ctx, b);
+    eg_plane_free(ctx, px), eg_plane_free(ctx, p1), eg_plane_free(ctx, p2), eg_plane_free(ctx, pc);
+    eg_unit_free(ctx, dp);
+    cudaFree(dx), cudaFree(d1), cudaFree(d2), cudaFree(dc);
+}
+
 /* A launch writes each cell as the reduction over the lanes it RAN: a DEVICE prefix set of live count 8, 3, 0, 5, 0 over a SUM cell of rows
  * of 4 gives the sum of the first count lanes (0 for none), never the cell's old value or a stale row. */
 static void cell_rows_device(eg_ctx* ctx, const char* dev_lib) {
@@ -2492,6 +2584,7 @@ int main(int argc, char** argv) {
     lookup_device(ctx, dev_lib);
     figures_device(ctx, dev_lib);
     host_steps_in_graph(ctx, dev_lib, host_lib);
+    host_nodes_device(ctx, dev_lib);
     cell_rows_device(ctx, dev_lib);
     reset_device(ctx, dev_lib);
     step_graph_device(ctx, dev_lib);

@@ -620,6 +620,18 @@ struct eg_gemm_s {
     bool caller_ref = true;
 };
 
+/** @brief A caller's callback the door runs as one node (eg_host_node_new). */
+struct eg_host_node_s {
+    eg_ctx* ctx = nullptr;
+    std::string name;
+    eg_host_fn fn = nullptr;
+    eg_host_vjp_fn vjp = nullptr;             ///< NULL: no reverse
+    void* user = nullptr;
+    eg_host_release_fn release = nullptr;     ///< called once with ``user`` when the last reference drops
+    int refs = 1;                             ///< the caller's reference plus one per recorded graph that runs it
+    bool caller_ref = true;
+};
+
 namespace eagle {
 namespace door {
 /** @brief The last non-OK reason of one calling thread; @c lost when its text could not be stored (out of memory). */
@@ -646,6 +658,8 @@ struct eg_ctx_s {
     std::unordered_set<eg_graph_s*> graphs;
     std::unordered_set<eg_fft_s*> ffts;
     std::unordered_set<eg_gemm_s*> gemms;
+    std::unordered_set<eg_host_node_s*> host_nodes;
+    const std::string* in_host_node = nullptr;   ///< the name of the host node whose callback is running on this context, else null
     int exports = 0;                          ///< the DLPack exports (eg_plane_dlpack) not yet released by their consumers; changed under `lock`
     bool closed = false;                      ///< eg_ctx_free ran with exports outstanding: the last export's release frees the context
     eg_recording_s* rec = nullptr;            ///< between eg_record_begin and eg_record_end
@@ -732,7 +746,10 @@ eg_status call(eg_ctx* ctx, F&& body, bool in_child = false, bool in_refused = f
     eg_status status = EG_OK;
     if (hold.reentered()) {
         status = EG_BAD_REQUEST;
-        ctx->set_reason("this context is already inside a call on this thread (a plane's deleter must not call the door)");
+        if (ctx->in_host_node != nullptr)
+            ctx->set_reason(("this context is busy inside the callback of host node '" + *ctx->in_host_node + "': a host node's callback must not call the door on its context").c_str());
+        else
+            ctx->set_reason("this context is already inside a call on this thread (a plane's deleter must not call the door)");
     } else if (!in_child && forked(*ctx)) {
         status = EG_BAD_REQUEST;
         ctx->set_reason("this context belongs to another process: a forked child may only call "
@@ -897,6 +914,10 @@ double sample_sum(const double* x, std::int64_t count, int threads);
 float sample_sum(const float* x, std::int64_t count, int threads);
 /** @brief Bind the by-value uniform of @p slot of @p p. */
 void bind_value(eg_plan_s& p, int slot, const void* value, std::size_t bytes);
+/** @brief eg_host_node_new / eg_host_node_release / eg_host_call (host/HostNode.cpp, host/Record.cpp). */
+void host_node_new(eg_ctx& ctx, const eg_host_node_desc* desc, eg_host_node** out);
+void host_node_release(eg_ctx& ctx, eg_host_node_s* node);
+void host_call(eg_ctx& ctx, eg_host_node_s* node, std::int32_t n_planes, eg_plane_s* const* planes, const std::uint32_t* access);
 void graph_launch(eg_ctx& ctx, eg_graph_s* graph);
 void graph_free(eg_ctx& ctx, eg_graph_s* graph);
 /** @brief A reference to host graph @p graph for a runner that runs it per step, and its release (the last one frees the graph). */

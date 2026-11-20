@@ -131,6 +131,11 @@ void ctx_free_all(eg_ctx& ctx) {
     fft_free_all(ctx);
     for (eg_gemm_s* gemm : ctx.gemms) delete gemm;
     ctx.gemms.clear();
+    for (eg_host_node_s* node : ctx.host_nodes) {    // a node still referenced at the close releases its user data here, once
+        if (!child && node->release != nullptr) node->release(node->user);
+        delete node;
+    }
+    ctx.host_nodes.clear();
     for (eg_plane_s* plane : ctx.planes) {
         if (!child && plane->tensor != nullptr && plane->tensor->deleter != nullptr)
             plane->tensor->deleter(plane->tensor);

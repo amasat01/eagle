@@ -21,8 +21,9 @@
  *  - Versioning: major 1 is additive only (functions, struct tail fields,
  *    enum values and flag bits are appended). A caller names the major it was
  *    built for in ``eg_ctx_settings``; another major is refused.
- *  - No callbacks: eagle never calls back into the caller. A binding may
- *    release its interpreter lock around every call.
+ *  - No callbacks, except the ones a caller hands over on purpose: a host node's ``eg_host_fn`` and ``eg_host_vjp_fn``
+ *    (see ``eg_host_node_new``) and its release function, and a plane's deleter. Every callback runs on the thread that
+ *    made the door call that reached it, inside that call. A binding may release its interpreter lock around every call.
  *  - No global mutable state: everything lives in a context. The one process
  *    resource is the host worker pool, shared by all contexts; each context
  *    states its own thread count, which is passed per launch. A context and
@@ -86,6 +87,7 @@ typedef struct eg_runner_s eg_runner; /**< a run-until-done loop over bound plan
 typedef struct eg_graph_s eg_graph;   /**< a recorded sequence of door calls, replayed as one */
 typedef struct eg_gemm_s eg_gemm;     /**< a matrix product: stored shapes, flags and width, and on a device the stream's cuBLAS handle */
 typedef struct eg_fft_s eg_fft;       /**< a transform plan: kind, norm, shape and axes, and on a device its cuFFT plans */
+typedef struct eg_host_node_s eg_host_node;   /**< a caller's callback (and optional vjp) the door runs as one node, see ``eg_host_node_new`` */
 
 /** DLPack >= 1.0 managed tensor (dlpack.h). Only a pointer crosses. */
 struct DLManagedTensorVersioned;
@@ -1105,9 +1107,93 @@ eg_status eg_gemm_run(eg_ctx* ctx, eg_gemm* gemm, eg_plane* a, eg_plane* b, eg_p
 /** Drop the caller's reference to a product; a host recording that runs it keeps it. NULL-safe. */
 eg_status eg_gemm_free(eg_ctx* ctx, eg_gemm* gemm);
 
+/* ---- host nodes ---------------------------------------------------------- */
+
+/**
+ * The caller's function of a host node. ``planes`` holds ``n`` borrowed views, in the order the planes were declared at
+ * ``eg_host_call``: each entry is a ``const DLTensor*`` of dlpack.h (typed ``void`` here: this header includes no DLPack header),
+ * kDLCPU, or kDLCUDA for a device plane. A view is valid only during the call. The function reads the planes
+ * declared EG_ACCESS_READ and writes the ones declared EG_ACCESS_WRITE; a write to any other plane is the caller's fault, which the
+ * door neither detects nor repairs. It must not call the door on this context: the context is busy, and such a call is refused
+ * BAD_REQUEST naming the host node. It runs on the thread that called ``eg_host_call``, ``eg_graph_launch``, ``eg_run`` or
+ * ``eg_graph_reverse``, never on a driver thread. Nonzero return = failure.
+ */
+typedef int32_t (*eg_host_fn)(void* user, int32_t n, const void* const* planes);
+
+/**
+ * The reverse of a host node's function, called by ``eg_graph_reverse`` for a graph ended with EG_RECORD_DIFF. All four arrays
+ * hold ``n`` entries, one per declared plane, each a ``DLTensor*`` as in ``eg_host_fn``, and a view is valid only during the call. ``primals[i]`` is the plane declared with
+ * EG_ACCESS_READ as the node read it (the door keeps a copy when a later node overwrites it), else NULL. ``adjoints_in[i]`` is
+ * the adjoint of a float plane declared with EG_ACCESS_WRITE, else NULL. ``adjoints_out[i]`` is a fresh zeroed view for a float
+ * plane declared with EG_ACCESS_READ, else NULL: the function writes into it the adjoint it pulls back to that plane, and the door
+ * adds it to the running adjoint of the plane (a plane declared READ|WRITE has its running adjoint replaced by it, as the forward
+ * overwrote the plane). A plane that is not float has no adjoint: its ``adjoints_in`` and ``adjoints_out`` entries are NULL. The
+ * restrictions of ``eg_host_fn`` apply. Nonzero return = failure.
+ */
+typedef int32_t (*eg_host_vjp_fn)(void* user, int32_t n, const void* const* primals,
+                                  const void* const* adjoints_in, void* const* adjoints_out);
+
+/** Called once with ``user`` when the last reference to the host node drops (see ``eg_host_node_free``), on the thread that drops
+ *  it, or at ``eg_ctx_free`` for a node still alive then. It must not call the door on this context. */
+typedef void (*eg_host_release_fn)(void* user);
+
+/** How ``eg_host_call`` declares a plane: the access is the hazard the door orders the node by. READ|WRITE is read, then written in place. */
+#define EG_ACCESS_READ 1u
+#define EG_ACCESS_WRITE 2u
+
+/** INPUT to ``eg_host_node_new``. */
+struct eg_host_node_desc {
+    uint32_t struct_size;
+    uint32_t flags;               /**< none defined: 0 */
+    const char* name;             /**< shown by ``eg_graph_describe`` and in refusals and failures; copied; required, not empty */
+    eg_host_fn fn;                /**< required */
+    eg_host_vjp_fn vjp;           /**< NULL: none. A graph ended with EG_RECORD_DIFF and reversed with a gradient flowing through the node is refused by name */
+    void* user;                   /**< handed back to every callback */
+    eg_host_release_fn release;   /**< NULL: none */
+};
+
+/**
+ * Make a host node: one opaque callback the door runs where a launch would run, for work the door cannot express as a unit (a
+ * caller's own function, a custom reverse step, a node kind of the caller's). The door never asks the function about targets, shapes
+ * or scheduling: what it reads and writes is what ``eg_host_call`` declares, and ordering, hazard edges, forks, waits, the
+ * description and the reverse's copies all follow from those declarations.
+ * A host node is reference-counted like a plan. ``eg_host_node_free`` drops the caller's reference; a recorded graph holds its own,
+ * so a free while a graph holds the node is deferred, and ``release(user)`` runs exactly once, when the last reference drops.
+ * Status: OK; BAD_REQUEST (``desc`` or ``out`` NULL, ``name`` NULL or empty, ``fn`` NULL, an unknown flag).
+ */
+eg_status eg_host_node_new(eg_ctx* ctx, const struct eg_host_node_desc* desc, eg_host_node** out);
+
+/** Drop the caller's reference to a host node; a recorded graph that runs it keeps it. NULL-safe. */
+eg_status eg_host_node_free(eg_ctx* ctx, eg_host_node* node);
+
+/**
+ * Run the host node now, or record it while recording, exactly as ``eg_launch`` does for a plan. ``planes`` and ``access`` hold
+ * ``n_planes`` entries; each plane is declared EG_ACCESS_READ, EG_ACCESS_WRITE or both, and no plane is declared twice.
+ * Not recording: on a device context the door first synchronizes the context's stream, so every device plane is ready; the callback
+ * then runs on this thread, and may read and write device planes in place, also with its own library enqueued on
+ * ``eg_ctx_info.stream``; the door's next work on that stream is ordered after what the callback enqueued there. Recording on a
+ * host context: the node is kept wherever a launch may be recorded (an arm, a fork branch, a WHILE body), holds a reference to the
+ * node and the planes, and is replayed in recording order by ``eg_graph_launch``; ``eg_graph_describe`` reports it as
+ * EG_GNODE_HOST with its name and the declared planes. Recording on a device context: the host node is a segment boundary of the
+ * graph, like ``eg_run`` of a DEVICE runner: the capture ends before it, ``eg_graph_launch`` synchronizes the stream, calls the
+ * function on its own thread and starts the next capture after it. Inside a conditional arm, a fork branch or a WHILE of a device
+ * recording it is refused NOT_WRITTEN by name, the recording left open.
+ * Reverse: with ``vjp`` set, a host node in an EG_RECORD_DIFF graph is a leaf of the reverse (see ``eg_host_vjp_fn``). A host node
+ * with no vjp is refused by ``eg_graph_reverse``, BAD_REQUEST naming the node, when a gradient flows through it, and skipped when
+ * no gradient reaches the planes it writes. A host node inside a WHILE body of an EG_RECORD_DIFF recording that writes planes the
+ * tape tracks is refused NOT_WRITTEN at ``eg_record_end``. On a device context an EG_RECORD_DIFF graph keeps the node as a segment
+ * of the reverse's stream too: the door synchronizes it before the vjp.
+ * Failure: a nonzero return of the function stops the call: the door function that ran it (``eg_host_call``, ``eg_graph_launch``,
+ * ``eg_graph_reverse``) returns FAULT "host node '<name>' failed (<code>)"; a replay stops there, and the planes written so far stay
+ * written. The caller keeps its own exception.
+ * Status: OK; BAD_REQUEST (a NULL or foreign handle, ``n_planes`` below 0 or planes or access missing, an access other than 1, 2 or 3,
+ * a plane declared twice, a host-only context given a device plane); NOT_WRITTEN (the device refusals above); FAULT (the function failed).
+ */
+eg_status eg_host_call(eg_ctx* ctx, eg_host_node* node, int32_t n_planes, eg_plane* const* planes, const uint32_t* access);
+
 /**
  * Start recording: until ``eg_record_end``, ``eg_launch``, ``eg_run``,
- * ``eg_reduce``, ``eg_copy``, ``eg_fft_run``, ``eg_gemm_run`` and the conditional calls are recorded, not
+ * ``eg_reduce``, ``eg_copy``, ``eg_fft_run``, ``eg_gemm_run``, ``eg_host_call`` and the conditional calls are recorded, not
  * run. Host: an ordered list replayed in C. Device: a capture on the
  * context's stream (so device work the caller issues on that stream between
  * begin and end is captured too).
@@ -1297,6 +1383,7 @@ typedef int32_t eg_gnode_kind;
 #define EG_GNODE_BRANCH 9  /**< one branch of a fork */
 #define EG_GNODE_JOIN 10   /**< ``eg_record_fork_end``: what the next node waits for */
 #define EG_GNODE_WAIT 11   /**< ``eg_record_wait`` */
+#define EG_GNODE_HOST 12   /**< ``eg_host_call``: ``unit`` is the host node's name, the planes are the declared ones */
 
 /** What an edge of a graph description is. */
 typedef int32_t eg_gedge_kind;
@@ -1315,7 +1402,7 @@ struct eg_graph_node {
     int32_t level;        /**< the schedule level: nodes of one level may run at the same time */
     int32_t arm;          /**< ARM: its index; COND: its ``eg_cond_kind``; else -1 */
     int32_t n_planes;     /**< the planes the node reads or writes (a plane bound to two slots appears twice) */
-    const char* unit;     /**< LAUNCH: the unit's name; RUN: the first plan's unit name; else NULL */
+    const char* unit;     /**< LAUNCH: the unit's name; RUN: the first plan's unit name; HOST: the host node's name; else NULL */
     eg_plane* const* planes;
     const uint8_t* access;  /**< per plane: 1 read, 2 write, 3 both */
     const int32_t* slot;    /**< per plane: the unit slot of a LAUNCH, else -1 */

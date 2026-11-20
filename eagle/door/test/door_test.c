@@ -1850,6 +1850,268 @@ static void check_fork_launches(eg_ctx* ctx, eg_unit* axpb) {
     check(ok, "fork graphs, plans and planes freed");
 }
 
+/* ---- host nodes (eg_host_node_new, eg_host_node_free, eg_host_call) ---- */
+
+struct host_log {
+    int calls, released, shape_ok;
+    int32_t reentry_status;
+    char reentry_reason[256];
+    eg_ctx* ctx;
+    eg_plane* plane;
+    double factor;
+};
+
+/* y *= factor over the first plane (read then written in place). */
+static int32_t host_scale(void* user, int32_t n, const void* const* planes) {
+    struct host_log* log = (struct host_log*)user;
+    ++log->calls;
+    if (n < 1) return 1;
+    const DLTensor* t = (const DLTensor*)planes[0];
+    double* y = (double*)((char*)t->data + t->byte_offset);
+    for (int64_t i = 0; i < t->shape[0]; ++i) y[i] *= log->factor;
+    return 0;
+}
+
+/* Reads planes[0] (float64, 1-D) and writes planes[1] = planes[0] + 1; records the shapes and values it saw. */
+static int32_t host_shift(void* user, int32_t n, const void* const* planes) {
+    struct host_log* log = (struct host_log*)user;
+    ++log->calls;
+    const DLTensor *in = (const DLTensor*)planes[0], *out = (const DLTensor*)planes[1];
+    log->shape_ok = n == 2 && in->ndim == 1 && out->ndim == 1 && in->shape[0] == 4 && out->shape[0] == 4 && in->dtype.code == kDLFloat && in->device.device_type == kDLCPU;
+    const double* x = (const double*)((const char*)in->data + in->byte_offset);
+    double* y = (double*)((char*)out->data + out->byte_offset);
+    for (int i = 0; i < 4; ++i) y[i] = x[i] + 1.0;
+    return 0;
+}
+
+/* Counts the int32 cell planes[0] down by one. */
+static int32_t host_countdown(void* user, int32_t n, const void* const* planes) {
+    (void)n;
+    ++((struct host_log*)user)->calls;
+    const DLTensor* t = (const DLTensor*)planes[0];
+    int32_t* cell = (int32_t*)((char*)t->data + t->byte_offset);
+    --*cell;
+    return 0;
+}
+
+static int32_t host_fail(void* user, int32_t n, const void* const* planes) {
+    (void)n;
+    (void)planes;
+    ++((struct host_log*)user)->calls;
+    return 7;
+}
+
+/* Calls the door on its own context from inside the callback: refused BAD_REQUEST naming this node. */
+static int32_t host_reenter(void* user, int32_t n, const void* const* planes) {
+    struct host_log* log = (struct host_log*)user;
+    (void)n;
+    (void)planes;
+    ++log->calls;
+    log->reentry_status = eg_copy(log->ctx, log->plane, log->plane);
+    size_t len = 0;
+    eg_error(log->ctx, log->reentry_reason, sizeof(log->reentry_reason), &len);
+    return 0;
+}
+
+static void host_release(void* user) { ++((struct host_log*)user)->released; }
+
+static eg_host_node* host_node_make(eg_ctx* ctx, const char* name, eg_host_fn fn, struct host_log* log) {
+    struct eg_host_node_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.name = name;
+    d.fn = fn;
+    d.user = log;
+    d.release = host_release;
+    eg_host_node* node = NULL;
+    return eg_host_node_new(ctx, &d, &node) == EG_OK ? node : NULL;
+}
+
+static eg_status host_call1(eg_ctx* ctx, eg_host_node* node, eg_plane* plane, uint32_t access) {
+    return eg_host_call(ctx, node, 1, &plane, &access);
+}
+
+/* Eager host calls: the callback sees the declared planes and writes one, a failure is FAULT by name, a door call from inside is refused by name,
+ * a bad declaration is refused, and the release function runs once. */
+static void check_host_node_eager(eg_ctx* ctx) {
+    double x[4] = { 1, 2, 3, 4 }, y[4] = { 0, 0, 0, 0 };
+    struct tensor tx, ty;
+    eg_plane *px = wrap(ctx, &tx, x, 4, kDLFloat, 64), *py = wrap(ctx, &ty, y, 4, kDLFloat, 64);
+    struct host_log shift = { 0 }, failing = { 0 }, again = { 0 };
+    eg_host_node *ns = host_node_make(ctx, "shift", host_shift, &shift), *nf = host_node_make(ctx, "failing", host_fail, &failing);
+    eg_host_node* nr = host_node_make(ctx, "reenter", host_reenter, &again);
+    if (!px || !py || !ns || !nf || !nr) {
+        check(0, "host node eager rows: planes and nodes made");
+        return;
+    }
+    eg_plane* two[2] = { px, py };
+    const uint32_t shift_access[2] = { EG_ACCESS_READ, EG_ACCESS_WRITE };
+    check(eg_host_call(ctx, ns, 2, two, shift_access) == EG_OK && shift.calls == 1 && shift.shape_ok && y[0] == 2.0 && y[3] == 5.0 && x[3] == 4.0,
+          "eg_host_call: the callback sees the declared planes (shapes, values) and writes the one declared WRITE");
+    const eg_status st = host_call1(ctx, nf, py, EG_ACCESS_READ);
+    check(st == EG_FAULT && failing.calls == 1 && reason_has(ctx, "host node 'failing' failed (7)"), "a nonzero return of the callback is FAULT naming the node and the code");
+    again.ctx = ctx;
+    again.plane = px;
+    check(host_call1(ctx, nr, px, EG_ACCESS_READ) == EG_OK && again.calls == 1 && again.reentry_status == EG_BAD_REQUEST &&
+              strstr(again.reentry_reason, "host node 'reenter'") != NULL,
+          "a door call on the same context from inside the callback is refused BAD_REQUEST naming the host node; the outer call is OK");
+    check(host_call1(ctx, ns, px, 0) == EG_BAD_REQUEST && reason_has(ctx, "access 0") && host_call1(ctx, ns, px, 4) == EG_BAD_REQUEST && reason_has(ctx, "access 4"),
+          "eg_host_call: an access other than READ, WRITE or both is refused by name");
+    eg_plane* dup[2] = { px, px };
+    check(eg_host_call(ctx, ns, 2, dup, shift_access) == EG_BAD_REQUEST && reason_has(ctx, "declared twice"), "eg_host_call: a plane declared twice is refused by name");
+    check(eg_host_call(ctx, ns, 1, NULL, shift_access) == EG_BAD_REQUEST && eg_host_call(ctx, ns, -1, two, shift_access) == EG_BAD_REQUEST &&
+              eg_host_call(ctx, NULL, 0, NULL, NULL) == EG_BAD_REQUEST && reason_has(ctx, "host node is NULL"),
+          "eg_host_call: planes missing, n_planes below 0, a NULL node: refused BAD_REQUEST");
+    struct eg_host_node_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    eg_host_node* none = NULL;
+    check(eg_host_node_new(ctx, &d, &none) == EG_BAD_REQUEST && reason_has(ctx, "name") && none == NULL, "eg_host_node_new without a name: refused");
+    d.name = "nofn";
+    check(eg_host_node_new(ctx, &d, &none) == EG_BAD_REQUEST && reason_has(ctx, "fn is NULL"), "eg_host_node_new without a function: refused");
+    d.fn = host_shift;
+    d.flags = 1;
+    check(eg_host_node_new(ctx, &d, &none) == EG_BAD_REQUEST && reason_has(ctx, "unknown bits"), "eg_host_node_new with an unknown flag: refused");
+    check(eg_host_node_free(ctx, ns) == EG_OK && shift.released == 1 && eg_host_node_free(ctx, nf) == EG_OK && failing.released == 1 && eg_host_node_free(ctx, nr) == EG_OK &&
+              again.released == 1 && eg_host_node_free(ctx, NULL) == EG_OK,
+          "eg_host_node_free: the release function of each node ran exactly once; NULL is accepted");
+    eg_plane_free(ctx, px);
+    eg_plane_free(ctx, py);
+}
+
+/* launch (y = a y + b) -> host node (y *= 3) -> launch, recorded and replayed twice, against the same work done eagerly (bitwise); the description
+ * names the node and its hazard edges; a free while the graph holds the node is deferred and the release runs once, at the graph's free. */
+static void check_host_node_recorded(eg_ctx* ctx, eg_unit* axpb) {
+    enum { K = 16 };
+    static double yr[K], yd[K];
+    const double a = 0.5, b = 1.0;
+    struct tensor tr, td;
+    for (int i = 0; i < K; ++i) yr[i] = yd[i] = (double)(i % 7) * 0.37 - 1.0;
+    eg_plane *pr = wrap(ctx, &tr, yr, K, kDLFloat, 64), *pd = wrap(ctx, &td, yd, K, kDLFloat, 64);
+    eg_plan *plr = NULL, *pld = NULL;
+    struct host_log rec = { .factor = 3.0 }, dir = { .factor = 3.0 };
+    eg_host_node *nr = host_node_make(ctx, "triple", host_scale, &rec), *nd = host_node_make(ctx, "triple_eager", host_scale, &dir);
+    int ok = pr && pd && nr && nd && plan(ctx, axpb, EG_STRUCTURE_HOST_SERIAL, K, 0, NULL, NULL, &plr) == EG_OK &&
+             plan(ctx, axpb, EG_STRUCTURE_HOST_SERIAL, K, 0, NULL, NULL, &pld) == EG_OK && bind(ctx, plr, pr, pr, &a, &b) == EG_OK && bind(ctx, pld, pd, pd, &a, &b) == EG_OK;
+    if (!ok) {
+        check(0, "host node recorded rows: planes, plans and nodes made");
+        return;
+    }
+    eg_graph* g = NULL;
+    ok = eg_record_begin(ctx) == EG_OK && eg_launch(ctx, plr, NULL) == EG_OK && host_call1(ctx, nr, pr, EG_ACCESS_READ | EG_ACCESS_WRITE) == EG_OK &&
+         eg_launch(ctx, plr, NULL) == EG_OK && rec.calls == 0 && eg_record_end(ctx, NULL, &g) == EG_OK && rec.calls == 0;
+    for (int rep = 0; ok && rep < 2; ++rep) {
+        ok = eg_graph_launch(ctx, g) == EG_OK && eg_launch(ctx, pld, NULL) == EG_OK && host_call1(ctx, nd, pd, EG_ACCESS_READ | EG_ACCESS_WRITE) == EG_OK &&
+             eg_launch(ctx, pld, NULL) == EG_OK;
+    }
+    check(ok && rec.calls == 2 && dir.calls == 2 && memcmp(yr, yd, sizeof(yr)) == 0,
+          "launch -> host node -> launch recorded and replayed twice: the callback ran once per replay and the planes equal the same work done eagerly, bitwise");
+    struct eg_graph_description d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    int raw01 = 0, raw12 = 0;
+    ok = eg_graph_describe(ctx, g, &d) == EG_OK && d.n_nodes == 3 && d.nodes[0].kind == EG_GNODE_LAUNCH && d.nodes[1].kind == EG_GNODE_HOST &&
+         d.nodes[2].kind == EG_GNODE_LAUNCH && d.nodes[1].unit != NULL && strcmp(d.nodes[1].unit, "triple") == 0 && d.nodes[1].n_planes == 1 &&
+         d.nodes[1].planes[0] == pr && d.nodes[1].access[0] == 3 && d.nodes[1].slot[0] == -1;
+    for (int32_t i = 0; ok && i < d.n_edges; ++i) {
+        const struct eg_graph_edge* e = (const struct eg_graph_edge*)((const char*)d.edges + (size_t)i * d.edge_size);
+        if (e->kind == EG_GEDGE_RAW && e->from == 0 && e->to == 1 && e->plane == pr && e->to_slot == -1) raw01 = 1;
+        if (e->kind == EG_GEDGE_RAW && e->from == 1 && e->to == 2 && e->plane == pr && e->from_slot == -1) raw12 = 1;
+    }
+    check(ok && raw01 && raw12 && d.n_levels == 3, "eg_graph_describe: a HOST node with its name and declared plane, a RAW edge into it and out of it by the declaration, three levels");
+    check(eg_host_node_free(ctx, nr) == EG_OK && rec.released == 0 && host_call1(ctx, nr, pr, EG_ACCESS_READ) == EG_BAD_REQUEST && reason_has(ctx, "already freed") &&
+              eg_graph_launch(ctx, g) == EG_OK && rec.calls == 3 && eg_graph_free(ctx, g) == EG_OK && rec.released == 1,
+          "eg_host_node_free while a graph holds the node is deferred: the graph still replays it, a new call is refused, and the release function runs once, at eg_graph_free");
+    check(eg_host_node_free(ctx, nd) == EG_OK && dir.released == 1 && eg_plan_free(ctx, plr) == EG_OK && eg_plan_free(ctx, pld) == EG_OK && eg_plane_free(ctx, pr) == EG_OK &&
+              eg_plane_free(ctx, pd) == EG_OK,
+          "the eagerly used node released once; plans and planes freed");
+
+    /* a failing node stops the replay; a door call from inside a replayed callback is refused by name too */
+    double y[4] = { 1, 1, 1, 1 };
+    struct tensor ty;
+    eg_plane* py = wrap(ctx, &ty, y, 4, kDLFloat, 64);
+    struct host_log fail = { 0 }, again = { .ctx = ctx }, after = { .factor = 2.0 };
+    eg_host_node *nf = host_node_make(ctx, "failing", host_fail, &fail), *nre = host_node_make(ctx, "reenter", host_reenter, &again), *na = host_node_make(ctx, "after", host_scale, &after);
+    again.plane = py;
+    eg_graph *gf = NULL, *gr = NULL;
+    ok = py && nf && nre && na && eg_record_begin(ctx) == EG_OK && host_call1(ctx, nf, py, EG_ACCESS_READ) == EG_OK &&
+         host_call1(ctx, na, py, EG_ACCESS_READ | EG_ACCESS_WRITE) == EG_OK && eg_record_end(ctx, NULL, &gf) == EG_OK;
+    check(ok && eg_graph_launch(ctx, gf) == EG_FAULT && reason_has(ctx, "host node 'failing' failed (7)") && after.calls == 0 && y[0] == 1.0,
+          "a recorded host node that fails stops the replay there: eg_graph_launch is FAULT naming the node and no later node ran");
+    ok = eg_record_begin(ctx) == EG_OK && host_call1(ctx, nre, py, EG_ACCESS_READ) == EG_OK && eg_record_end(ctx, NULL, &gr) == EG_OK && eg_graph_launch(ctx, gr) == EG_OK;
+    check(ok && again.reentry_status == EG_BAD_REQUEST && strstr(again.reentry_reason, "host node 'reenter'") != NULL,
+          "a door call from inside the callback of a replayed host node is refused BAD_REQUEST naming it");
+    eg_graph_free(ctx, gf);
+    eg_graph_free(ctx, gr);
+    eg_host_node_free(ctx, nf);
+    eg_host_node_free(ctx, nre);
+    eg_host_node_free(ctx, na);
+    eg_plane_free(ctx, py);
+    check(fail.released == 1 && again.released == 1 && after.released == 1, "every node of the failure rows released once");
+}
+
+/* A host node in a fork branch, in a conditional arm and a WHILE body; a host node in one branch races a launch in the other on the planes it declares. */
+static void check_host_node_structure(eg_ctx* ctx, eg_unit* axpb) {
+    enum { K = 16 };
+    static double y1[K], y2[K];
+    const double a = 0.5, b = 1.0;
+    struct tensor t1, t2, tc, tl;
+    int32_t flag = 1, left = 3;
+    for (int i = 0; i < K; ++i) y1[i] = 4.0, y2[i] = 8.0;
+    eg_plane *p1 = wrap(ctx, &t1, y1, K, kDLFloat, 64), *p2 = wrap(ctx, &t2, y2, K, kDLFloat, 64), *pc = cell_at(ctx, &tc, &flag), *pl = cell_at(ctx, &tl, &left);
+    eg_plan* pl2 = NULL;
+    struct host_log log = { .factor = 2.0 }, dec = { 0 };
+    eg_host_node *n1 = host_node_make(ctx, "double", host_scale, &log), *nd = host_node_make(ctx, "countdown", host_countdown, &dec);
+    int ok = p1 && p2 && pc && pl && n1 && nd && plan(ctx, axpb, EG_STRUCTURE_HOST_SERIAL, K, 0, NULL, NULL, &pl2) == EG_OK && bind(ctx, pl2, p2, p2, &a, &b) == EG_OK;
+    if (!ok) {
+        check(0, "host node structure rows: planes, plan and nodes made");
+        return;
+    }
+    eg_graph* g = NULL;
+    ok = eg_record_begin(ctx) == EG_OK && eg_record_fork_begin(ctx) == EG_OK && host_call1(ctx, n1, p1, EG_ACCESS_READ | EG_ACCESS_WRITE) == EG_OK &&
+         eg_record_fork_branch(ctx) == EG_OK && eg_launch(ctx, pl2, NULL) == EG_OK && eg_record_fork_end(ctx) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK &&
+         eg_graph_launch(ctx, g) == EG_OK;
+    check(ok && y1[0] == 8.0 && y2[0] == 5.0 && log.calls == 1, "a fork with a host node in one branch and a launch in the other: both ran once on their own planes");
+    eg_graph_free(ctx, g);
+    ok = eg_record_begin(ctx) == EG_OK && eg_record_fork_begin(ctx) == EG_OK && host_call1(ctx, n1, p2, EG_ACCESS_WRITE) == EG_OK && eg_record_fork_branch(ctx) == EG_OK &&
+         eg_launch(ctx, pl2, NULL) == EG_OK;
+    check(ok && eg_record_fork_end(ctx) == EG_BAD_REQUEST && reason_has(ctx, "race between node 2 (host node 'double') slot 'planes[0]'") && eg_record_abort(ctx) == EG_OK,
+          "a host node writing a plane a launch of another branch reads and writes is a race, named by the node and the declaration");
+    log.calls = 0;
+    struct eg_cond_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.cell = pc;
+    d.kind = EG_COND_IF;
+    ok = eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_OK && host_call1(ctx, n1, p1, EG_ACCESS_READ | EG_ACCESS_WRITE) == EG_OK &&
+         eg_record_cond_end(ctx) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK && eg_graph_launch(ctx, g) == EG_OK;
+    ok = ok && log.calls == 1 && y1[0] == 16.0 && (flag = 0, eg_graph_launch(ctx, g) == EG_OK) && log.calls == 1 && y1[0] == 16.0;
+    check(ok, "a host node in a conditional arm runs when the test holds and not when it does not");
+    eg_graph_free(ctx, g);
+    d.cell = pl;
+    d.kind = EG_COND_WHILE;
+    d.max_iters = 8;
+    ok = eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_OK && host_call1(ctx, nd, pl, EG_ACCESS_READ | EG_ACCESS_WRITE) == EG_OK &&
+         eg_record_cond_end(ctx) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK && eg_graph_launch(ctx, g) == EG_OK;
+    check(ok && dec.calls == 3 && left == 0, "a host node in a WHILE body runs once per iteration until the cell reads zero");
+    eg_graph_free(ctx, g);
+    eg_plan_free(ctx, pl2);
+    eg_host_node_free(ctx, n1);
+    eg_host_node_free(ctx, nd);
+    eg_plane_free(ctx, p1);
+    eg_plane_free(ctx, p2);
+    eg_plane_free(ctx, pc);
+    eg_plane_free(ctx, pl);
+}
+
+/* A node alive when its context is freed releases its user data at that free, once. */
+static void check_host_node_context_free(void) {
+    eg_ctx* other = make_ctx();
+    struct host_log log = { 0 };
+    eg_host_node* node = other != NULL ? host_node_make(other, "kept", host_scale, &log) : NULL;
+    check(node != NULL && eg_ctx_free(other) == EG_OK && log.released == 1, "a host node still alive at eg_ctx_free releases its user data once");
+}
+
 /* y = a*y + b in place over RN samples (axpb with x = y), then sum y into s, then copy s into t:
  * recorded once and replayed N times must equal the same calls run directly N times, bitwise. */
 static void check_recorded_list(eg_ctx* ctx, eg_unit* axpb, eg_unit* count1) {
@@ -5082,6 +5344,10 @@ int main(int argc, char** argv) {
             eg_host_threads(ctx, 3);
             check_recorded_list(ctx, unit, c1);
             check_fork_launches(ctx, unit);
+            check_host_node_eager(ctx);
+            check_host_node_recorded(ctx, unit);
+            check_host_node_structure(ctx, unit);
+            check_host_node_context_free();
             eg_host_threads(ctx, 1);
             eg_unit_free(ctx, c1);
         }

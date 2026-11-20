@@ -96,7 +96,7 @@ inline bool took(const RTest& t, const TestSave& s, int arm) {
 
 class GraphShape {
 public:
-    /** @brief A call recorded (a launch, run, reduce, copy, fft, gemm or conditional test) into the current container; returns its ordinal. */
+    /** @brief A call recorded (a launch, run, reduce, copy, fft, gemm, host call or conditional test) into the current container; returns its ordinal. */
     int add(eg_gnode_kind kind, std::string label, std::string unit, std::vector<PlaneUse> uses, NodeFacts facts = {});
     void fork_begin();
     void fork_branch();
@@ -112,7 +112,7 @@ public:
     bool open() const { return !frames_.empty(); }
     /** @brief The leaves of the recording for EG_RECORD_DIFF. Refuses a run (NOT_WRITTEN), and a WHILE without max_iters (BAD_REQUEST). */
     ReversePlan reverse_plan() const;
-    /** @brief How many leaves the recording holds: its launches and its copies, reduces, transforms and products. */
+    /** @brief How many leaves the recording holds: its launches and its copies, reduces, transforms, products and host calls. */
     int leaves() const { return launches_ + others_; }
     /** @brief Fill @p store from the nodes and return its count of levels; the description points into @p store. */
     void describe(DescribeStore& store, std::uint32_t flags, eg_graph_description& out) const;
@@ -126,7 +126,7 @@ private:
         std::vector<PlaneUse> uses;
         NodeFacts facts;
         int launch = -1;                        ///< a LAUNCH: its ordinal among the launches
-        int other = -1;                         ///< a COPY, REDUCE, FFT or GEMM: its ordinal among those calls
+        int other = -1;                         ///< a RUN, COPY, REDUCE, FFT, GEMM or HOST: its ordinal among those calls
         std::vector<graph::PlaneRef> refs;      ///< ``uses`` as hazard references; ``name`` is the index in ``uses``
     };
     struct Order {
