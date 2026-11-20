@@ -396,9 +396,21 @@ struct eg_runner_desc {
                                              eg_graph_free drops the caller's reference and the graph lives until its last runner is
                                              freed. BAD_REQUEST too: a graph of another context or side,
                                              a graph ended with EG_RECORD_DIFF, and, with EG_RUN_REORDER, a per-sample plane only the
-                                             graph touches (the reorder moves the plans' planes, not it). With EG_RUN_RECORD or events
-                                             REFINE it is NOT_WRITTEN: a recording run stores nothing of the graph and so cannot reverse
-                                             it. */
+                                             graph touches (the reorder moves the plans' planes, not it). A runner with EG_RUN_RECORD
+                                             takes the graph only if it was ended with EG_RECORD_DIFF (BAD_REQUEST otherwise): the graph is
+                                             then reversed per step. A plain runner takes either kind. Recorded, the forward is unchanged and
+                                             the tape stores nothing new: eg_reverse recomputes each checkpoint window twice, once in the
+                                             caller's sample order over the caller's planes (the graph's DIFF snapshots, its planes and the
+                                             carried planes kept for every step of the window; the planes are put back at the end) and once
+                                             in the usual columns, and at every global step, after the plans' vjp, reverses the graph over
+                                             ALL n samples at once with that step's snapshots: a carried state the graph overwrites has its
+                                             adjoint replaced by what flows to it through the graph's reads, one it only reads has that
+                                             added; planes of the graph that are no carried state have no adjoint. A graph may mix samples,
+                                             so with a step graph the reverse is one chunk of all n samples whatever the memory budget; the
+                                             memory is the window checkpoints, that chunk and, per step of a window, the graph's snapshots
+                                             and planes. NOT_WRITTEN: EG_RUN_REORDER with a recording runner (the recompute is in sample
+                                             order), and a graph reading a plane that takes a gradient in the run but is no carried state.
+                                             The device reverse runs the graph reverse per step, host driven, between the vjp launches. */
 };
 
 /** Report flags. */

@@ -918,7 +918,11 @@ void record_fork_end(eg_ctx& ctx);
 void record_wait(eg_ctx& ctx, std::int32_t n_planes, eg_plane_s* const* planes);
 void record_end(eg_ctx& ctx, const eg_record_end_desc* desc, eg_graph** out);
 void record_abort(eg_ctx& ctx);
-void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* desc);
+/** @brief eg_graph_reverse; @p from_step: the seeds and gradients are planes of the caller's own (views over its buffers, not handles) and the
+ *  tests of the replay were restored by step_tape_restore, not read from the device (a runner's step graph, host/Reverse.cpp). */
+void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* desc, bool from_step = false);
+/** @brief Zero @p bytes at @p data, on the context's stream for device memory. */
+void zero_memory(eg_ctx& ctx, bool device, void* data, std::size_t bytes);
 /** @brief A plan of a derived unit over eagle's memory: one whole partition of @p n samples (host/Reverse.cpp). */
 eg_plan_s* inner_plan(eg_ctx& ctx, eg_unit_s* unit, eg_structure structure, std::int64_t n);
 void inner_free(eg_ctx& ctx, eg_plan_s*& p);

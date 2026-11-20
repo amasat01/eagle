@@ -156,6 +156,33 @@ void node_drop(eg_ctx& ctx, const Node& n);
  *  that capture and the next; refused NOT_WRITTEN inside a conditional arm, a fork branch or a WHILE (device/Device.cpp). */
 void device_record_host_node(eg_ctx& ctx, Node&& node);
 
+/** @brief What one launch of a step graph left for its reverse: the tape's snapshots (the planes a later leaf overwrote), the windowed loops'
+ *  checkpoints, the tests the launch saw and the value of every plane of the graph after it. Kept per step of a checkpoint window. */
+struct StepTape {
+    std::vector<Bytes> snapshots;               ///< by GraphDiff::snapshots (an aliased entry has none of its own)
+    std::vector<std::vector<Bytes>> ckpt;       ///< by GraphDiff::loops: the buffers of its windows, plane by plane within a window
+    std::vector<TestSave> saved;
+    std::vector<Bytes> planes;                  ///< by GraphDiff::planes
+};
+/** @brief Keep what the last launch of step graph @p graph (a DIFF graph) left, into @p out; and put it back before that step's reverse. */
+void step_tape_save(eg_ctx& ctx, eg_graph_s* graph, StepTape& out);
+void step_tape_restore(eg_ctx& ctx, eg_graph_s* graph, const StepTape& tape);
+/** @brief A plane of a step graph's tape: whether the graph reads it before any node writes it, and whether it writes it. */
+struct StepPlane {
+    eg_plane_s* plane = nullptr;
+    bool input = false, written = false;
+};
+std::vector<StepPlane> step_graph_planes(eg_ctx& ctx, eg_graph_s* graph);
+/** @brief A float plane with a running adjoint (@p adjoint, the plane's element count of floats of the plane's width, in the plane's own sample order). */
+struct StepAdjoint {
+    eg_plane_s* plane = nullptr;
+    char* adjoint = nullptr;
+};
+/** @brief Reverse the last launch of step graph @p graph over @p states: a plane the graph writes is seeded with its adjoint and gets it REPLACED
+ *  by what flows to it through the graph's reads (zero when the graph never reads it first); a plane it only reads gets that ADDED. Planes of
+ *  the graph not listed have no adjoint: neither seeded nor written. */
+void graph_reverse_step(eg_ctx& ctx, eg_graph_s* graph, const std::vector<StepAdjoint>& states);
+
 /** @brief The tape of a graph ended with EG_RECORD_DIFF (host/GraphReverse.cpp): @p plan from GraphShape::reverse_plan, @p launches by launch ordinal and @p others (copies, reduces, transforms and products) by their ordinal; refuses what the reverse does not cover. */
 std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<eg_plan_s*>& launches, const std::vector<const Node*>& others, const ReversePlan& plan, const eg_record_end_desc& desc);
 /** @brief Refuse what has no gradient to pull back among @p others (the copies, reduces, transforms, products and runs of the recording, in order): a reduce

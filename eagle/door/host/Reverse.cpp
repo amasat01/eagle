@@ -18,6 +18,7 @@
 #include "eagle/door/Context.h"
 #include "eagle/door/device/Seam.h"
 #include "eagle/door/eg_unit_meta.h"
+#include "eagle/door/host/Graph.h"
 #include "eagle/door/host/Team.h"
 #include "eagle/diff/Record.h"
 #include "eagle/diff/Reverse.h"
@@ -906,6 +907,17 @@ void record_new(eg_ctx& ctx, eg_runner_s& runner, const eg_runner_desc& d) {
         r->fused_k = asked;
         link_vjp(fvjp, r->fvjp_slots, true);
     }
+    if (runner.step_graph != nullptr && rec) {    // the step graph is reversed through the carried states; a gradient of any other plane it touches has no route
+        for (const StepPlane& sp : step_graph_planes(ctx, runner.step_graph))
+            for (std::size_t s = 0; s < primal.bindings.size(); ++s) {
+                if (primal.bindings[s].plane != sp.plane) continue;
+                const bool carried = std::any_of(r->taped.begin(), r->taped.end(), [&](const TapedState& x) { return x.primal_slot == static_cast<int>(s); });
+                const bool graded = std::any_of(r->grads.begin(), r->grads.end(), [&](const Grad& g) { return g.primal_slot == static_cast<int>(s); });
+                if (!carried && graded)
+                    refuse(EG_NOT_WRITTEN, "step_graph: the plane bound to slot " + std::to_string(s) + " ('" + pu.slots[s].name + "') takes a gradient in this run but is not a "
+                           "carried state; reversing a step graph through such a plane is not written in this build of the door");
+            }
+    }
 }
 
 /** @brief Drop the runner's derived plans and units. */
@@ -1098,6 +1110,48 @@ void refine_pass(eg_ctx& ctx, eg_runner_s& runner, RunRecord& r, int threads) {
 
 /** @brief eg_run of an EG_RUN_RECORD runner (``RunRecorder.run`` + ``diff::recordForward``): the twin, tape off, one
  *  step per launch, a checkpoint before the first step of each window, until done or max_steps. */
+/** @brief What one forward step of a recorded run reads, shared by the forward and by the reverse's recompute of a window in the caller's layout. */
+struct ForwardEnv {
+    eg_ctx& ctx;
+    eg_runner_s& runner;
+    RunRecord& r;
+    eg_ctx* D;
+    int threads;
+    const char* mask;
+    std::size_t mb;
+    const std::vector<Owned>& owned;
+    bool reordering;
+};
+
+/** @brief The step graph of the runner, once, over all n samples: the first half of a step. */
+void forward_graph(ForwardEnv& e) {
+    if (e.runner.step_graph == nullptr) return;
+    if (e.D != nullptr) device_graph_launch(e.ctx, e.runner.step_graph);
+    else graph_launch(e.ctx, e.runner.step_graph);
+}
+
+/** @brief The step's plans over the live samples, then the active set's compaction (and reorder) when the step ends an interval: the second half. */
+void forward_plans(ForwardEnv& e, std::int64_t j, std::int64_t k) {
+    RunRecord& r = e.r;
+    eg_runner_s& runner = e.runner;
+    eg_plan_s& fwd = *r.fwd;
+    ActiveState& act = runner.act;
+    const std::int64_t n = runner.plans[0]->n_samples;
+    const std::int64_t live = runner.active && e.D == nullptr ? static_cast<std::int64_t>(act.count) : n;   // a device launch covers all n: the kernel reads the count itself
+    if (r.fused) set_word(e.D, r.fword, k);
+    if (live > 0) run_on(fwd, e.threads, live, n);
+    if (runner.active && (j + k) % act.every_steps == 0) {
+        ++act.compactions;
+        if (e.D != nullptr) {
+            device_active_compact(*e.D, runner, e.mask, e.owned, e.reordering);
+        } else {
+            active_compact(act, e.mask, e.mb);
+            act.done_at_last = fwd.finished;
+            if (e.reordering && act.fire) active_reorder(act, e.owned);
+        }
+    }
+}
+
 void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report) {
     RunRecord& r = *runner.record;
     if (r.live)
@@ -1226,6 +1280,7 @@ void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report) {
         device_read(*D, reinterpret_cast<const void*>(fwd.device_counter), &finished, sizeof(finished));
         return static_cast<std::int64_t>(finished) >= n;
     };
+    ForwardEnv env{ ctx, runner, r, D, threads, mask, mb, owned, reordering };
     const std::int64_t ran = diff::recordForward(
         runner.max_steps, refine && !r.recorded ? runner.max_steps : r.window, r.max_k, done,
         [&](std::int64_t k) {
@@ -1251,21 +1306,10 @@ void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report) {
             r.taken = k + 1;
         },
         [&](std::int64_t j, std::int64_t k) {
-            const std::int64_t live = runner.active && D == nullptr ? static_cast<std::int64_t>(act.count) : n;   // a device launch covers all n: the kernel reads the count itself
-            if (r.fused) set_word(D, r.fword, k);
             ++launches;
-            if (live > 0) run_on(fwd, threads, live, n);
+            forward_graph(env);
+            forward_plans(env, j, k);
             at = j + k;
-            if (runner.active && (j + k) % act.every_steps == 0) {
-                ++act.compactions;
-                if (D != nullptr) {
-                    device_active_compact(*D, runner, mask, owned, reordering);
-                } else {
-                    active_compact(act, mask, mb);
-                    act.done_at_last = fwd.finished;
-                    if (reordering && act.fire) active_reorder(act, owned);
-                }
-            }
         });
     if (reordering && act.reorders != act.restored_at) {   // the planes land in sample order
         if (D != nullptr) device_active_restore(*D, runner, mask, owned);
@@ -1564,7 +1608,10 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
     per = windows * per + W * r.width * static_cast<std::int64_t>(r.scalar);
     std::int64_t budget = r.budget;
     if (budget == 0) budget = D != nullptr ? device_free_bytes(*D) / 2 : host_available_bytes() / 2;
-    const std::int64_t m = n > 0 ? diff::chunkSamples(budget, per, n, 1) : 0;
+    // A step graph may mix samples, so its reverse needs every sample's adjoint of a step at once: one chunk of all n samples, whatever the budget
+    // (the window checkpoints, the n-wide chunk and, per step of a window, the graph's snapshots and planes are the memory it takes).
+    const bool graphed = runner->step_graph != nullptr;
+    const std::int64_t m = n > 0 ? (graphed ? n : diff::chunkSamples(budget, per, n, 1)) : 0;
     if (n > 0 && m == 0)
         refuse(EG_BAD_REQUEST, "memory_budget " + std::to_string(budget) + ": one sample alone needs " + std::to_string(per) +
                " bytes (its checkpoints and a " + std::to_string(W) + "-step tape)");
@@ -1675,6 +1722,39 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
                                                                                             : reinterpret_cast<const std::int64_t*>(r.steps.data());
     Buf dcols, dorder, dslots;   // a DEVICE reverse's gather index, sample order and per-checkpoint slots
     const int threads = host::team_threads(ctx);
+    // A step graph's reverse recomputes each window in the caller's layout over the caller's planes: what it overwrites is kept here and put back.
+    std::vector<std::int64_t> steps_final;
+    std::vector<Buf> kept;
+    std::vector<std::pair<char*, std::size_t>> kept_at;
+    ActiveState act_kept;
+    std::uint32_t finished_kept = 0;
+    std::vector<StepTape> tapes;
+    std::vector<std::vector<Buf>> post;       // per step of the window: the carried planes right after the step graph, n wide
+    std::int64_t cur_window = 0, win_start = 0;
+    const FinishFacts& pfin = pu.finish;
+    const DLTensor& pmask = primal.bindings[static_cast<std::size_t>(pfin.mask_slot)].plane->tensor->dl_tensor;
+    const char* mask_p = static_cast<const char*>(pmask.data) + pmask.byte_offset;
+    const std::vector<Owned> no_owned;
+    ForwardEnv fenv{ ctx, *runner, r, D, threads, mask_p, elem_bytes(pmask), no_owned, false };
+    if (graphed) {
+        steps_final.assign(all_steps, all_steps + n);
+        all_steps = steps_final.data();
+        const auto keep = [&](char* p, std::size_t bytes) {
+            kept.emplace_back();
+            kept.back().resize(bytes, D);
+            copy_bytes(D, kept.back().data(), p, bytes);
+            kept_at.push_back({ p, bytes });
+        };
+        for (const Carried& c : r.state) keep(c.src, static_cast<std::size_t>(c.rows * n) * c.bytes);
+        for (const Carried& c : r.reads)
+            if (c.kind == Carried::PLANE) keep(c.src, static_cast<std::size_t>(c.rows * n) * c.bytes);
+        for (const StepPlane& sp : step_graph_planes(ctx, runner->step_graph)) keep(plane_bytes(*sp.plane), static_cast<std::size_t>(elements(sp.plane->tensor->dl_tensor)) * elem_bytes(sp.plane->tensor->dl_tensor));
+        keep(r.steps.data(), static_cast<std::size_t>(n) * 8);
+        act_kept = runner->act;
+        finished_kept = r.fwd->finished;
+        tapes.resize(static_cast<std::size_t>(W));
+        post.resize(static_cast<std::size_t>(W));
+    }
     for (std::int64_t s0 = 0; s0 < n; s0 += m) {
         const std::int64_t cnt = std::min(m, n - s0);
         const std::vector<diff::idx_t> order = diff::stopOrder(all_steps + s0, cnt);
@@ -1694,11 +1774,23 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
                 if (seed[k] != nullptr) gather(D, a.data(), m, seed[k], n, at, cnt, r.taped[k].rows, r.scalar, threads);
             }
         for (Grad& g : r.grads) g.acc.zero();
+        // The carried planes as a step's graph left them (what its plans read), loaded into the pass's columns.
+        const auto load_post = [&](std::int64_t j, std::int64_t count, bool states) {
+            std::vector<Buf>& p = post[static_cast<std::size_t>(j - win_start)];
+            std::size_t at_p = 0;
+            for (Carried& cc : r.state) {
+                if (states) gather(D, cc.buf.data(), m, p[at_p].data(), n, at, count, cc.rows, cc.bytes, threads);
+                ++at_p;
+            }
+            for (Carried& cc : r.reads)
+                if (cc.kind == Carried::PLANE) gather(D, cc.buf.data(), m, p[at_p++].data(), n, at, count, cc.rows, cc.bytes, threads);
+        };
         if (!live.empty()) {
             diff::AdjointChain chain(static_cast<std::int64_t>(live.size()), W, r.fused_k);
             diff::reverseWindows(
                 W, live,
                 [&](std::int64_t k, std::int64_t count) {
+                    cur_window = k;
                     const std::int64_t* from = at;   // the sample's column in this checkpoint: its slot then
                     std::vector<std::int64_t> slots;
                     if (!r.epochs.empty()) {
@@ -1718,8 +1810,53 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
                 },
                 [&](std::int64_t c, std::int64_t len) {
                     if (chain.begin(c, len)) return;   // a full window of a FUSED reverse recomputes inside its vjp launch
+                    win_start = c;
+                    if (graphed) {   // the window again in the caller's layout: the forward's own step, each step's graph tape and carried planes kept
+                        for (std::size_t i = 0; i < r.state.size(); ++i)
+                            copy_bytes(D, r.state[i].src, r.pool[static_cast<std::size_t>(cur_window)][i].data(), static_cast<std::size_t>(r.state[i].rows * n) * r.state[i].bytes);
+                        std::vector<std::int64_t> applied(static_cast<std::size_t>(n));
+                        for (std::int64_t i = 0; i < n; ++i) applied[static_cast<std::size_t>(i)] = std::min(steps_final[static_cast<std::size_t>(i)], c);
+                        if (D != nullptr) device_write(*D, r.steps.data(), applied.data(), static_cast<std::size_t>(n) * 8);
+                        else std::memcpy(r.steps.data(), applied.data(), static_cast<std::size_t>(n) * 8);
+                        eg_plan_s& fwd = *r.fwd;
+                        const std::size_t mw = fenv.mb;
+                        std::uint32_t set = 0;
+                        if (D != nullptr) device_mask_count(*D, mask_p, n, static_cast<unsigned>(mw), fwd.device_counter);
+                        else
+                            for (std::int64_t i = 0; i < n; ++i)
+                                for (std::size_t b = 0; b < mw; ++b)
+                                    if (mask_p[static_cast<std::size_t>(i) * mw + b] != 0) {
+                                        ++set;
+                                        break;
+                                    }
+                        fwd.finished = set;
+                        if (runner->active) {   // the map follows the mask from the window's start (the finished samples a stale map holds are skipped by their mask)
+                            if (D != nullptr) {
+                                device_active_compact(*D, *runner, mask_p, no_owned, false);
+                            } else {
+                                active_compact(runner->act, mask_p, fenv.mb);
+                                runner->act.done_at_last = set;
+                            }
+                        }
+                        for (std::int64_t j = c; j < c + len; ++j) {
+                            forward_graph(fenv);
+                            step_tape_save(ctx, runner->step_graph, tapes[static_cast<std::size_t>(j - c)]);
+                            std::vector<Buf>& p = post[static_cast<std::size_t>(j - c)];
+                            p.clear();
+                            const auto copy_carried = [&](const Carried& cc) {
+                                p.emplace_back();
+                                p.back().resize(static_cast<std::size_t>(cc.rows * n) * cc.bytes, D);
+                                copy_bytes(D, p.back().data(), cc.src, static_cast<std::size_t>(cc.rows * n) * cc.bytes);
+                            };
+                            for (const Carried& cc : r.state) copy_carried(cc);
+                            for (const Carried& cc : r.reads)
+                                if (cc.kind == Carried::PLANE) copy_carried(cc);
+                            forward_plans(fenv, j, 1);
+                        }
+                    }
                     for (std::int64_t j = c; j < c + len;) {
                         const std::int64_t k = r.fused ? std::min(r.max_k, c + len - j) : 1;   // the forward's launch shape, never across a window
+                        if (graphed) load_post(j, live[static_cast<std::size_t>(j)], true);
                         if (r.fused) set_word(D, rword, k);
                         rec_count = static_cast<std::uint32_t>(live[static_cast<std::size_t>(j)]);
                         if (D != nullptr && r.twin_unit->active_map_slot >= 0) device_write(*D, dcount.data(), &rec_count, sizeof(rec_count));
@@ -1741,6 +1878,7 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
                         return;
                     }
                     bind_step(j % W, chain.cur);
+                    if (graphed) load_post(j, count, false);
                     if (D != nullptr && r.step_bytes != 0)
                         device_columns(*D, 2, step_plane.data(), m, nullptr, 0, nullptr, count, 1, static_cast<unsigned>(r.step_bytes), j);
                     else if (r.step_bytes == 8) diff::fillPrefix(reinterpret_cast<std::int64_t*>(step_plane.data()), j, count);
@@ -1750,6 +1888,24 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
                     for (Grad& g : r.grads) {
                         if (r.scalar == 8) accumulate<double>(g, m, count, threads);
                         else accumulate<float>(g, m, count, threads);
+                    }
+                    if (graphed) {   // the step graph's reverse for the same step: the adjoints in the caller's sample order, every sample at once
+                        step_tape_restore(ctx, runner->step_graph, tapes[static_cast<std::size_t>(j - win_start)]);
+                        std::vector<Buf> caller(r.taped.size());
+                        std::vector<StepAdjoint> adjoints;
+                        for (std::size_t k = 0; k < r.taped.size(); ++k) {
+                            TapedState& x = r.taped[k];
+                            caller[k].resize(static_cast<std::size_t>(x.rows * n) * r.scalar, D);
+                            put(D, caller[k].data(), n, x.adj[chain.cur].data(), m, at, cnt, x.rows, r.scalar);
+                            adjoints.push_back({ primal.bindings[static_cast<std::size_t>(x.primal_slot)].plane, caller[k].data() });
+                        }
+                        graph_reverse_step(ctx, runner->step_graph, adjoints);
+                        for (std::size_t k = 0; k < r.taped.size(); ++k) {
+                            TapedState& x = r.taped[k];
+                            gather(D, x.adj[chain.cur].data(), m, caller[k].data(), n, at, cnt, x.rows, r.scalar, threads);
+                            // a sample that has stopped is not touched by the next step's vjp: its adjoint lives on in both planes
+                            copy_bytes(D, x.adj[1 - chain.cur].data(), x.adj[chain.cur].data(), static_cast<std::size_t>(x.rows * m) * r.scalar);
+                        }
                     }
                 });
         }
@@ -1851,6 +2007,11 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
                 else std::memcpy(o.data, &v, sizeof(v));
             }
         }
+    }
+    if (graphed) {   // the caller's planes as the run left them
+        for (std::size_t i = 0; i < kept.size(); ++i) copy_bytes(D, kept_at[i].first, kept[i].data(), kept_at[i].second);
+        runner->act = act_kept;
+        r.fwd->finished = finished_kept;
     }
     if (D != nullptr) device_sync(*D);   // the gradients land before eg_reverse returns
     r.live = false;

@@ -1653,7 +1653,14 @@ static void lin_rewind(struct lin* l) {
 }
 
 /* A lin batch with a runner: recorded (the twin and the step vjp derived, window 1) or plain. Its planes belong to the row's rig. */
+static int lin_planes(struct rig* r, const struct run_units* ru, struct lin* l, int stride_for_T);
+static int lin_runner(struct rig* r, const struct run_units* ru, struct lin* l, int recorded, eg_unit* twin, int64_t window, eg_graph* step);
 static int lin_make(struct rig* r, const struct run_units* ru, struct lin* l, int stride_for_T, int recorded) {
+    return lin_planes(r, ru, l, stride_for_T) && lin_runner(r, ru, l, recorded, ru->twin, 1, NULL);
+}
+
+/* The lin batch's planes and plan, with no runner yet. */
+static int lin_planes(struct rig* r, const struct run_units* ru, struct lin* l, int stride_for_T) {
     for (int i = 0; i < LN; ++i) l->x0[i] = 1.0 + i / 8.0;
     lin_restart(l, stride_for_T);
     tensor_fill(&l->tx, LN, l->x, kDLFloat, 64);
@@ -1697,17 +1704,22 @@ static int lin_make(struct rig* r, const struct run_units* ru, struct lin* l, in
     b.n_uniforms = 2;
     b.uniform_slots = us;
     b.uniform_values = uv;
-    if (eg_bind(r->ctx, l->plan, &b) != EG_OK) return 0;
+    return eg_bind(r->ctx, l->plan, &b) == EG_OK;
+}
+
+/* The runner over the lin plan: recorded with @p twin (its tape window @p window) or plain, with @p step as its step graph when given. */
+static int lin_runner(struct rig* r, const struct run_units* ru, struct lin* l, int recorded, eg_unit* twin, int64_t window, eg_graph* step) {
     struct eg_runner_desc d = runner_desc(&l->plan, LSTEPS);
     const eg_derived_role roles[2] = { EG_DERIVED_TAPE, EG_DERIVED_STEP_VJP };
-    eg_unit* const units[2] = { ru->twin, ru->vjp };
+    eg_unit* const units[2] = { twin, ru->vjp };
     if (recorded) {
         d.flags = EG_RUN_RECORD;
         d.n_derived = 2;
         d.derived_roles = roles;
         d.derived_units = units;
-        d.window = 1;
+        d.window = window;
     }
+    d.step_graph = step;
     return eg_runner_new(r->ctx, &d, &l->runner) == EG_OK;
 }
 
@@ -2042,6 +2054,137 @@ static void device_run_segments_row(struct rig* r, const struct units* u, const 
     r->n_samples = 0;
 }
 
+/* ---- a runner's step graph in a recorded run, reversed per step ------------------------------------------------------------------------------ */
+
+/* The whole run as the model: per global step the graph (x <- w x, or with @p mixing x <- (sum x) x: a graph that mixes samples), then the lin step
+ * x <- a x + b for the samples still live (sample i takes T_i steps), the graph running over every sample at every step, stopped or not. */
+static void step_model(const double* x0, int mixing, double w, double a, double b, double* x) {
+    const int steps = LSTEPS;
+    for (int i = 0; i < LN; ++i) x[i] = x0[i];
+    for (int j = 0; j < steps; ++j) {
+        double s = 0.0;
+        for (int i = 0; i < LN; ++i) s += (1.0 / 80.0) * x[i];
+        for (int i = 0; i < LN; ++i) {
+            x[i] = (mixing ? s : w) * x[i];
+            if (j < lin_steps(i, 7)) x[i] = a * x[i] + b;
+        }
+    }
+}
+static double step_model_j(const double* x0, int mixing, double w, double a, double b) {
+    double x[LN], j = 0.0;
+    step_model(x0, mixing, w, a, b, x);
+    for (int i = 0; i < LN; ++i) j += x[i];
+    return j;
+}
+
+/* One recorded run with a step graph (a launch y = w x then y copied into x; with @p mixing a sum of x into w first), its reverse, and the gradients against
+ * central differences of the model, for the checkpoint window of @p twin; the gradients are returned for the cross-window comparison. */
+static int step_case(struct rig* r, const struct units* u, const struct run_units* ru, eg_unit* twin, int64_t window, int mixing, uint64_t budget, double* gx_out, double* ga_out,
+                     double* gb_out, int32_t* passes, const char* what) {
+    eg_ctx* ctx = r->ctx;
+    struct lin l;
+    double y[LN], z[LN], w[1] = { 1.3 }, wc[1] = { 1.0 / 80.0 }, seed[LN], gx[LN], gt[LN], ga = 0.0, gb = 0.0;
+    struct tensor ty, tw, tseed, tgx, tgt, tga, tgb, tz, twc;
+    for (int i = 0; i < LN; ++i) seed[i] = 1.0, y[i] = 0.0;
+    r->n_samples = LN;
+    int ok = lin_planes(r, ru, &l, 7);
+    for (int i = 0; i < LN; ++i) l.x0[i] = l.x[i] = 1.0 + i / 8.0;
+    eg_plane *py = mk(r, &ty, LN, y), *pw = mk(r, &tw, 1, w), *ps = mk(r, &tseed, LN, seed);
+    eg_plane *pgx = mk(r, &tgx, LN, gx), *pgt = mk(r, &tgt, LN, gt), *pga = mk(r, &tga, 1, &ga), *pgb = mk(r, &tgb, 1, &gb);
+    eg_plane* a3[] = { l.px, pw, py };
+    eg_plan* f = ok ? plan_with(r, u->scale, 3, a3, NULL) : NULL;
+    /* a graph that mixes samples: z = x / 80, w = sum z, then y = w x */
+    eg_plane *pz = mixing ? mk(r, &tz, LN, z) : NULL, *pwc = mixing ? mk(r, &twc, 1, wc) : NULL;
+    eg_plane* a2[] = { l.px, pwc, pz };
+    eg_plan* f2 = mixing && ok ? plan_with(r, u->scale, 3, a2, NULL) : NULL;
+    const struct eg_node_vjp vjps[] = { { 0, u->scale_vjp }, { 1, u->scale_vjp } };
+    const struct eg_node_vjp vjps_plain[] = { { 0, u->scale_vjp } };
+    eg_graph* g = NULL;
+    ok = ok && f && (!mixing || f2) && eg_record_begin(ctx) == EG_OK && (!mixing || (eg_launch(ctx, f2, NULL) == EG_OK && reduce_op(ctx, pz, pw, EG_REDUCE_SUM) == EG_OK)) &&
+         eg_launch(ctx, f, NULL) == EG_OK && eg_copy(ctx, py, l.px) == EG_OK && end_diff(ctx, 1 + (mixing != 0), mixing ? vjps : vjps_plain, &g) == EG_OK &&
+         lin_runner(r, ru, &l, 1, twin, window, g);
+    struct eg_runner_desc d;    /* the budget is a field of the descriptor: remake the runner when one is asked for */
+    if (ok && budget != 0) {
+        eg_runner_free(ctx, l.runner);
+        d = runner_desc(&l.plan, LSTEPS);
+        const eg_derived_role roles[2] = { EG_DERIVED_TAPE, EG_DERIVED_STEP_VJP };
+        eg_unit* const units[2] = { twin, ru->vjp };
+        d.flags = EG_RUN_RECORD, d.n_derived = 2, d.derived_roles = roles, d.derived_units = units, d.window = window, d.memory_budget = budget, d.step_graph = g;
+        ok = eg_runner_new(ctx, &d, &l.runner) == EG_OK;
+    }
+    struct eg_run_report rep;
+    memset(&rep, 0, sizeof(rep));
+    rep.struct_size = sizeof(rep);
+    up(r);
+    ok = ok && eg_run(ctx, l.runner, &rep) == EG_OK;
+    down(r);
+    double want_x[LN];
+    step_model(l.x0, mixing, w[0], LA, LB, want_x);
+    for (int i = 0; ok && i < LN; ++i) ok = fabs(l.x[i] - want_x[i]) <= 1e-11 * (1.0 + fabs(want_x[i]));
+    const int32_t sslot[] = { 0 }, gslot[] = { 0, 1, 5, 6 };
+    eg_plane* const sp[] = { ps };
+    eg_plane* const gp[] = { pgx, pgt, pga, pgb };
+    struct eg_bind_desc sd, gd;
+    memset(&sd, 0, sizeof(sd)), memset(&gd, 0, sizeof(gd));
+    sd.struct_size = gd.struct_size = sizeof(sd);
+    sd.n_planes = 1, sd.plane_slots = sslot, sd.planes = sp;
+    gd.n_planes = 4, gd.plane_slots = gslot, gd.planes = gp;
+    ok = ok && eg_reverse(ctx, l.runner, &sd, &gd) == EG_OK;
+    down(r);
+    struct eg_runner_figures fg;
+    memset(&fg, 0, sizeof(fg));
+    fg.struct_size = sizeof(fg);
+    ok = ok && eg_runner_figures(ctx, l.runner, &fg) == EG_OK;
+    *passes = fg.reverse_passes;
+    int fd_ok = ok;    /* central differences of the model: dJ/dx0 of every fourth sample, dJ/da and dJ/db */
+    const double h = 1e-6;
+    for (int i = 0; fd_ok && i < LN; i += 4) {
+        double xp[LN], xm[LN];
+        memcpy(xp, l.x0, sizeof(xp)), memcpy(xm, l.x0, sizeof(xm));
+        xp[i] += h * (1.0 + fabs(xp[i])), xm[i] -= h * (1.0 + fabs(xm[i]));
+        const double fd = (step_model_j(xp, mixing, w[0], LA, LB) - step_model_j(xm, mixing, w[0], LA, LB)) / (xp[i] - xm[i]);
+        fd_ok = fabs(gx[i] - fd) <= 1e-6 * (1.0 + fabs(fd));
+        if (!fd_ok) printf("      dJ/dx0[%d] %.10g (central %.10g)\n", i, gx[i], fd);
+    }
+    const double fda = (step_model_j(l.x0, mixing, w[0], LA * (1 + h), LB) - step_model_j(l.x0, mixing, w[0], LA * (1 - h), LB)) / (2.0 * h * LA);
+    const double fdb = (step_model_j(l.x0, mixing, w[0], LA, LB * (1 + h)) - step_model_j(l.x0, mixing, w[0], LA, LB * (1 - h))) / (2.0 * h * LB);
+    fd_ok = fd_ok && fabs(ga - fda) <= 1e-6 * (1.0 + fabs(fda)) && fabs(gb - fdb) <= 1e-6 * (1.0 + fabs(fdb));
+    if (!fd_ok) printf("      dJ/da %.10g (central %.10g), dJ/db %.10g (central %.10g)\n", ga, fda, gb, fdb);
+    verdict(r, fd_ok, what);
+    memcpy(gx_out, gx, sizeof(gx)), *ga_out = ga, *gb_out = gb;
+    eg_runner_free(ctx, l.runner);
+    if (g) eg_graph_free(ctx, g);
+    if (f) eg_plan_free(ctx, f);
+    if (f2) eg_plan_free(ctx, f2);
+    eg_plan_free(ctx, l.plan);
+    release(r);
+    r->n_samples = 0;
+    return fd_ok;
+}
+
+static void step_reverse_rows(struct rig* r, const struct units* u, const struct run_units* ru) {
+    eg_unit* twin3 = r->device ? NULL : load_run_unit(r, "lin", 0xE3);    /* the three-row twin has no device image: a device run keeps one-step windows */
+    eg_unit* const wide = twin3 != NULL ? twin3 : ru->twin;
+    const int64_t wide_window = twin3 != NULL ? 3 : 1;
+    verdict(r, r->device || twin3 != NULL, "the three-row taping twin loads");
+    if (!r->device && twin3 == NULL) return;
+    double g1[LN], g3[LN], gb3[LN], a1, b1, a3, b3, ab, bb;
+    int32_t p1, p3, pb;
+    step_case(r, u, ru, ru->twin, 1, 0, 0, g1, &a1, &b1, &p1,
+              "a recorded run with a step graph (a launch scaling the state, its output copied back) over stopping samples: eg_reverse's dJ/dx0, dJ/da and dJ/db equal central differences of the whole run, window 1");
+    if (twin3 != NULL) {
+        step_case(r, u, ru, twin3, 3, 0, 0, g3, &a3, &b3, &p3, "the same run with checkpoint windows of 3 steps: the gradients equal central differences too");
+        verdict(r, memcmp(g1, g3, sizeof(g1)) == 0 && memcmp(&a1, &a3, sizeof(a1)) == 0 && memcmp(&b1, &b3, sizeof(b1)) == 0,
+                "the step graph's gradients are bitwise the same for two checkpoint window lengths");
+    }
+    step_case(r, u, ru, wide, wide_window, 1, 0, gb3, &ab, &bb, &pb,
+              "a step graph that mixes samples (a sum of the state scales it): the gradients equal central differences of the whole run");
+    step_case(r, u, ru, wide, wide_window, 0, 300, g3, &a3, &b3, &p3,
+              "a memory budget that would split the samples into passes: a step graph's reverse is one pass over all samples, with the same gradients");
+    verdict(r, p3 == 1 && memcmp(g1, g3, sizeof(g1)) == 0 && memcmp(&a1, &a3, sizeof(a1)) == 0, "the budgeted run's gradients are the unbudgeted ones, bit for bit, in one pass");
+    if (twin3 != NULL) eg_unit_free(r->ctx, twin3);
+}
+
 static void run_rows(struct rig* r, const struct units* u) {
     struct run_units ru = { load_run_unit(r, "lin", 0xE0), load_run_unit(r, "lin", 0xE1), load_run_unit(r, "lin_vjp", 0xE4) };
     verdict(r, ru.lin && ru.twin && ru.vjp, "the runner fixture's step, taping twin and step vjp load");
@@ -2057,6 +2200,7 @@ static void run_rows(struct rig* r, const struct units* u) {
     run_launch_row(r, u, &ru);
     phase_row(r, u, &ru);
     run_refusal_row(r, &ru);
+    step_reverse_rows(r, u, &ru);
 }
 
 /* ---- the policy row: the reduced gradient of a shared parameter is the same bits on the host and on the device, run to run ---------- */

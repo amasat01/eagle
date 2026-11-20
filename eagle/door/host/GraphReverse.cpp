@@ -514,7 +514,7 @@ void diff_launched(GraphDiff& diff) {
     diff.launched = true;
 }
 
-void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* desc) {
+void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* desc, bool from_step) {
     if (ctx.rec != nullptr || ctx.dev_rec != nullptr) refuse(EG_BAD_REQUEST, "eg_graph_reverse while recording (eg_record_begin .. eg_record_end)");
     GraphDiff* tape = nullptr;
     if (device_graph(ctx, graph)) {
@@ -527,7 +527,7 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
     GraphDiff& d = *tape;
     eg_ctx* const D = d.dev;       // a DEVICE graph: its buffers, vjp launches and sums are queued on the context's stream
     if (!d.launched) refuse(EG_BAD_REQUEST, "eg_graph_reverse: the graph was never launched (eg_graph_launch)");
-    if (D != nullptr) device_diff_read_saved(*D, d);    // the tests the last replay saw: one read-back
+    if (D != nullptr && !from_step) device_diff_read_saved(*D, d);    // the tests the last replay saw: one read-back (a step graph's reverse restores them)
     for (const GraphDiff::PlanMark& m : d.marks) {
         if (m.plan->binds != m.binds)
             refuse(EG_BAD_REQUEST, "eg_graph_reverse: a plan of the graph (unit '" + m.plan->unit->name + "') was rebound (eg_bind, eg_clear) after its last launch");
@@ -560,7 +560,7 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
     for (const DiffNode& n : d.nodes)
         for (int p : n.writes) written[static_cast<std::size_t>(p)] = 1;
     for (std::int32_t k = 0; k < r.n_seeds; ++k) {
-        check_handle(ctx.planes, r.seeds[k], "eg_graph_reverse_desc.seeds");
+        if (!from_step) check_handle(ctx.planes, r.seeds[k], "eg_graph_reverse_desc.seeds");
         const int p = checked(r.outputs[k], k, "outputs", false);
         if (written[static_cast<std::size_t>(p)] == 0)
             refuse(EG_BAD_REQUEST, "eg_graph_reverse_desc.outputs[" + std::to_string(k) + "] is not written by the graph");
@@ -581,7 +581,7 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
     }
     std::vector<int> wanted;
     for (std::int32_t k = 0; k < r.n_grads; ++k) {
-        check_handle(ctx.planes, r.grads[k], "eg_graph_reverse_desc.grads");
+        if (!from_step) check_handle(ctx.planes, r.grads[k], "eg_graph_reverse_desc.grads");
         check_handle(ctx.planes, r.inputs[k], "eg_graph_reverse_desc.inputs");
         if (tensor(*r.inputs[k]).dtype.code != kDLFloat)
             refuse(EG_BAD_REQUEST, "eg_graph_reverse_desc.inputs[" + std::to_string(k) + "] is not a float plane: only a float input has a gradient");
@@ -922,6 +922,137 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
     }
     if (r.passes != nullptr) *r.passes = 1;
     if (D != nullptr) device_sync(ctx);     // the gradients land before eg_graph_reverse returns
+}
+
+
+namespace {
+
+GraphDiff& step_tape_of(eg_ctx& ctx, eg_graph_s* graph) {
+    GraphDiff* tape = device_graph(ctx, graph) ? device_graph_diff(ctx, graph) : (check_handle(ctx.graphs, graph, "graph"), graph->diff.get());
+    if (tape == nullptr) refuse(EG_BAD_REQUEST, "step_graph: the graph was not ended with EG_RECORD_DIFF");
+    return *tape;
+}
+
+Bytes clone(eg_ctx* D, const void* from, std::size_t bytes) {
+    Bytes out(bytes, D);
+    copy_bytes(D, out.data(), from, bytes);
+    return out;
+}
+
+}  // namespace
+
+void step_tape_save(eg_ctx& ctx, eg_graph_s* graph, StepTape& out) {
+    GraphDiff& d = step_tape_of(ctx, graph);
+    eg_ctx* const D = d.dev;
+    if (D != nullptr) device_diff_read_saved(*D, d);
+    out = StepTape();
+    out.saved = d.saved;
+    for (Snapshot& s : d.snapshots) out.snapshots.push_back(s.alias >= 0 ? Bytes() : clone(D, s.bytes.data(), s.size));
+    for (const LoopTape& t : d.loops) {
+        out.ckpt.emplace_back();    // one buffer per plane of the loop, window after window
+        std::vector<Bytes>& flat = out.ckpt.back();
+        for (const std::vector<Bytes>& group : t.ckpt)
+            for (std::size_t p = 0; p < group.size(); ++p)
+                flat.push_back(clone(D, group[p].data(), byte_count(*d.planes[static_cast<std::size_t>(t.planes[p])])));
+    }
+    for (eg_plane_s* p : d.planes) out.planes.push_back(clone(D, live(*p), byte_count(*p)));
+}
+
+void step_tape_restore(eg_ctx& ctx, eg_graph_s* graph, const StepTape& tape) {
+    GraphDiff& d = step_tape_of(ctx, graph);
+    eg_ctx* const D = d.dev;
+    d.saved = tape.saved;
+    for (std::size_t i = 0; i < d.snapshots.size(); ++i)
+        if (d.snapshots[i].alias < 0) copy_bytes(D, d.snapshots[i].bytes.data(), tape.snapshots[i].data(), d.snapshots[i].size);
+    for (std::size_t l = 0; l < d.loops.size(); ++l) {
+        std::size_t at = 0;
+        for (std::vector<Bytes>& group : d.loops[l].ckpt)
+            for (std::size_t p = 0; p < group.size(); ++p, ++at)
+                copy_bytes(D, group[p].data(), tape.ckpt[l][at].data(), byte_count(*d.planes[static_cast<std::size_t>(d.loops[l].planes[p])]));
+    }
+    for (std::size_t i = 0; i < d.planes.size(); ++i) copy_bytes(D, live(*d.planes[i]), tape.planes[i].data(), byte_count(*d.planes[i]));
+    d.launched = true;
+}
+
+std::vector<StepPlane> step_graph_planes(eg_ctx& ctx, eg_graph_s* graph) {
+    GraphDiff& d = step_tape_of(ctx, graph);
+    std::vector<StepPlane> out(d.planes.size());
+    std::vector<char> seen(d.planes.size(), 0);
+    for (std::size_t i = 0; i < out.size(); ++i) out[i].plane = d.planes[i];
+    for (const DiffNode& n : d.nodes) {    // the order eg_graph_reverse decides which planes are inputs in
+        for (int p : n.reads) {
+            if (seen[static_cast<std::size_t>(p)] == 0) out[static_cast<std::size_t>(p)].input = true;
+            seen[static_cast<std::size_t>(p)] = 1;
+        }
+        for (int p : n.writes) {
+            out[static_cast<std::size_t>(p)].written = true;
+            seen[static_cast<std::size_t>(p)] = 1;
+        }
+    }
+    return out;
+}
+
+void graph_reverse_step(eg_ctx& ctx, eg_graph_s* graph, const std::vector<StepAdjoint>& states) {
+    GraphDiff& d = step_tape_of(ctx, graph);
+    eg_ctx* const D = d.dev;
+    const std::vector<StepPlane> info = step_graph_planes(ctx, graph);
+    struct Entry {
+        const StepAdjoint* state;
+        bool input, written;
+        Bytes grad;
+        std::unique_ptr<View> seed_view, grad_view;
+    };
+    std::vector<Entry> entries;
+    std::vector<eg_plane_s *> outputs, seeds, inputs, grads;
+    for (const StepAdjoint& s : states) {
+        const int p = find_plane(d, s.plane);
+        if (p < 0) continue;
+        Entry e;
+        e.state = &s;
+        e.input = info[static_cast<std::size_t>(p)].input;
+        e.written = info[static_cast<std::size_t>(p)].written;
+        if (!e.input && !e.written) continue;
+        entries.push_back(std::move(e));
+    }
+    for (Entry& e : entries) {
+        const eg_plane_s& plane = *e.state->plane;
+        if (e.written) {
+            e.seed_view = std::make_unique<View>(plane, e.state->adjoint);
+            outputs.push_back(e.state->plane);
+            seeds.push_back(e.seed_view->get());
+        }
+        if (e.input) {
+            e.grad = Bytes(byte_count(plane), D);
+            e.grad_view = std::make_unique<View>(plane, e.grad.data());
+            inputs.push_back(e.state->plane);
+            grads.push_back(e.grad_view->get());
+        }
+    }
+    eg_graph_reverse_desc desc{};
+    desc.struct_size = sizeof(desc);
+    desc.n_seeds = static_cast<std::int32_t>(outputs.size());
+    desc.outputs = outputs.data();
+    desc.seeds = seeds.data();
+    desc.n_grads = static_cast<std::int32_t>(inputs.size());
+    desc.inputs = inputs.data();
+    desc.grads = grads.data();
+    graph_reverse(ctx, graph, &desc, true);
+    for (Entry& e : entries) {
+        const eg_plane_s& plane = *e.state->plane;
+        const std::size_t bytes = byte_count(plane), width = element_bytes(plane);
+        if (e.written) zero_memory(ctx, D != nullptr, e.state->adjoint, bytes);
+        if (!e.input) continue;
+        if (e.written) {
+            copy_bytes(D, e.state->adjoint, e.grad.data(), bytes);
+        } else if (D != nullptr) {
+            device_columns(*D, 1, e.state->adjoint, static_cast<std::int64_t>(bytes / width), e.grad.data(), static_cast<std::int64_t>(bytes / width), nullptr,
+                           static_cast<std::int64_t>(bytes / width), 1, static_cast<unsigned>(width), 0);
+        } else if (width == 8) {
+            for (std::size_t i = 0; i < bytes / 8; ++i) reinterpret_cast<double*>(e.state->adjoint)[i] += reinterpret_cast<const double*>(e.grad.data())[i];
+        } else {
+            for (std::size_t i = 0; i < bytes / 4; ++i) reinterpret_cast<float*>(e.state->adjoint)[i] += reinterpret_cast<const float*>(e.grad.data())[i];
+        }
+    }
 }
 
 }  // namespace door
