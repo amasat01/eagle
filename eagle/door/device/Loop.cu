@@ -470,5 +470,128 @@ void loop_free(DeviceLoop* loop) noexcept {
     delete loop;
 }
 
+std::uint64_t loop_exec(const DeviceLoop* loop) { return reinterpret_cast<std::uint64_t>(loop->exec); }
+
+std::uint64_t loop_graph(const DeviceLoop* loop) { return reinterpret_cast<std::uint64_t>(loop->graph.graph()); }
+
+void loop_reinstantiate(DeviceLoop* loop) {
+    cudaGraphExec_t fresh = nullptr;
+    EAGLE_CHECK_ALWAYS(cudaGraphInstantiate(&fresh, loop->graph.graph(), 0));
+    if (loop->exec != nullptr) (void)cudaGraphExecDestroy(loop->exec);
+    loop->exec = fresh;
+}
+
+std::vector<std::uint64_t> capture_kernels(std::uint64_t stream, unsigned count) {
+    cudaStreamCaptureStatus status;
+    unsigned long long id = 0;
+    cudaGraph_t graph = nullptr;
+    const cudaGraphNode_t* tail = nullptr;
+    const cudaGraphEdgeData* edge_data = nullptr;
+    std::size_t n_tail = 0;
+    EAGLE_CHECK_ALWAYS(cuda::detail::streamGetCaptureInfo(reinterpret_cast<cudaStream_t>(stream), &status, &id, &graph, &tail, &edge_data, &n_tail));
+    std::vector<std::uint64_t> nodes(count);
+    if (count == 0) return nodes;
+    EAGLE_ASSERT(n_tail == 1, "capture_kernels: the launches did not end in one node");
+    std::size_t n_edges = 0;
+    EAGLE_CHECK_ALWAYS(cuda::detail::graphGetEdges(graph, nullptr, nullptr, &n_edges));
+    std::vector<cudaGraphNode_t> from(n_edges), to(n_edges);
+    if (n_edges != 0) EAGLE_CHECK_ALWAYS(cuda::detail::graphGetEdges(graph, from.data(), to.data(), &n_edges));
+    cudaGraphNode_t at = tail[0];
+    for (unsigned k = count; k-- > 0;) {
+        nodes[k] = reinterpret_cast<std::uint64_t>(at);
+        if (k == 0) break;
+        const auto edge = std::find(to.begin(), to.begin() + static_cast<std::ptrdiff_t>(n_edges), at);
+        EAGLE_ASSERT(edge != to.begin() + static_cast<std::ptrdiff_t>(n_edges), "capture_kernels: a partition launch has no predecessor");
+        at = from[static_cast<std::size_t>(edge - to.begin())];
+    }
+    return nodes;
+}
+
+bool loop_set_kernel_args(DeviceLoop* loop, std::uint64_t node, const std::vector<void*>& args, std::int64_t base, std::int64_t count,
+                          std::int64_t n) {
+    const auto at = reinterpret_cast<cudaGraphNode_t>(node);
+    cudaKernelNodeParams p = {};
+    EAGLE_CHECK_ALWAYS(cudaGraphKernelNodeGetParams(at, &p));
+    std::vector<void*> params = args;
+    params.push_back(&base);
+    params.push_back(&count);
+    params.push_back(&n);
+    p.kernelParams = params.data();
+    p.extra = nullptr;
+    EAGLE_CHECK_ALWAYS(cudaGraphKernelNodeSetParams(at, &p));
+    return cudaGraphExecKernelNodeSetParams(loop->exec, at, &p) == cudaSuccess;
+}
+
+struct DeviceWeave {
+    std::unique_ptr<cuda::CaptureConditional> cond;
+};
+
+struct DeviceFork {
+    cudaStream_t origin;
+    cuda::Event forked{ cudaEventDisableTiming };
+    std::vector<std::unique_ptr<cuda::Stream>> branches;
+    std::vector<std::unique_ptr<cuda::Event>> events;    ///< the waits' and the joins' events, alive until the capture ends
+    explicit DeviceFork(cudaStream_t o) : origin(o) {}
+};
+
+bool cond_arms_supported() { return cuda::conditionalArmsSupported(); }
+
+DeviceWeave* cond_begin(std::uint64_t origin, int kind, const unsigned* cell, const unsigned* baseline, bool negate,
+                        unsigned arms, unsigned cap, unsigned* loop_cells) {
+    const auto stream = reinterpret_cast<cudaStream_t>(origin);
+    auto weave = std::make_unique<DeviceWeave>();
+    const conditional::LoopTerms terms{ cap == 0 ? conditional::kLoopUncapped : cap, loop_cells };
+    weave->cond = std::make_unique<cuda::CaptureConditional>(stream, static_cast<cuda::CondKind>(kind), CountGuard{ cell, baseline }, arms,
+                                                             negate ? 1u : 0u, terms);
+    weave->cond->begin();
+    return weave.release();
+}
+
+std::uint64_t cond_stream(const DeviceWeave* weave, unsigned arm) {
+    return reinterpret_cast<std::uint64_t>(weave->cond->armStream(arm));
+}
+
+void cond_end(DeviceWeave* weave) {
+    const std::unique_ptr<DeviceWeave> owned(weave);
+    owned->cond->end();
+}
+
+void cond_drop(DeviceWeave* weave) noexcept { delete weave; }
+
+DeviceFork* fork_begin(std::uint64_t origin) {
+    auto fork = std::make_unique<DeviceFork>(reinterpret_cast<cudaStream_t>(origin));
+    EAGLE_CHECK_ALWAYS(cudaEventRecord(fork->forked.cuda(), fork->origin));
+    fork_branch(fork.get());
+    return fork.release();
+}
+
+std::uint64_t fork_branch(DeviceFork* fork) {
+    fork->branches.push_back(std::make_unique<cuda::Stream>(true));
+    const cudaStream_t s = fork->branches.back()->cuda();
+    EAGLE_CHECK_ALWAYS(cudaStreamWaitEvent(s, fork->forked.cuda(), 0));
+    return reinterpret_cast<std::uint64_t>(s);
+}
+
+std::uint64_t fork_stream(const DeviceFork* fork, unsigned branch) {
+    return reinterpret_cast<std::uint64_t>(fork->branches.at(branch)->cuda());
+}
+
+void fork_wait(DeviceFork* fork, unsigned waiter, unsigned producer) {
+    fork->events.push_back(std::make_unique<cuda::Event>(cudaEventDisableTiming));
+    EAGLE_CHECK_ALWAYS(cudaEventRecord(fork->events.back()->cuda(), fork->branches.at(producer)->cuda()));
+    EAGLE_CHECK_ALWAYS(cudaStreamWaitEvent(fork->branches.at(waiter)->cuda(), fork->events.back()->cuda(), 0));
+}
+
+void fork_end(DeviceFork* fork) {
+    const std::unique_ptr<DeviceFork> owned(fork);
+    for (const auto& branch : owned->branches) {
+        owned->events.push_back(std::make_unique<cuda::Event>(cudaEventDisableTiming));
+        EAGLE_CHECK_ALWAYS(cudaEventRecord(owned->events.back()->cuda(), branch->cuda()));
+        EAGLE_CHECK_ALWAYS(cudaStreamWaitEvent(owned->origin, owned->events.back()->cuda(), 0));
+    }
+}
+
+void fork_drop(DeviceFork* fork) noexcept { delete fork; }
+
 }  // namespace door
 }  // namespace eagle

@@ -1709,6 +1709,257 @@ static void copy_across(eg_ctx* ctx) {
     }
 }
 
+
+/* The graph builder on a device context: forks and joins, waits, conditionals (IF, IF_ELSE, WHILE with a cap, a negated test, a lane
+ * of a flag array, a count against a baseline) and a rebound plan, each replayed and compared with the add-order run bitwise (dprefix:
+ * y = 2 x + 1 over the first count lanes). The race row runs on a context of its own: a refused fork_end leaves the recording open. */
+enum { BN = 64 };
+
+struct gb {
+    eg_ctx* ctx;
+    eg_unit* unit;
+    struct tensor t[7];
+    double *dx, *d1, *d2, *d3;
+    uint32_t *dc, *df;
+    eg_plane *px, *p1, *p2, *p3, *pc, *pf, *pd;
+    eg_plan *a, *b, *c, *d;    /* a: p1 <- x, b: p2 <- x, c: p2 <- p1, d: p1 <- x again */
+};
+
+static int gb_make(struct gb* g, const char* dev_lib) {
+    static double x[BN];
+    for (int i = 0; i < BN; ++i) x[i] = 0.5 * i - 7.0;
+    eg_status s = EG_OK;
+    memset(g, 0, sizeof(*g));
+    g->ctx = context(EG_CTX_DEVICE, 0, &s);
+    if (s != EG_OK || load(g->ctx, dev_lib, "dprefix", 0xD6, &g->unit) != EG_OK) return 0;
+    uint32_t count = BN;
+    g->dx = dev_doubles(x, BN), g->d1 = dev_doubles(NULL, BN), g->d2 = dev_doubles(NULL, BN), g->d3 = dev_doubles(NULL, BN);
+    cudaMalloc((void**)&g->dc, sizeof(count));
+    cudaMemcpy(g->dc, &count, sizeof(count), cudaMemcpyHostToDevice);
+    cudaMalloc((void**)&g->df, 4 * sizeof(uint32_t));
+    cudaMemset(g->df, 0, 4 * sizeof(uint32_t));
+    eg_ctx* c = g->ctx;
+    g->px = wrap(c, &g->t[0], g->dx, 1, BN, 0, 1, 0), g->p1 = wrap(c, &g->t[1], g->d1, 1, BN, 0, 1, 0), g->p2 = wrap(c, &g->t[2], g->d2, 1, BN, 0, 1, 0);
+    g->p3 = wrap(c, &g->t[3], g->d3, 1, BN, 0, 1, 0);
+    g->pc = wrap_typed(c, &g->t[4], g->dc, kDLUInt, 32, 1, 1), g->pf = wrap_typed(c, &g->t[5], g->df, kDLUInt, 32, 4, 1);
+    g->pd = wrap(c, &g->t[6], g->d3, 1, 4, 0, 1, 0);    /* a float64 plane: not a condition cell */
+    const int32_t slots[3] = { 0, 1, 2 };
+    eg_plane* in[4][3] = { { g->p1, g->px, g->pc }, { g->p2, g->px, g->pc }, { g->p2, g->p1, g->pc }, { g->p1, g->px, g->pc } };
+    eg_plan** plans[4] = { &g->a, &g->b, &g->c, &g->d };
+    int ok = g->px && g->p1 && g->p2 && g->p3 && g->pc && g->pf && g->pd;
+    for (int k = 0; ok && k < 4; ++k)
+        ok = plan_n(c, g->unit, EG_STRUCTURE_DEVICE, BN, 0, NULL, NULL, plans[k]) == EG_OK && bind_planes(c, *plans[k], 3, slots, in[k]) == EG_OK;
+    return ok;
+}
+
+static void gb_free(struct gb* g) {
+    eg_ctx_free(g->ctx);    /* the plans, planes and unit go with it; an open recording is dropped */
+    cudaFree(g->dx), cudaFree(g->d1), cudaFree(g->d2), cudaFree(g->d3), cudaFree(g->dc), cudaFree(g->df);
+}
+
+static void gb_clear(struct gb* g) {
+    cudaMemset(g->d1, 0, BN * sizeof(double)), cudaMemset(g->d2, 0, BN * sizeof(double)), cudaMemset(g->d3, 0, BN * sizeof(double));
+    cudaDeviceSynchronize();
+}
+
+static void gb_flags(struct gb* g, uint32_t f0, uint32_t f1, uint32_t f2) {
+    const uint32_t f[4] = { f0, f1, f2, 0 };
+    cudaMemcpy(g->df, f, sizeof(f), cudaMemcpyHostToDevice);
+}
+
+/* 1: the plane holds 2 x + 1 (what: 1) or zeros (what: 0), bitwise. */
+static int gb_holds(const double* dev, int what) {
+    double got[BN];
+    cudaDeviceSynchronize();
+    cudaMemcpy(got, dev, sizeof(got), cudaMemcpyDeviceToHost);
+    for (int i = 0; i < BN; ++i) {
+        const double want = what ? 2.0 * (0.5 * i - 7.0) + 1.0 : 0.0;
+        if (memcmp(&got[i], &want, sizeof(want)) != 0) return 0;
+    }
+    return 1;
+}
+
+static eg_status gb_cond(struct gb* g, int kind, uint32_t flags, int32_t arms, eg_plane* cell, int64_t index, eg_plane* baseline, int64_t base_index,
+                         int64_t max_iters) {
+    struct eg_cond_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.kind = kind, d.flags = flags, d.n_arms = arms, d.cell = cell, d.cell_index = index;
+    d.baseline = baseline, d.baseline_index = base_index, d.max_iters = max_iters;
+    return eg_record_cond_begin(g->ctx, &d);
+}
+
+/* One replay of the graph, then eg_sync: OK. */
+static int gb_replay(struct gb* g, eg_graph* gr) { return eg_graph_launch(g->ctx, gr) == EG_OK && eg_sync(g->ctx) == EG_OK; }
+
+static void graph_builder_device(const char* dev_lib) {
+    struct gb g;
+    check(gb_make(&g, dev_lib), "graph builder: a device context, dprefix and its planes made");
+    if (g.ctx == NULL || g.a == NULL || g.d == NULL) return;
+    eg_ctx* c = g.ctx;
+    eg_graph* gr = NULL;
+    int ok;
+
+    /* fork and join */
+    gb_clear(&g);
+    ok = eg_record_begin(c) == EG_OK && eg_record_fork_begin(c) == EG_OK && eg_launch(c, g.a, NULL) == EG_OK && eg_record_fork_branch(c) == EG_OK &&
+         eg_launch(c, g.b, NULL) == EG_OK && eg_record_fork_end(c) == EG_OK && eg_record_end(c, NULL, &gr) == EG_OK;
+    if (!ok) reason_has(c, "(the fork recording was refused)");
+    ok = ok && gb_replay(&g, gr) && gb_replay(&g, gr);
+    check(ok && gb_holds(g.d1, 1) && gb_holds(g.d2, 1), "device fork/join: two branches writing disjoint planes replay to the add-order values");
+    if (gr) eg_graph_free(c, gr);
+    gr = NULL;
+
+    /* wait: its refusals, then a dependent branch ordered after the producer */
+    gb_clear(&g);
+    eg_plane* w1[1] = { g.p1 };
+    eg_plane* wx[1] = { g.px };
+    eg_plane* w2[1] = { g.p2 };
+    ok = eg_record_begin(c) == EG_OK && refused(eg_record_wait(c, 1, w1), EG_BAD_REQUEST, c, "outside a fork branch") &&
+         eg_record_fork_begin(c) == EG_OK && refused(eg_record_fork_branch(c), EG_BAD_REQUEST, c, "empty") && eg_launch(c, g.a, NULL) == EG_OK &&
+         refused(eg_record_wait(c, 1, w1), EG_BAD_REQUEST, c, "no earlier branch writes") && eg_record_fork_branch(c) == EG_OK &&
+         refused(eg_record_wait(c, 1, wx), EG_BAD_REQUEST, c, "no earlier branch writes") && eg_record_wait(c, 1, w1) == EG_OK &&
+         eg_launch(c, g.c, NULL) == EG_OK && refused(eg_record_wait(c, 1, w2), EG_BAD_REQUEST, c, "written by this branch") &&
+         eg_record_fork_end(c) == EG_OK && eg_record_end(c, NULL, &gr) == EG_OK;
+    if (!ok) reason_has(c, "(the wait recording was refused)");
+    check(ok, "device wait: refused outside a branch, for an empty branch, for a plane no earlier branch writes and one this branch writes; accepted after its producer");
+    for (int k = 0; ok && k < 3; ++k) ok = gb_replay(&g, gr);
+    {
+        double got[BN];
+        cudaMemcpy(got, g.d2, sizeof(got), cudaMemcpyDeviceToHost);
+        int same = 1;
+        for (int i = 0; i < BN; ++i) {
+            const double want = 2.0 * (2.0 * (0.5 * i - 7.0) + 1.0) + 1.0;
+            same &= memcmp(&got[i], &want, sizeof(want)) == 0;
+        }
+        check(ok && same, "device wait: the dependent branch ran after its producer, 3 replays: 2 (2 x + 1) + 1 bitwise");
+    }
+    if (gr) eg_graph_free(c, gr);
+    gr = NULL;
+
+    /* conditionals over a lane of a flag array */
+    gb_clear(&g);
+    gb_flags(&g, 0, 0, 1);
+    ok = eg_record_begin(c) == EG_OK && gb_cond(&g, EG_COND_IF, 0, 0, g.pf, 2, NULL, 0, 0) == EG_OK && eg_launch(c, g.a, NULL) == EG_OK &&
+         eg_record_cond_end(c) == EG_OK && eg_record_end(c, NULL, &gr) == EG_OK;
+    if (!ok) reason_has(c, "(the IF recording was refused)");
+    ok = ok && gb_replay(&g, gr);
+    check(ok && gb_holds(g.d1, 1), "device IF on lane 2 of a flag array: set, the arm runs");
+    gb_clear(&g);
+    gb_flags(&g, 0, 0, 0);
+    ok = ok && gb_replay(&g, gr);
+    check(ok && gb_holds(g.d1, 0), "device IF: the caller rewrites lane 2 to 0 between replays, the arm does not run");
+    gb_clear(&g);
+    gb_flags(&g, 0, 0, 7);
+    ok = ok && gb_replay(&g, gr);
+    check(ok && gb_holds(g.d1, 1), "device IF: lane 2 rewritten to 7, the arm runs again (the test is read at each replay)");
+    if (gr) eg_graph_free(c, gr);
+    gr = NULL;
+
+    gb_clear(&g);
+    gb_flags(&g, 0, 0, 0);
+    ok = eg_record_begin(c) == EG_OK && gb_cond(&g, EG_COND_IF, EG_COND_NEGATE, 0, g.pf, 2, NULL, 0, 0) == EG_OK && eg_launch(c, g.a, NULL) == EG_OK &&
+         eg_record_cond_end(c) == EG_OK && eg_record_end(c, NULL, &gr) == EG_OK && gb_replay(&g, gr);
+    check(ok && gb_holds(g.d1, 1), "device negated IF: lane 2 is 0, the arm runs");
+    gb_clear(&g);
+    gb_flags(&g, 0, 0, 3);
+    ok = ok && gb_replay(&g, gr);
+    check(ok && gb_holds(g.d1, 0), "device negated IF: lane 2 is 3, the arm does not run");
+    if (gr) eg_graph_free(c, gr);
+    gr = NULL;
+
+    /* a count against a baseline: equal skips the arm, different runs it; negated, the other way */
+    for (int negate = 0; negate < 2; ++negate) {
+        gb_clear(&g);
+        gb_flags(&g, 5, 5, 0);
+        ok = eg_record_begin(c) == EG_OK && gb_cond(&g, EG_COND_IF, negate ? EG_COND_NEGATE : 0, 0, g.pf, 0, g.pf, 1, 0) == EG_OK &&
+             eg_launch(c, g.a, NULL) == EG_OK && eg_record_cond_end(c) == EG_OK && eg_record_end(c, NULL, &gr) == EG_OK && gb_replay(&g, gr);
+        const int equal_runs = ok && gb_holds(g.d1, 1);
+        gb_clear(&g);
+        gb_flags(&g, 6, 5, 0);
+        ok = ok && gb_replay(&g, gr);
+        const int differ_runs = ok && gb_holds(g.d1, 1);
+        check(ok && equal_runs == negate && differ_runs == !negate,
+              negate ? "device negated count/baseline test: equal runs the arm, different skips it" : "device count/baseline test: equal skips the arm, different runs it");
+        if (gr) eg_graph_free(c, gr);
+        gr = NULL;
+    }
+
+    /* IF_ELSE: by the capability, refused by name without it */
+    gb_clear(&g);
+    gb_flags(&g, 0, 0, 1);
+    if (eg_record_begin(c) == EG_OK && gb_cond(&g, EG_COND_IF_ELSE, 0, 0, g.pf, 2, NULL, 0, 0) == EG_NOT_WRITTEN && reason_has(c, "conditional arms")) {
+        check(eg_record_end(c, NULL, &gr) == EG_OK && eg_graph_free(c, gr) == EG_OK, "device IF_ELSE refused NOT_WRITTEN by name: the driver has no conditional arms (skipped)");
+        gr = NULL;
+    } else {
+        ok = eg_launch(c, g.a, NULL) == EG_OK && eg_record_cond_arm(c) == EG_OK && eg_launch(c, g.b, NULL) == EG_OK && eg_record_cond_end(c) == EG_OK &&
+             eg_record_end(c, NULL, &gr) == EG_OK && gb_replay(&g, gr);
+        check(ok && gb_holds(g.d1, 1) && gb_holds(g.d2, 0), "device IF_ELSE: lane 2 set, the first arm runs and the second does not");
+        gb_clear(&g);
+        gb_flags(&g, 0, 0, 0);
+        ok = ok && gb_replay(&g, gr);
+        check(ok && gb_holds(g.d1, 0) && gb_holds(g.d2, 1), "device IF_ELSE: lane 2 rewritten to 0, the second arm runs");
+        if (gr) eg_graph_free(c, gr);
+        gr = NULL;
+    }
+
+    /* WHILE: the test never changes, so only max_iters ends it; a test that is false runs nothing */
+    gb_clear(&g);
+    gb_flags(&g, 0, 0, 1);
+    ok = eg_record_begin(c) == EG_OK && gb_cond(&g, EG_COND_WHILE, 0, 0, g.pf, 2, NULL, 0, 3) == EG_OK && eg_launch(c, g.a, NULL) == EG_OK &&
+         eg_record_cond_end(c) == EG_OK && eg_record_end(c, NULL, &gr) == EG_OK && gb_replay(&g, gr) && gb_replay(&g, gr);
+    check(ok && gb_holds(g.d1, 1), "device WHILE max_iters 3 over a test that stays true: it stops at the cap without error and the body ran");
+    gb_clear(&g);
+    gb_flags(&g, 0, 0, 0);
+    ok = ok && gb_replay(&g, gr);
+    check(ok && gb_holds(g.d1, 0), "device WHILE with a false test runs no iteration");
+    if (gr) eg_graph_free(c, gr);
+    gr = NULL;
+
+    /* refusals of a conditional (nothing is opened by them), then a fork inside an arm, a conditional inside a branch */
+    gb_clear(&g);
+    gb_flags(&g, 0, 0, 1);
+    ok = eg_record_begin(c) == EG_OK &&
+         refused(gb_cond(&g, EG_COND_IF, 0, 0, g.pf, 0, NULL, 0, 2), EG_BAD_REQUEST, c, "max_iters is for WHILE only") &&
+         refused(gb_cond(&g, EG_COND_SWITCH, EG_COND_NEGATE, 2, g.pf, 0, NULL, 0, 0), EG_BAD_REQUEST, c, "NEGATE on a SWITCH") &&
+         refused(gb_cond(&g, EG_COND_SWITCH, 0, 2, g.pf, 0, g.pf, 1, 0), EG_BAD_REQUEST, c, "SWITCH reads its arm from the cell alone") &&
+         refused(gb_cond(&g, EG_COND_IF, 0, 0, g.pd, 0, NULL, 0, 0), EG_BAD_REQUEST, c, "int32 or uint32") &&
+         refused(gb_cond(&g, EG_COND_IF, 0, 0, g.px, 0, NULL, 0, 0), EG_BAD_REQUEST, c, "int32 or uint32") &&
+         refused(gb_cond(&g, EG_COND_IF, 0, 0, g.pf, 4, NULL, 0, 0), EG_BAD_REQUEST, c, "outside the plane") &&
+         refused(gb_cond(&g, EG_COND_IF, 0, 0, g.pf, 0, g.pf, -1, 0), EG_BAD_REQUEST, c, "outside the plane") &&
+         refused(eg_record_cond_arm(c), EG_BAD_REQUEST, c, "no conditional is open");
+    check(ok, "device conditional refusals by name: cap off WHILE, NEGATE or a baseline on SWITCH, a double or oversized cell, an index outside it, an arm with none open");
+    ok = ok && gb_cond(&g, EG_COND_IF, 0, 0, g.pf, 2, NULL, 0, 0) == EG_OK && eg_record_fork_begin(c) == EG_OK && refused(eg_record_cond_end(c), EG_BAD_REQUEST, c, "fork is still open") &&
+         eg_launch(c, g.a, NULL) == EG_OK && eg_record_fork_branch(c) == EG_OK && eg_launch(c, g.b, NULL) == EG_OK &&
+         refused(eg_record_end(c, NULL, &gr), EG_BAD_REQUEST, c, "is still open") && eg_record_fork_end(c) == EG_OK && eg_record_cond_end(c) == EG_OK &&
+         eg_record_fork_begin(c) == EG_OK && eg_launch(c, g.d, NULL) == EG_OK && refused(eg_record_end(c, NULL, &gr), EG_BAD_REQUEST, c, "fork is still open") &&
+         eg_record_fork_branch(c) == EG_OK && gb_cond(&g, EG_COND_IF, 0, 0, g.pf, 2, NULL, 0, 0) == EG_OK && refused(eg_record_fork_branch(c), EG_BAD_REQUEST, c, "conditional is still open") &&
+         eg_launch(c, g.c, NULL) == EG_OK && eg_record_cond_end(c) == EG_OK;
+    if (!ok) reason_has(c, "(the nested recording was refused)");
+    check(ok, "device nesting: a fork inside a conditional arm and a conditional inside a fork branch recorded; the open ones refuse the end and the wrong close by name");
+    if (c != NULL) {    /* the last fork's branch 1 reads p1 that branch 0 writes: a race refused at its end */
+        check(ok && refused(eg_record_fork_end(c), EG_BAD_REQUEST, c, "a race") && reason_has(c, "node ") && reason_has(c, "slot "),
+              "device race: branches touching one plane with no wait are refused at fork_end, naming both nodes and slots");
+    }
+    gb_free(&g);
+
+    /* a plain graph whose plan is rebound outside the recording reads the new binding */
+    if (!gb_make(&g, dev_lib)) return;
+    c = g.ctx;
+    gb_clear(&g);
+    ok = eg_record_begin(c) == EG_OK && eg_launch(c, g.a, NULL) == EG_OK && eg_record_end(c, NULL, &gr) == EG_OK && gb_replay(&g, gr);
+    check(ok && gb_holds(g.d1, 1), "device rebind: the plain graph first writes the plane it was recorded with");
+    {
+        const int32_t slot0[1] = { 0 };
+        eg_plane* moved[1] = { g.p3 };
+        gb_clear(&g);
+        ok = ok && bind_planes(c, g.a, 1, slot0, moved) == EG_OK && gb_replay(&g, gr);
+        check(ok && gb_holds(g.d3, 1) && gb_holds(g.d1, 0), "device rebind: after eg_bind the next replay writes the new plane and leaves the old one (never stale)");
+    }
+    if (gr) eg_graph_free(c, gr);
+    gb_free(&g);
+}
+
 int main(int argc, char** argv) {
     if (argc != 3) {
         fprintf(stderr, "usage: %s <libfixture_device.so> <libfixture_unit.so>\n", argv[0]);
@@ -1901,6 +2152,7 @@ int main(int argc, char** argv) {
     check_segmented_device(ctx, dev_lib);
     check_auto_device(ctx, dev_lib);
     fast_entries(ctx, dev_lib);
+    graph_builder_device(dev_lib);
 
     /* The host still runs on a device context. */
     static double hx[N], hyv[N];

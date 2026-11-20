@@ -174,5 +174,63 @@ void capture_abort(DeviceCapture* capture) noexcept;
 /** @brief Destroy @p loop (NULL-safe). */
 void loop_free(DeviceLoop* loop) noexcept;
 
+/** @brief The instantiated graph and its template as the driver's handles (CUgraphExec, CUgraph), for node updates. */
+std::uint64_t loop_exec(const DeviceLoop* loop);
+std::uint64_t loop_graph(const DeviceLoop* loop);
+
+/** @brief Instantiate @p loop's template again, after its nodes were changed, and drop the old instance. */
+void loop_reinstantiate(DeviceLoop* loop);
+
+/** @brief The last @p count kernel nodes the capture on @p stream recorded, oldest first: they form one chain, each after the
+ *  one before (a plan's partitions launched in turn). */
+std::vector<std::uint64_t> capture_kernels(std::uint64_t stream, unsigned count);
+
+/** @brief Give kernel node @p node the argument list @p args followed by the triple (@p base, @p count, @p n), in the template and
+ *  in the instance; false when the driver refused the update of the instance, which then must be made again (loop_reinstantiate). */
+bool loop_set_kernel_args(DeviceLoop* loop, std::uint64_t node, const std::vector<void*>& args, std::int64_t base, std::int64_t count,
+                          std::int64_t n);
+
+struct DeviceWeave;  ///< a conditional woven into the capture in progress: its arm streams and its nodes
+struct DeviceFork;   ///< parallel branches of the capture in progress: one stream each, joined back at the end
+
+/** @brief Whether the driver has IF/ELSE and SWITCH conditional nodes (12.8). */
+bool cond_arms_supported();
+
+/**
+ * @brief Weave a conditional into the capture on @p origin. @p kind: 0 IF, 1 IF_ELSE, 2 WHILE, 3 SWITCH. The test is
+ * ``*cell != (baseline ? *baseline : 0)`` over 32-bit device words (``*cell`` is the arm index for SWITCH, which takes no
+ * baseline), inverted when @p negate. A WHILE stops after @p cap iterations (0: no cap) and keeps
+ * its state in the two device words @p loop_cells. Every arm is being captured on return; @p arms is the arm count.
+ */
+DeviceWeave* cond_begin(std::uint64_t origin, int kind, const unsigned* cell, const unsigned* baseline, bool negate,
+                        unsigned arms, unsigned cap, unsigned* loop_cells);
+
+/** @brief The stream that captures arm @p arm of @p weave. */
+std::uint64_t cond_stream(const DeviceWeave* weave, unsigned arm);
+
+/** @brief Close every arm of @p weave and free it; throws when an arm captured no work (the weave is freed either way). */
+void cond_end(DeviceWeave* weave);
+
+/** @brief Free @p weave, closing what is still open (NULL-safe, never throws). */
+void cond_drop(DeviceWeave* weave) noexcept;
+
+/** @brief Fork the capture on @p origin: branch 0 starts after everything recorded so far. */
+DeviceFork* fork_begin(std::uint64_t origin);
+
+/** @brief Add a branch to @p fork, also starting after everything recorded before the fork; its stream. */
+std::uint64_t fork_branch(DeviceFork* fork);
+
+/** @brief The stream that captures branch @p branch of @p fork. */
+std::uint64_t fork_stream(const DeviceFork* fork, unsigned branch);
+
+/** @brief Make branch @p waiter run after everything branch @p producer has captured so far. */
+void fork_wait(DeviceFork* fork, unsigned waiter, unsigned producer);
+
+/** @brief Join every branch back into the origin stream and free @p fork. */
+void fork_end(DeviceFork* fork);
+
+/** @brief Free @p fork (NULL-safe, never throws). */
+void fork_drop(DeviceFork* fork) noexcept;
+
 }  // namespace door
 }  // namespace eagle

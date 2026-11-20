@@ -18,6 +18,7 @@
 #include "eagle/door/device/Gemm.h"
 #include "eagle/door/device/Loop.h"
 #include "eagle/exec/DeviceKernel.h"
+#include "eagle/graph/Edges.h"
 #include "eagle/policy/Launch.h"
 #include "eagle/policy/Residency.h"
 
@@ -88,6 +89,14 @@ void device_record_begin(eg_ctx&) {}
 void device_record_launch(eg_ctx&, eg_plan_s&) {}
 void device_record_host_step(eg_ctx&, void (*)(void*, StepFailure&) noexcept, void*, void (*)(eg_ctx&, void*)) {}
 void device_record_end(eg_ctx&, const eg_record_end_desc*, eg_graph**) {}
+void device_record_cond_begin(eg_ctx&, const eg_cond_desc*) {}
+void device_record_cond_arm(eg_ctx&) {}
+void device_record_cond_end(eg_ctx&) {}
+void device_record_fork_begin(eg_ctx&) {}
+void device_record_fork_branch(eg_ctx&) {}
+void device_record_fork_end(eg_ctx&) {}
+void device_record_wait(eg_ctx&, std::int32_t, eg_plane_s* const*) {}
+bool device_cond_arms_supported() { return false; }
 GraphDiff* device_graph_diff(eg_ctx&, eg_graph*) { return nullptr; }
 bool device_graph(const eg_ctx&, const eg_graph*) { return false; }
 void device_graph_launch(eg_ctx&, eg_graph*) {}
@@ -245,7 +254,40 @@ struct HostHook {
     std::shared_ptr<StepFailure> failure;
 };
 
+/** @brief What one recorded node touches, for the hazard check of a fork: its ordinal, the planes with how, and the earlier
+ *  sibling nodes an ``eg_record_wait`` ordered it after. */
+struct NodeUse {
+    std::int64_t ordinal = 0;
+    std::vector<graph::PlaneRef> refs;
+    std::vector<std::int64_t> after;
+};
+
+/** @brief One branch of an open fork: its stream, its nodes and the nodes its waits ordered the next ones after. */
+struct Branch {
+    std::uint64_t stream = 0;
+    std::vector<NodeUse> nodes;
+    std::vector<std::int64_t> after;
+};
+
+/** @brief An open conditional (``weave``) or fork (``fork``) of the recording; ``outer`` is the stream in scope when it opened. */
+struct Frame {
+    DeviceWeave* weave = nullptr;
+    DeviceFork* fork = nullptr;
+    unsigned arm = 0, arms = 0;
+    std::vector<Branch> branches;
+    std::uint64_t outer = 0;
+};
+
+/** @brief The loop states a recording keeps for its WHILE conditionals: two device words each, made before the capture opens
+ *  (nothing can be allocated inside it). */
+constexpr unsigned kRecordedLoops = 64;
+
 struct DeviceRecording {
+    std::vector<Frame> frames;                          ///< the open conditionals and forks, outermost first
+    std::int64_t nodes = 0;                             ///< the nodes recorded so far
+    void* loop_cells = nullptr;                         ///< kRecordedLoops pairs of device words
+    unsigned loops = 0;                                 ///< the pairs used
+    std::vector<std::vector<std::uint64_t>> kernels;    ///< per recorded launch (as ``plans``): the kernel nodes of its partitions
     bool launches_only = true;                          ///< no copy, reduce, transform, product or host node was captured: what EG_RECORD_DIFF needs
     std::vector<std::unique_ptr<HostHook>> hooks;       ///< the host nodes captured so far
     std::shared_ptr<StepFailure> failure;               ///< shared by the hooks and, once recorded, the graph
@@ -259,6 +301,8 @@ struct DeviceRecording {
 
 /** @brief A recorded device graph: the instantiated capture and the plans whose bindings it holds by value. */
 struct DeviceGraph {
+    void* loop_cells = nullptr;                         ///< the loop states of its WHILE conditionals, freed with it
+    std::vector<std::vector<std::uint64_t>> kernels;    ///< per recorded launch (as ``plans``): its kernel nodes, to re-apply a rebound plan's arguments
     std::unique_ptr<GraphDiff> diff;                    ///< the tape of a graph ended with EG_RECORD_DIFF
     std::vector<std::unique_ptr<HostHook>> hooks;       ///< its host nodes, each holding the references its step runs
     std::shared_ptr<StepFailure> failure;               ///< the first failure of a host node, kept for the next launch or sync
@@ -595,11 +639,86 @@ void device_gemm_ready(eg_ctx& ctx) {
     gemm_handle_make(ctx, ctx.dev.stream);
 }
 
+namespace {
+
+/** @brief One plane a node touches, for the hazard check: the slot or operand name it is reported under and how it is used
+ *  (0 read, 1 write, 2 both). */
+struct PlaneUse {
+    std::string name;
+    const eg_plane_s* plane;
+    int access;
+};
+
+/** @brief The memory @p plane covers, as eagle's hazard analysis reads it (strides in bytes). */
+graph::PlaneRef plane_ref(const std::string& name, std::int64_t node, const eg_plane_s& plane, int access) {
+    const DLTensor& t = plane.tensor->dl_tensor;
+    graph::PlaneRef r;
+    r.name = name;
+    r.node = node;
+    r.base = reinterpret_cast<std::uint64_t>(t.data) + t.byte_offset;
+    r.itemsize = std::max<std::int64_t>(1, static_cast<std::int64_t>(t.dtype.bits) * t.dtype.lanes / 8);
+    r.access = access;
+    r.shape.assign(t.shape, t.shape + t.ndim);
+    r.strides.resize(static_cast<std::size_t>(t.ndim));
+    std::int64_t compact = r.itemsize;
+    for (int i = t.ndim; i-- > 0;) {
+        r.strides[static_cast<std::size_t>(i)] = t.strides != nullptr ? t.strides[i] * r.itemsize : compact;
+        compact *= t.shape[i];
+    }
+    return r;
+}
+
+/** @brief How a unit slot's role uses its plane. */
+int slot_access(std::int32_t role) {
+    switch (role) {
+        case EG_ROLE_MUTABLE:
+        case EG_ROLE_TERMINATED: return 2;
+        case EG_ROLE_WIDE_OUT:
+        case EG_ROLE_ACCUM_OUT:
+        case EG_ROLE_OUT: return 1;
+        default: return 0;
+    }
+}
+
+/** @brief The branch the next node joins: the current one of the innermost open fork, none outside every fork. */
+Branch* open_branch(DeviceRecording& rec) {
+    for (std::size_t i = rec.frames.size(); i-- > 0;)
+        if (rec.frames[i].fork != nullptr) return &rec.frames[i].branches.back();
+    return nullptr;
+}
+
+/** @brief Count the node about to be queued on a recording's capture and keep what it touches for the fork it sits in; nothing
+ *  that can be hoisted into a plain launch survives as ``launches_only`` once it is not one. */
+void note_node(eg_ctx& ctx, std::int64_t* ordinal, const std::vector<graph::PlaneRef>& refs) {
+    DeviceRecording& rec = *ctx.dev_rec;
+    NodeUse use;
+    use.ordinal = rec.nodes++;
+    use.refs = refs;
+    for (graph::PlaneRef& r : use.refs) r.node = use.ordinal;
+    if (ordinal != nullptr) *ordinal = use.ordinal;
+    if (Branch* branch = open_branch(rec)) {
+        use.after = branch->after;
+        branch->nodes.push_back(std::move(use));
+    }
+}
+
+/** @brief note_node for a node of operands @p uses (planes a caller left out are skipped). */
+void note_uses(eg_ctx& ctx, const std::vector<PlaneUse>& uses) {
+    if (ctx.dev_rec == nullptr) return;
+    std::vector<graph::PlaneRef> refs;
+    for (const PlaneUse& u : uses)
+        if (u.plane != nullptr) refs.push_back(plane_ref(u.name, 0, *u.plane, u.access));
+    note_node(ctx, nullptr, refs);
+}
+
+}  // namespace
+
 /** @brief eg_gemm_run of a device product: queued on the context's stream, in a capture or not. */
 void device_gemm_run(eg_ctx& ctx, const eg_gemm_s& gemm, eg_plane_s* a, eg_plane_s* b, eg_plane_s* c) {
     const auto at = [](const eg_plane_s* p) { return static_cast<char*>(p->tensor->dl_tensor.data) + p->tensor->dl_tensor.byte_offset; };
     const auto stride = [](const eg_plane_s* p) { return static_cast<int>(p->tensor->dl_tensor.shape[1]); };
     if (ctx.dev_rec != nullptr) ctx.dev_rec->launches_only = false;
+    note_uses(ctx, { { "a", a, 0 }, { "b", b, 0 }, { "c", c, 1 } });
     Current current(ctx.dev);
     gemm_product(ctx, ctx.dev.stream, gemm.call, gemm.f32, at(a), stride(a), at(b), stride(b), at(c), stride(c));
 }
@@ -1085,6 +1204,7 @@ void device_reduce(eg_ctx& ctx, const eg_reduce_desc& d) {
         return p == nullptr ? nullptr : static_cast<char*>(p->tensor->dl_tensor.data) + p->tensor->dl_tensor.byte_offset;
     };
     if (ctx.dev_rec != nullptr) ctx.dev_rec->launches_only = false;
+    note_uses(ctx, { { "in", d.in, 0 }, { "out", d.out, 1 }, { "comp", d.comp, r.comp != nullptr && !r.pair ? 0 : 1 } });
     Current current(ctx.dev);
     reduce_step(ctx.dev.stream, r.code, r.op == EG_REDUCE_ALL ? 3 : r.op, at(r.in), r.n, r.cols, at(r.out), at(r.comp), r.pair);
 }
@@ -1095,6 +1215,7 @@ void device_reduce(eg_ctx& ctx, const eg_reduce_desc& d) {
 void device_copy(eg_ctx& ctx, eg_plane_s* src, eg_plane_s* dst) {
     host::copy_check(ctx, src, dst);
     if (ctx.dev_rec != nullptr) ctx.dev_rec->launches_only = false;
+    note_uses(ctx, { { "src", src, 0 }, { "dst", dst, 1 } });
     const DLTensor& s = src->tensor->dl_tensor;
     const DLTensor& t = dst->tensor->dl_tensor;
     char *ps = static_cast<char*>(s.data) + s.byte_offset, *pd = static_cast<char*>(t.data) + t.byte_offset;
@@ -1137,6 +1258,7 @@ void device_fft_run(eg_ctx& ctx, eg_fft_s& plan, eg_plane_s* in, eg_plane_s* out
     fft_enqueue(*plan.dev, plan, at(in), at(out), plan.work, ctx.dev.stream);
     if (ctx.dev_rec == nullptr) return;
     ctx.dev_rec->launches_only = false;
+    note_uses(ctx, { { "in", in, 0 }, { "out", out, 1 } });
     ctx.dev_rec->ffts.push_back(&plan);
     ++plan.refs;
 }
@@ -1638,7 +1760,13 @@ void device_record_begin(eg_ctx& ctx) {
     auto rec = std::make_unique<DeviceRecording>();
     rec->stream = ctx.dev.stream;
     Current current(ctx.dev);
-    rec->capture = capture_begin(rec->stream);
+    rec->loop_cells = device_alloc(ctx, kRecordedLoops * 2 * sizeof(unsigned), true);
+    try {
+        rec->capture = capture_begin(rec->stream);
+    } catch (...) {
+        device_free(ctx, rec->loop_cells);
+        throw;
+    }
     ctx.dev_rec = rec.release();
 }
 
@@ -1653,23 +1781,248 @@ void device_record_launch(eg_ctx& ctx, eg_plan_s& plan) {
     if (!u.companions.empty() || !u.cells.empty())
         refuse(EG_NOT_WRITTEN, who + "companion and cell folds are not written in this build of the door");
     DeviceRecording& rec = *ctx.dev_rec;
+    std::vector<graph::PlaneRef> refs;
+    for (std::size_t i = 0; i < plan.bindings.size(); ++i)
+        if (plan.bindings[i].plane != nullptr) refs.push_back(plane_ref(u.slots[i].name, 0, *plan.bindings[i].plane, slot_access(u.slots[i].role)));
+    note_node(ctx, nullptr, refs);
     rec.bound.push_back(binding_bytes(plan));
     rec.plans.push_back(&plan);
     ++plan.refs;
     Current current(ctx.dev);
-    finished_zero(plan, rec.stream);    // each replay counts from zero, as eg_launch does
-    launch_on(plan, rec.stream);
+    finished_zero(plan, ctx.dev.stream);    // each replay counts from zero, as eg_launch does
+    launch_on(plan, ctx.dev.stream);
+    // The kernel node of each partition, kept to re-apply the arguments of a plan rebound after the recording.
+    const unsigned kernels = gemm_routed(plan) ? 0u : static_cast<unsigned>(std::count_if(plan.parts.begin(), plan.parts.end(), [](const exec::Partition& p) { return p.count > 0; }));
+    rec.kernels.push_back(capture_kernels(ctx.dev.stream, kernels));
 }
+
+namespace {
+
+DeviceRecording& recording_of(eg_ctx& ctx) {
+    if (ctx.dev_rec == nullptr) refuse(EG_BAD_REQUEST, "not recording: call eg_record_begin first");
+    return *ctx.dev_rec;
+}
+
+/** @brief The 32-bit device word at element @p index of the one-dimensional int32 or uint32 device plane @p plane, a conditional's
+ *  test operand (@p what names it in a refusal). */
+const unsigned* test_word(eg_ctx& ctx, eg_plane_s* plane, std::int64_t index, const std::string& what) {
+    check_handle(ctx.planes, plane, what.c_str());
+    const DLTensor& t = plane->tensor->dl_tensor;
+    if (t.device.device_type != kDLCUDA) refuse(EG_BAD_REQUEST, what + ": a device plane is expected in a device recording");
+    if ((t.dtype.code != kDLInt && t.dtype.code != kDLUInt) || t.dtype.bits != 32 || t.dtype.lanes != 1 || t.ndim != 1)
+        refuse(EG_BAD_REQUEST, what + ": a one-dimensional int32 or uint32 plane is expected");
+    if (index < 0 || index >= t.shape[0])
+        refuse(EG_BAD_REQUEST, what + ": index " + std::to_string(index) + " is outside the plane's " + std::to_string(t.shape[0]) + " elements");
+    return reinterpret_cast<const unsigned*>(static_cast<const char*>(t.data) + t.byte_offset) + index;
+}
+
+/** @brief The element of @p plane the test reads, as a hazard operand. */
+graph::PlaneRef element_ref(const std::string& name, const eg_plane_s& plane, std::int64_t index) {
+    graph::PlaneRef r = plane_ref(name, 0, plane, 0);
+    r.base += static_cast<std::uint64_t>(index) * 4;
+    r.shape = { 1 };
+    r.strides = { 4 };
+    return r;
+}
+
+/** @brief Whether @p ordinals holds @p node. */
+bool has(const std::vector<std::int64_t>& ordinals, std::int64_t node) {
+    return std::find(ordinals.begin(), ordinals.end(), node) != ordinals.end();
+}
+
+/** @brief Refuse naming the first race between two branches of @p frame: nodes of different branches that touch overlapping memory,
+ *  one of them writing, with no wait ordering the later after the earlier. */
+void check_races(const Frame& frame) {
+    for (std::size_t i = 0; i < frame.branches.size(); ++i)
+        for (std::size_t j = i + 1; j < frame.branches.size(); ++j)
+            for (const NodeUse& a : frame.branches[i].nodes)
+                for (const NodeUse& b : frame.branches[j].nodes) {
+                    if (has(b.after, a.ordinal)) continue;
+                    std::vector<const graph::PlaneRef*> ra, rb;
+                    for (const graph::PlaneRef& r : a.refs) ra.push_back(&r);
+                    for (const graph::PlaneRef& r : b.refs) rb.push_back(&r);
+                    std::string race;
+                    graph::detail::hazards(ra, rb, [&](const std::string& pa, const std::string& pb, graph::EdgeKind kind) {
+                        if (race.empty())
+                            race = "node " + std::to_string(a.ordinal) + " (slot '" + pa + "') and node " + std::to_string(b.ordinal) + " (slot '" + pb +
+                                   "') of different branches touch the same memory: " + graph::kindName(kind) +
+                                   "; order them with eg_record_wait or give them separate planes";
+                    });
+                    if (!race.empty()) refuse(EG_BAD_REQUEST, "eg_record_fork_end: a race: " + race);
+                }
+}
+
+/** @brief The open frame of a call that acts on the innermost one, which must be a conditional (@p want_cond) or a fork. */
+Frame& innermost(DeviceRecording& rec, bool want_cond, const char* call) {
+    if (rec.frames.empty()) refuse(EG_BAD_REQUEST, std::string(call) + ": no " + (want_cond ? "conditional" : "fork") + " is open");
+    Frame& f = rec.frames.back();
+    if (want_cond && f.weave == nullptr) refuse(EG_BAD_REQUEST, std::string(call) + ": a fork is still open inside the conditional");
+    if (!want_cond && f.fork == nullptr) refuse(EG_BAD_REQUEST, std::string(call) + ": a conditional is still open inside the branch");
+    return f;
+}
+
+}  // namespace
+
+/** @brief eg_record_cond_begin on a device context: a conditional node woven into the capture (device/Loop.cu); its first arm is being captured. */
+void device_record_cond_begin(eg_ctx& ctx, const eg_cond_desc* desc) {
+    DeviceRecording& rec = recording_of(ctx);
+    const eg_cond_desc d = read_input(desc, "eg_cond_desc");
+    if ((d.flags & ~EG_COND_NEGATE) != 0) refuse(EG_BAD_REQUEST, "eg_cond_desc.flags: unknown bits " + std::to_string(d.flags & ~EG_COND_NEGATE));
+    unsigned arms = 1;
+    switch (d.kind) {
+        case EG_COND_IF:
+        case EG_COND_WHILE: break;
+        case EG_COND_IF_ELSE: arms = 2; break;
+        case EG_COND_SWITCH:
+            if (d.n_arms < 1) refuse(EG_BAD_REQUEST, "eg_cond_desc.n_arms " + std::to_string(d.n_arms) + " < 1");
+            arms = static_cast<unsigned>(d.n_arms);
+            break;
+        default: refuse(EG_BAD_REQUEST, "unknown conditional kind " + std::to_string(d.kind));
+    }
+    if (d.kind != EG_COND_SWITCH && d.n_arms != 0) refuse(EG_BAD_REQUEST, "eg_cond_desc.n_arms is for SWITCH only: pass 0");
+    const bool negate = (d.flags & EG_COND_NEGATE) != 0;
+    if (negate && d.kind == EG_COND_SWITCH) refuse(EG_BAD_REQUEST, "eg_cond_desc.flags: EG_COND_NEGATE on a SWITCH");
+    if (d.baseline != nullptr && d.kind == EG_COND_SWITCH) refuse(EG_BAD_REQUEST, "eg_cond_desc.baseline: a SWITCH reads its arm from the cell alone");
+    if (d.max_iters < 0 || d.max_iters >= static_cast<std::int64_t>(0xFFFFFFFFu))
+        refuse(EG_BAD_REQUEST, "eg_cond_desc.max_iters " + std::to_string(d.max_iters) + " is outside 0 .. 2^32 - 2");
+    if (d.max_iters != 0 && d.kind != EG_COND_WHILE) refuse(EG_BAD_REQUEST, "eg_cond_desc.max_iters is for WHILE only: pass 0");
+    if ((d.kind == EG_COND_IF_ELSE || d.kind == EG_COND_SWITCH) && !device_cond_arms_supported())
+        refuse(EG_NOT_WRITTEN, "eg_record_cond_begin: IF_ELSE and SWITCH need a driver with conditional arms (12.8 or later); "
+               "the capability bit EG_CAP_COND_IF_ELSE / EG_CAP_COND_SWITCH is not set on this context");
+    if (d.kind == EG_COND_WHILE && rec.loops >= kRecordedLoops)
+        refuse(EG_NOT_WRITTEN, "eg_record_cond_begin: a device recording holds at most " + std::to_string(kRecordedLoops) + " WHILE conditionals");
+    const unsigned* cell = test_word(ctx, d.cell, d.cell_index, "eg_cond_desc.cell");
+    const unsigned* baseline = nullptr;
+    std::vector<graph::PlaneRef> refs{ element_ref("cell", *d.cell, d.cell_index) };
+    if (d.baseline != nullptr) {
+        baseline = test_word(ctx, d.baseline, d.baseline_index, "eg_cond_desc.baseline");
+        if (d.baseline->tensor->dl_tensor.dtype.code != d.cell->tensor->dl_tensor.dtype.code)
+            refuse(EG_BAD_REQUEST, "eg_cond_desc.baseline: the cell's dtype is expected");
+        refs.push_back(element_ref("baseline", *d.baseline, d.baseline_index));
+    }
+    note_node(ctx, nullptr, refs);    // the test reads its cells: a node of its own
+    rec.launches_only = false;
+    Current current(ctx.dev);
+    unsigned* loop = d.kind == EG_COND_WHILE ? static_cast<unsigned*>(rec.loop_cells) + 2 * rec.loops : nullptr;
+    Frame frame;
+    frame.arms = arms;
+    frame.outer = ctx.dev.stream;
+    frame.weave = cond_begin(ctx.dev.stream, static_cast<int>(d.kind), cell, baseline, negate, arms, static_cast<unsigned>(d.max_iters), loop);
+    if (loop != nullptr) ++rec.loops;
+    ctx.dev.stream = cond_stream(frame.weave, 0);
+    rec.frames.push_back(std::move(frame));
+}
+
+/** @brief eg_record_cond_arm on a device context: the capture moves to the next arm's stream. */
+void device_record_cond_arm(eg_ctx& ctx) {
+    Frame& f = innermost(recording_of(ctx), true, "eg_record_cond_arm");
+    if (f.arm + 1 >= f.arms) refuse(EG_BAD_REQUEST, "eg_record_cond_arm: this conditional takes " + std::to_string(f.arms) + " arm(s); all are open");
+    ++f.arm;
+    ctx.dev.stream = cond_stream(f.weave, f.arm);
+}
+
+/** @brief eg_record_cond_end on a device context: every arm is closed (each must hold a node) and the capture goes on after the conditional. */
+void device_record_cond_end(eg_ctx& ctx) {
+    DeviceRecording& rec = recording_of(ctx);
+    Frame& top = innermost(rec, true, "eg_record_cond_end");
+    if (top.arm + 1 != top.arms)
+        refuse(EG_BAD_REQUEST, "eg_record_cond_end: the conditional has " + std::to_string(top.arm + 1) + " arm(s), it takes " + std::to_string(top.arms));
+    const Frame f = std::move(top);
+    rec.frames.pop_back();
+    ctx.dev.stream = f.outer;
+    Current current(ctx.dev);
+    try {
+        cond_end(f.weave);
+    } catch (const std::invalid_argument& e) {
+        refuse(EG_BAD_REQUEST, std::string("eg_record_cond_end: ") + e.what());
+    }
+}
+
+/** @brief eg_record_fork_begin on a device context: branch 0 is a stream that starts after everything recorded so far. */
+void device_record_fork_begin(eg_ctx& ctx) {
+    DeviceRecording& rec = recording_of(ctx);
+    rec.launches_only = false;
+    Current current(ctx.dev);
+    Frame frame;
+    frame.outer = ctx.dev.stream;
+    frame.fork = fork_begin(ctx.dev.stream);
+    frame.branches.push_back(Branch{ fork_stream(frame.fork, 0), {}, {} });
+    ctx.dev.stream = frame.branches.back().stream;
+    rec.frames.push_back(std::move(frame));
+}
+
+/** @brief eg_record_fork_branch on a device context: close the current branch (it must hold a node) and open the next. */
+void device_record_fork_branch(eg_ctx& ctx) {
+    Frame& f = innermost(recording_of(ctx), false, "eg_record_fork_branch");
+    if (f.branches.back().nodes.empty()) refuse(EG_BAD_REQUEST, "eg_record_fork_branch: the branch is empty");
+    Current current(ctx.dev);
+    const std::uint64_t stream = fork_branch(f.fork);
+    f.branches.push_back(Branch{ stream, {}, {} });
+    ctx.dev.stream = stream;
+}
+
+/** @brief eg_record_fork_end on a device context: refuse a race between the branches, then join them into the stream that forked. */
+void device_record_fork_end(eg_ctx& ctx) {
+    DeviceRecording& rec = recording_of(ctx);
+    Frame& top = innermost(rec, false, "eg_record_fork_end");
+    if (top.branches.back().nodes.empty()) refuse(EG_BAD_REQUEST, "eg_record_fork_end: the branch is empty");
+    check_races(top);
+    Frame f = std::move(top);
+    rec.frames.pop_back();
+    ctx.dev.stream = f.outer;
+    if (Branch* enclosing = open_branch(rec))    // a fork inside another's branch: its nodes are that branch's
+        for (Branch& b : f.branches) enclosing->nodes.insert(enclosing->nodes.end(), b.nodes.begin(), b.nodes.end());
+    Current current(ctx.dev);
+    fork_end(f.fork);
+}
+
+/** @brief eg_record_wait on a device context: the current branch's stream waits for every earlier branch that writes @p planes. */
+void device_record_wait(eg_ctx& ctx, std::int32_t n_planes, eg_plane_s* const* planes) {
+    DeviceRecording& rec = recording_of(ctx);
+    if (rec.frames.empty() || rec.frames.back().fork == nullptr)
+        refuse(EG_BAD_REQUEST, rec.frames.empty() ? "eg_record_wait: outside a fork branch" : "eg_record_wait: a conditional is open inside the branch; wait before opening it");
+    Frame& f = rec.frames.back();
+    if (n_planes < 1 || planes == nullptr) refuse(EG_BAD_REQUEST, "eg_record_wait: n_planes " + std::to_string(n_planes) + " < 1");
+    Branch& branch = f.branches.back();
+    const std::size_t self = f.branches.size() - 1;
+    std::vector<std::size_t> producers;
+    std::vector<std::int64_t> ordered;
+    for (std::int32_t k = 0; k < n_planes; ++k) {
+        const std::string what = "planes[" + std::to_string(k) + "]";
+        check_handle(ctx.planes, planes[k], what.c_str());
+        const graph::PlaneRef ref = plane_ref(what, 0, *planes[k], 1);
+        for (const NodeUse& n : branch.nodes)
+            for (const graph::PlaneRef& r : n.refs)
+                if (graph::detail::writes(r) && graph::detail::overlap(r, ref)) refuse(EG_BAD_REQUEST, "eg_record_wait: " + what + " is written by this branch");
+        bool written = false;
+        for (std::size_t j = 0; j < self; ++j)
+            for (const NodeUse& n : f.branches[j].nodes)
+                for (const graph::PlaneRef& r : n.refs)
+                    if (graph::detail::writes(r) && graph::detail::overlap(r, ref)) {
+                        written = true;
+                        ordered.push_back(n.ordinal);
+                        if (std::find(producers.begin(), producers.end(), j) == producers.end()) producers.push_back(j);
+                    }
+        if (!written) refuse(EG_BAD_REQUEST, "eg_record_wait: no earlier branch writes " + what);
+    }
+    Current current(ctx.dev);
+    for (std::size_t j : producers) fork_wait(f.fork, static_cast<unsigned>(self), static_cast<unsigned>(j));
+    branch.after.insert(branch.after.end(), ordered.begin(), ordered.end());
+}
+
+/** @brief Whether this context's driver has conditional arms (IF_ELSE, SWITCH): the capability bits' truth on a device context. */
+bool device_cond_arms_supported() { return cond_arms_supported(); }
 
 /** @brief A host node on the capture in scope (device/Seam.h). Nothing in it makes a CUDA call. */
 void device_record_host_step(eg_ctx& ctx, void (*run)(void*, StepFailure&) noexcept, void* user, void (*release)(eg_ctx&, void*)) {
     DeviceRecording& rec = *ctx.dev_rec;
     rec.launches_only = false;
+    note_node(ctx, nullptr, {});    // a host node's own memory is host memory: it joins no hazard
     EG_DRIVER(cuLaunchHostFunc);
     if (!rec.failure) rec.failure = std::make_shared<StepFailure>();
     rec.hooks.push_back(std::make_unique<HostHook>(HostHook{ run, user, release, rec.failure }));
     Current current(ctx.dev);
-    const CUresult r = cuLaunchHostFunc_(reinterpret_cast<CUstream>(rec.stream), &host_hook_run, rec.hooks.back().get());
+    const CUresult r = cuLaunchHostFunc_(reinterpret_cast<CUstream>(ctx.dev.stream), &host_hook_run, rec.hooks.back().get());
     if (r != CUDA_SUCCESS) {
         rec.hooks.pop_back();    // the caller still owns the step it passed
         check(r, "cuLaunchHostFunc");
@@ -1680,6 +2033,8 @@ void device_record_host_step(eg_ctx& ctx, void (*run)(void*, StepFailure&) noexc
 void device_record_end(eg_ctx& ctx, const eg_record_end_desc* desc, eg_graph** out) {
     if (out == nullptr) refuse(EG_BAD_REQUEST, "eg_record_end: out is NULL");
     *out = nullptr;
+    if (!ctx.dev_rec->frames.empty())
+        refuse(EG_BAD_REQUEST, std::string("eg_record_end: ") + (ctx.dev_rec->frames.back().weave != nullptr ? "a conditional" : "a fork") + " is still open");
     bool diff_wanted = false;
     if (desc != nullptr) {
         const eg_record_end_desc d = read_input(desc, "eg_record_end_desc");
@@ -1707,6 +2062,7 @@ void device_record_end(eg_ctx& ctx, const eg_record_end_desc* desc, eg_graph** o
         release_hooks(ctx, rec->hooks);
         for (eg_plan_s* p : rec->plans) plan_release(ctx, p);
         for (eg_fft_s* f : rec->ffts) fft_release(ctx, f);
+        device_free(ctx, rec->loop_cells);
         refuse(EG_FAULT, "eg_record_end: the device capture failed: " + failed);
     }
     auto graph = std::make_unique<DeviceGraph>();
@@ -1738,6 +2094,9 @@ void device_record_end(eg_ctx& ctx, const eg_record_end_desc* desc, eg_graph** o
         }
     }
     graph->loop = loop;
+    graph->kernels = std::move(rec->kernels);
+    if (rec->loops != 0) graph->loop_cells = rec->loop_cells;
+    else device_free(ctx, rec->loop_cells);
     graph->plans = std::move(rec->plans);
     graph->ffts = std::move(rec->ffts);
     graph->bound = std::move(rec->bound);
@@ -1752,17 +2111,36 @@ bool device_graph(const eg_ctx& ctx, const eg_graph* graph) {
     return ctx.dev_graphs.count(reinterpret_cast<DeviceGraph*>(const_cast<eg_graph*>(graph))) != 0;
 }
 
-/** @brief eg_graph_launch of a device graph: replay it once on the stream in scope (``GraphPipeline.launch``); a plan
- *  rebound since the recording is refused (the graph holds the bindings it captured). */
+/** @brief Re-apply to the instantiated graph the arguments of every recorded launch whose plan was rebound since the last launch,
+ *  and make the instance again when the driver refuses to update a node of it: a replay never runs on stale arguments. A plan the
+ *  graph holds as cuBLAS products (no kernel node) or in the tape of EG_RECORD_DIFF cannot be re-applied and is refused. */
+void reapply_bindings(DeviceGraph& graph) {
+    bool instance_stale = false;
+    for (std::size_t i = 0; i < graph.plans.size(); ++i) {
+        const eg_plan_s& plan = *graph.plans[i];
+        if (binding_bytes(plan) == graph.bound[i]) continue;
+        if (graph.diff != nullptr || gemm_routed(plan))
+            refuse(EG_BAD_REQUEST, "eg_graph_launch: a plan of unit '" + plan.unit->name + "' was rebound since the recording; " +
+                   (graph.diff != nullptr ? "a graph recorded with EG_RECORD_DIFF replays the planes it recorded" : "a product plan's bindings are fixed in the recording") +
+                   ": record it again");
+        std::size_t k = 0;
+        for (const exec::Partition& p : plan.parts) {
+            if (p.count <= 0) continue;
+            if (!loop_set_kernel_args(graph.loop, graph.kernels[i][k++], plan.params, p.base, p.count, p.nSamples)) instance_stale = true;
+        }
+        graph.bound[i] = binding_bytes(plan);
+    }
+    if (instance_stale) loop_reinstantiate(graph.loop);
+}
+
+/** @brief eg_graph_launch of a device graph: replay it once on the stream in scope (``GraphPipeline.launch``), on the bindings the
+ *  plans hold now (a rebound plan's arguments are re-applied first). */
 void device_graph_launch(eg_ctx& ctx, eg_graph* handle) {
     auto* graph = reinterpret_cast<DeviceGraph*>(handle);
     device_quiet(ctx, "eg_graph_launch", EG_NOT_WRITTEN, "a graph inside a device graph is not written in this build of the door");
     if (graph->failure) raise_step_failure(*graph->failure);    // a host node of an earlier replay failed
-    for (std::size_t i = 0; i < graph->plans.size(); ++i)
-        if (binding_bytes(*graph->plans[i]) != graph->bound[i])
-            refuse(EG_BAD_REQUEST, "eg_graph_launch: a plan of unit '" + graph->plans[i]->unit->name + "' was rebound since "
-                   "the recording; a device graph replays the bindings it captured: record it again");
     Current current(ctx.dev);
+    reapply_bindings(*graph);
     if (graph->diff != nullptr) diff_check_launch(*graph->diff);
     loop_launch(graph->loop, ctx.dev.stream);
     if (graph->diff != nullptr) diff_launched(*graph->diff);
@@ -1791,6 +2169,7 @@ void device_graph_free(eg_ctx& ctx, eg_graph* handle) {
         Current current(c->dev);
         loop_free(loop);
     });
+    device_free(ctx, graph->loop_cells);
 }
 
 /** @brief At context free: end a capture in progress (dropping it) and free every device graph, without releasing
@@ -1803,6 +2182,11 @@ void device_graphs_drop(eg_ctx& ctx) noexcept {
         if (!child) {
             try {
                 Current current(ctx.dev);
+                for (std::size_t i = rec->frames.size(); i-- > 0;) {    // the open weaves and forks hold streams of the capture: they go first
+                    cond_drop(rec->frames[i].weave);
+                    fork_drop(rec->frames[i].fork);
+                }
+                ctx.dev.stream = rec->stream;
                 capture_abort(rec->capture);
                 run_later(ctx, *rec);
             } catch (...) {

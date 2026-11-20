@@ -32,6 +32,18 @@ void device_record_launch(eg_ctx& ctx, eg_plan_s& plan);
 /** @brief eg_record_end on a device context; with @p diff (the tape of EG_RECORD_DIFF, planned by diff_plan over the recorded launches, which
  *  must be all it holds) the capture is made again with the snapshot copies in front of the launches that overwrite a plane. */
 void device_record_end(eg_ctx& ctx, const eg_record_end_desc* desc, eg_graph** out);
+/** @brief The recording calls of a graph builder on a device context (device/Device.cpp), the device half of ``eg_record_cond_begin``,
+ *  ``_cond_arm``, ``_cond_end``, ``eg_record_fork_begin``, ``_fork_branch``, ``_fork_end`` and ``eg_record_wait``: conditional nodes
+ *  and parallel branches woven into the capture. Each is called instead of the host's when ``ctx.dev_rec`` is set. */
+void device_record_cond_begin(eg_ctx& ctx, const eg_cond_desc* desc);
+void device_record_cond_arm(eg_ctx& ctx);
+void device_record_cond_end(eg_ctx& ctx);
+void device_record_fork_begin(eg_ctx& ctx);
+void device_record_fork_branch(eg_ctx& ctx);
+void device_record_fork_end(eg_ctx& ctx);
+void device_record_wait(eg_ctx& ctx, std::int32_t n_planes, eg_plane_s* const* planes);
+/** @brief Whether the driver has IF_ELSE and SWITCH conditional nodes: the truth of the capability bits EG_CAP_COND_IF_ELSE and EG_CAP_COND_SWITCH on a device context. */
+bool device_cond_arms_supported();
 /** @brief The tape of device graph @p graph (null: it is a plain graph). */
 GraphDiff* device_graph_diff(eg_ctx& ctx, eg_graph* graph);
 /** @brief Record a HOST node on the capture in scope: when the graph replays, the driver's host-function launch calls

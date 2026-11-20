@@ -206,36 +206,40 @@ EG_EXPORT eg_status eg_record_begin(eg_ctx* ctx) {
 }
 EG_EXPORT eg_status eg_record_cond_begin(eg_ctx* ctx, const struct eg_cond_desc* desc) {
     return door::call(ctx, [desc](eg_ctx& c) {
-        door::device_quiet(c, "eg_record_cond_begin", EG_NOT_WRITTEN, "conditionals in a device recording are not written in this build of the door");
-        door::record_cond_begin(c, desc);
+        if (c.dev_rec != nullptr) door::device_record_cond_begin(c, desc);
+        else door::record_cond_begin(c, desc);
     });
 }
 EG_EXPORT eg_status eg_record_fork_begin(eg_ctx* ctx) {
     return door::call(ctx, [](eg_ctx& c) {
-        door::device_quiet(c, "eg_record_fork_begin", EG_NOT_WRITTEN, "forks in a device recording are not written in this build of the door");
-        door::record_fork_begin(c);
+        if (c.dev_rec != nullptr) door::device_record_fork_begin(c);
+        else door::record_fork_begin(c);
     });
 }
 EG_EXPORT eg_status eg_record_fork_branch(eg_ctx* ctx) {
     return door::call(ctx, [](eg_ctx& c) {
-        door::device_quiet(c, "eg_record_fork_branch", EG_NOT_WRITTEN, "forks in a device recording are not written in this build of the door");
-        door::record_fork_branch(c);
+        if (c.dev_rec != nullptr) door::device_record_fork_branch(c);
+        else door::record_fork_branch(c);
     });
 }
 EG_EXPORT eg_status eg_record_fork_end(eg_ctx* ctx) {
     return door::call(ctx, [](eg_ctx& c) {
-        door::device_quiet(c, "eg_record_fork_end", EG_NOT_WRITTEN, "forks in a device recording are not written in this build of the door");
-        door::record_fork_end(c);
+        if (c.dev_rec != nullptr) door::device_record_fork_end(c);
+        else door::record_fork_end(c);
     });
 }
 EG_EXPORT eg_status eg_record_wait(eg_ctx* ctx, int32_t n_planes, eg_plane* const* planes) {
     return door::call(ctx, [n_planes, planes](eg_ctx& c) {
-        door::device_quiet(c, "eg_record_wait", EG_NOT_WRITTEN, "waits in a device recording are not written in this build of the door");
-        door::record_wait(c, n_planes, planes);
+        if (c.dev_rec != nullptr) door::device_record_wait(c, n_planes, planes);
+        else door::record_wait(c, n_planes, planes);
     });
 }
-EG_EXPORT eg_status eg_record_cond_arm(eg_ctx* ctx) { return door::call(ctx, door::record_cond_arm); }
-EG_EXPORT eg_status eg_record_cond_end(eg_ctx* ctx) { return door::call(ctx, door::record_cond_end); }
+EG_EXPORT eg_status eg_record_cond_arm(eg_ctx* ctx) {
+    return door::call(ctx, [](eg_ctx& c) { if (c.dev_rec != nullptr) door::device_record_cond_arm(c); else door::record_cond_arm(c); });
+}
+EG_EXPORT eg_status eg_record_cond_end(eg_ctx* ctx) {
+    return door::call(ctx, [](eg_ctx& c) { if (c.dev_rec != nullptr) door::device_record_cond_end(c); else door::record_cond_end(c); });
+}
 EG_EXPORT eg_status eg_record_end(eg_ctx* ctx, const struct eg_record_end_desc* desc, eg_graph** out) {
     return door::call(ctx, [desc, out](eg_ctx& c) {
         if (c.dev_rec != nullptr) {

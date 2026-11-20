@@ -233,8 +233,8 @@ int main(int argc, char** argv) {
     struct eg_cond_desc cd;
     memset(&cd, 0, sizeof(cd));
     cd.struct_size = sizeof(cd);
-    check(eg_record_cond_begin(ctx, &cd) == EG_NOT_WRITTEN && reason_has(ctx, "conditionals in a device recording"),
-          "a conditional in a device recording: NOT_WRITTEN by name");
+    check(eg_record_cond_begin(ctx, &cd) == EG_BAD_REQUEST && reason_has(ctx, "eg_cond_desc.cell"),
+          "a conditional with no cell in a device recording: BAD_REQUEST by name");
     check(eg_graph_launch(ctx, graph) == EG_NOT_WRITTEN && reason_has(ctx, "a graph inside a device graph"),
           "replaying a graph while recording on a device: NOT_WRITTEN by name");
     check(eg_launch(ctx, rec.plan, NULL) == EG_OK, "a DEVICE launch is still recorded after the refusals");
