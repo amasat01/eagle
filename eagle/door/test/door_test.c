@@ -3357,9 +3357,8 @@ static void check_no_device_group(eg_ctx* ctx) {
     int ok = eg_device_count(ctx, &count) == EG_OK && count == 0;
     ok = ok && eg_device_props(ctx, 0, &props) == EG_NOT_WRITTEN && reason_has(ctx, none);
     ok = ok && eg_stream_use(ctx, 0) == EG_NOT_WRITTEN && reason_has(ctx, "eg_stream_use: the device group is not built");
-    ok = ok && eg_record_child(ctx, 0) == EG_NOT_WRITTEN && reason_has(ctx, none);
     ok = ok && eg_sync(ctx) == EG_OK;
-    check(ok, "a door without the device group: eg_device_count OK with 0, eg_device_props, eg_stream_use and eg_record_child "
+    check(ok, "a door without the device group: eg_device_count OK with 0, eg_device_props and eg_stream_use "
               "NOT_WRITTEN (\"the device group is not built\"), eg_sync OK");
 }
 

@@ -459,13 +459,18 @@ struct eg_reduce_desc {
     eg_reduce_policy policy;
 };
 
+/** ``eg_cond_desc.flags``: IF, IF_ELSE and WHILE test the cell for zero instead of non-zero. SWITCH refuses it. */
+#define EG_COND_NEGATE (1u << 0)
+
 /** INPUT to ``eg_record_cond_begin``. */
 struct eg_cond_desc {
     uint32_t struct_size;
-    uint32_t flags;          /**< none defined: must be 0 */
+    uint32_t flags;          /**< EG_COND_NEGATE, or 0 */
     eg_cond_kind kind;
     int32_t n_arms;          /**< SWITCH only: arm count */
-    eg_plane* cell;          /**< the int32 cell a kernel sets: truth, or the arm index */
+    eg_plane* cell;          /**< a one-element int32 or uint32 plane (a mask reduction or a kernel writes uint32): truth, or the arm index */
+    int64_t max_iters;       /**< WHILE only: the loop stops without error after this many iterations; 0: no cap. Another kind refuses
+                                  a nonzero value. A struct_size that ends before this member reads 0. */
 };
 
 /** OUTPUT of ``eg_device_props`` (device group). */
@@ -1073,15 +1078,16 @@ eg_status eg_gemm_free(eg_ctx* ctx, eg_gemm* gemm);
  * call. The graph holds a reference to every plan, runner and plane a host node runs until ``eg_graph_free`` (which waits
  * for the context's stream to be idle first) or ``eg_ctx_free``. A host node cannot return an error to a caller: the first
  * failure is kept on the graph, and the next ``eg_graph_launch`` of it or ``eg_sync`` of the context returns FAULT naming
- * the step, and clears it. ``eg_reverse`` and conditionals are not recorded on a device context (NOT_WRITTEN).
+ * the step, and clears it. ``eg_reverse`` is not recorded on a device context (NOT_WRITTEN).
  * Replaces: ``graph.Graph.build`` / ``pipeline.GraphPipeline`` and the
  * node-by-node host arms. Status: OK; BAD_REQUEST (already recording).
  */
 eg_status eg_record_begin(eg_ctx* ctx);
 
-/** Open a conditional on ``desc->cell``; its first arm is being recorded.
- *  Calls today: seam ``conditional_*``. Status: OK; BAD_REQUEST;
- *  NOT_WRITTEN (IF_ELSE / SWITCH without the capability bit). */
+/** Open a conditional on ``desc->cell``; its first arm is being recorded. A fork may open inside an arm and a
+ *  conditional inside a fork branch; a fork opened inside an arm must be closed before the arm or the conditional ends.
+ *  Status: OK; BAD_REQUEST (not recording; a cell that is not a one-element int32 or uint32 plane; EG_COND_NEGATE on SWITCH;
+ *  ``max_iters`` below 0 or on a kind other than WHILE); NOT_WRITTEN (IF_ELSE / SWITCH without the capability bit). */
 eg_status eg_record_cond_begin(eg_ctx* ctx, const struct eg_cond_desc* desc);
 
 /** Close the current arm and start the next: IF and WHILE have one arm, so a
@@ -1090,8 +1096,38 @@ eg_status eg_record_cond_begin(eg_ctx* ctx, const struct eg_cond_desc* desc);
  *  ``n_arms``-th. With no conditional open: BAD_REQUEST. Status: OK; BAD_REQUEST. */
 eg_status eg_record_cond_arm(eg_ctx* ctx);
 
-/** Close the innermost conditional. Status: OK; BAD_REQUEST. */
+/** Close the innermost conditional. Status: OK; BAD_REQUEST (also a fork still open inside it). */
 eg_status eg_record_cond_end(eg_ctx* ctx);
+
+/**
+ * Open a fork and its branch 0. The nodes recorded until ``eg_record_fork_branch`` or ``eg_record_fork_end`` form that
+ * branch. Forks nest; a fork inside a conditional arm and a conditional inside a branch are legal.
+ * Status: OK; BAD_REQUEST (not recording).
+ */
+eg_status eg_record_fork_begin(eg_ctx* ctx);
+
+/** Close the current branch and open the next. Status: OK; BAD_REQUEST (no fork open, or a conditional still open inside the
+ *  branch; an empty branch). */
+eg_status eg_record_fork_branch(eg_ctx* ctx);
+
+/**
+ * Close the last branch and join: the next node waits for every branch. Before joining, the door checks the hazards between
+ * the branches: two nodes in different branches of this fork that touch overlapping memory, at least one of them writing,
+ * with no ``eg_record_wait`` between them, are a race and refused BAD_REQUEST naming both node ordinals (0-based, in
+ * recording order, a conditional's own test counting as a node of the cell it reads), both slots and the hazard (RAW, WAR or
+ * WAW). The hazards come from each node's slots (a unit slot's role: read, write or both) and from the memory of the planes
+ * (eagle/graph/Edges.h). Replay: the branches may run at the same time (a device graph: parallel branches; the host: in
+ * recording order, one legal schedule); the values equal the run in recording order. Status: OK; BAD_REQUEST (no fork open,
+ * a conditional still open inside the branch, an empty branch, a race).
+ */
+eg_status eg_record_fork_end(eg_ctx* ctx);
+
+/**
+ * Inside a fork branch: the nodes recorded after this call run after the nodes of the earlier sibling branches that write
+ * ``planes``, which removes the hazards between those nodes. Status: OK; BAD_REQUEST (outside a fork branch; a plane no
+ * earlier sibling branch writes; a plane this branch has written; a NULL or foreign plane; ``n_planes`` below 1).
+ */
+eg_status eg_record_wait(eg_ctx* ctx, int32_t n_planes, eg_plane* const* planes);
 
 #define EG_RECORD_DIFF (1u << 0) /**< plan the recording for ``eg_graph_reverse`` (host, plain launches only) */
 
@@ -1100,7 +1136,9 @@ eg_status eg_record_cond_end(eg_ctx* ctx);
  *  derived record (``eg_unit_derived``, ``of_unit`` the launch's unit) links each of its slots to a slot of the launch:
  *  (PRIMAL_SLOT, VALUE) the primal value, (PRIMAL_SLOT, ADJOINT_IN) the cotangent of a written plane, (PRIMAL_SLOT, GRAD) the
  *  gradient of a read (``reduced`` 1: a one-cell shared parameter plane, summed over samples). The links decide; no other link
- *  (a tape row, a step plane, a time start copy, ADJOINT_OUT) and no by-value uniform gradient is written. */
+ *  (a tape row, a step plane, a time start copy, ADJOINT_OUT) and no by-value uniform gradient is written. ``vjp`` is a unit of
+ *  the SAME library as the launch: the derived record names its primal by index in its own library's table, so a vjp of another
+ *  library has no identity to check and is refused. Put a kernel and its vjp in one library bundle. */
 struct eg_node_vjp {
     int32_t launch;
     eg_unit* vjp;
@@ -1115,15 +1153,18 @@ struct eg_record_end_desc {
 };
 
 /** End recording; ``*out`` replays it. ``desc`` NULL: a plain graph. With EG_RECORD_DIFF every recorded node must be an
- *  ``eg_launch`` (a run, reduce, copy, fft, gemm, conditional or child is refused by name), on a host plan with no split,
+ *  ``eg_launch`` (a run, reduce, copy, fft, gemm or conditional is refused by name), on a host plan with no split,
  *  SEGMENTED or companion unit; the planes the later nodes overwrite are copied at each ``eg_graph_launch`` just before the
- *  overwriting node, so the reverse reads what each node read. Status: OK; BAD_REQUEST (not recording, a conditional open,
+ *  overwriting node, so the reverse reads what each node read. Status: OK; BAD_REQUEST (not recording, a conditional or fork open,
  *  a vjp whose links the launch cannot satisfy, two names of one plane in a node, overlapping planes); NOT_WRITTEN (a
  *  node or unit the reverse does not cover; a device context); FAULT (capture failed; a snapshot buffer not allocated). */
 eg_status eg_record_end(eg_ctx* ctx, const struct eg_record_end_desc* desc, eg_graph** out);
 
 /** Replay a recorded graph once. Calls today: seam ``launcher_launch`` on a
- *  device. Status: OK; FAULT (also a failure a host node of an earlier replay kept, see ``eg_record_begin``). */
+ *  device. A plan rebound (``eg_bind``, ``eg_clear``) outside a recording is read at its new binding by the next replay of a
+ *  plain graph, host and device, with no re-record; a graph ended with EG_RECORD_DIFF refuses it (its tape holds the planes
+ *  it was recorded with). Status: OK; BAD_REQUEST (a rebound plan of an EG_RECORD_DIFF graph); FAULT (also a failure a host
+ *  node of an earlier replay kept, see ``eg_record_begin``). */
 eg_status eg_graph_launch(eg_ctx* ctx, eg_graph* graph);
 
 /** INPUT to ``eg_graph_reverse``. Planes are matched by handle, not by slot: graph planes are shared across nodes. */
@@ -1160,8 +1201,7 @@ eg_status eg_graph_free(eg_ctx* ctx, eg_graph* graph);
  * ``eg_device_count``, which is EG_OK with 0. In a door built WITH it, on a
  * host context (made without EG_CTX_DEVICE): ``eg_sync`` is EG_OK,
  * ``eg_stream_use`` is EG_BAD_REQUEST ("host-only context": it has no
- * stream), ``eg_device_count`` answers, and ``eg_device_props`` and
- * ``eg_record_child`` are EG_NOT_WRITTEN, as on a device context: they are
+ * stream), ``eg_device_count`` answers, and ``eg_device_props`` is EG_NOT_WRITTEN, as on a device context: it is
  * not written in either build yet.
  */
 
@@ -1183,10 +1223,6 @@ eg_status eg_stream_use(eg_ctx* ctx, uint64_t stream);
 /** Block until the context's stream is idle (seam ``stream_synchronize``). Status: OK; FAULT (also the failure a host
  *  node of a device graph kept while the stream ran, see ``eg_record_begin``). */
 eg_status eg_sync(eg_ctx* ctx);
-
-/** While recording, add an external device graph as one child node; eagle
- *  takes no ownership (seam ``capture_add_child``). */
-eg_status eg_record_child(eg_ctx* ctx, uint64_t graph);
 
 #ifdef __cplusplus
 }

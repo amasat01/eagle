@@ -865,6 +865,10 @@ void record_begin(eg_ctx& ctx);
 void record_cond_begin(eg_ctx& ctx, const eg_cond_desc* desc);
 void record_cond_arm(eg_ctx& ctx);
 void record_cond_end(eg_ctx& ctx);
+void record_fork_begin(eg_ctx& ctx);
+void record_fork_branch(eg_ctx& ctx);
+void record_fork_end(eg_ctx& ctx);
+void record_wait(eg_ctx& ctx, std::int32_t n_planes, eg_plane_s* const* planes);
 void record_end(eg_ctx& ctx, const eg_record_end_desc* desc, eg_graph** out);
 void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* desc);
 /** @brief A plan of a derived unit over eagle's memory: one whole partition of @p n samples (host/Reverse.cpp). */

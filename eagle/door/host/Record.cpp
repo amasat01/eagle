@@ -300,6 +300,11 @@ void record_cond_end(eg_ctx& ctx) {
     rec.open.pop_back();
 }
 
+void record_fork_begin(eg_ctx&) { refuse(EG_NOT_WRITTEN, "eg_record_fork_begin is not written in this build of the door"); }
+void record_fork_branch(eg_ctx&) { refuse(EG_NOT_WRITTEN, "eg_record_fork_branch is not written in this build of the door"); }
+void record_fork_end(eg_ctx&) { refuse(EG_NOT_WRITTEN, "eg_record_fork_end is not written in this build of the door"); }
+void record_wait(eg_ctx&, std::int32_t, eg_plane_s* const*) { refuse(EG_NOT_WRITTEN, "eg_record_wait is not written in this build of the door"); }
+
 void record_end(eg_ctx& ctx, const eg_record_end_desc* desc, eg_graph** out) {
     if (out == nullptr) refuse(EG_BAD_REQUEST, "eg_record_end: out is NULL");
     *out = nullptr;
