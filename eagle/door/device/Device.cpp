@@ -282,10 +282,14 @@ struct Frame {
  *  (nothing can be allocated inside it). */
 constexpr unsigned kRecordedLoops = 64;
 
+/** @brief The streams and events a recording's conditionals and forks can hold at once, made before the capture opens. */
+constexpr unsigned kRecordStreams = 32, kRecordEvents = 128;
+
 struct DeviceRecording {
     std::vector<Frame> frames;                          ///< the open conditionals and forks, outermost first
     std::int64_t nodes = 0;                             ///< the nodes recorded so far
     void* loop_cells = nullptr;                         ///< kRecordedLoops pairs of device words
+    DevicePool* pool = nullptr;                         ///< the arm and branch streams and the events of its forks
     unsigned loops = 0;                                 ///< the pairs used
     std::vector<std::vector<std::uint64_t>> kernels;    ///< per recorded launch (as ``plans``): the kernel nodes of its partitions
     bool launches_only = true;                          ///< no copy, reduce, transform, product or host node was captured: what EG_RECORD_DIFF needs
@@ -1762,8 +1766,10 @@ void device_record_begin(eg_ctx& ctx) {
     Current current(ctx.dev);
     rec->loop_cells = device_alloc(ctx, kRecordedLoops * 2 * sizeof(unsigned), true);
     try {
+        rec->pool = pool_new(kRecordStreams, kRecordEvents);
         rec->capture = capture_begin(rec->stream);
     } catch (...) {
+        pool_free(rec->pool);
         device_free(ctx, rec->loop_cells);
         throw;
     }
@@ -1891,6 +1897,8 @@ void device_record_cond_begin(eg_ctx& ctx, const eg_cond_desc* desc) {
                "the capability bit EG_CAP_COND_IF_ELSE / EG_CAP_COND_SWITCH is not set on this context");
     if (d.kind == EG_COND_WHILE && rec.loops >= kRecordedLoops)
         refuse(EG_NOT_WRITTEN, "eg_record_cond_begin: a device recording holds at most " + std::to_string(kRecordedLoops) + " WHILE conditionals");
+    if (!pool_has(rec.pool, arms, 0))
+        refuse(EG_NOT_WRITTEN, "eg_record_cond_begin: a device recording holds at most " + std::to_string(kRecordStreams) + " open arms and branches at once");
     const unsigned* cell = test_word(ctx, d.cell, d.cell_index, "eg_cond_desc.cell");
     const unsigned* baseline = nullptr;
     std::vector<graph::PlaneRef> refs{ element_ref("cell", *d.cell, d.cell_index) };
@@ -1907,7 +1915,7 @@ void device_record_cond_begin(eg_ctx& ctx, const eg_cond_desc* desc) {
     Frame frame;
     frame.arms = arms;
     frame.outer = ctx.dev.stream;
-    frame.weave = cond_begin(ctx.dev.stream, static_cast<int>(d.kind), cell, baseline, negate, arms, static_cast<unsigned>(d.max_iters), loop);
+    frame.weave = cond_begin(rec.pool, ctx.dev.stream, static_cast<int>(d.kind), cell, baseline, negate, arms, static_cast<unsigned>(d.max_iters), loop);
     if (loop != nullptr) ++rec.loops;
     ctx.dev.stream = cond_stream(frame.weave, 0);
     rec.frames.push_back(std::move(frame));
@@ -1942,10 +1950,12 @@ void device_record_cond_end(eg_ctx& ctx) {
 void device_record_fork_begin(eg_ctx& ctx) {
     DeviceRecording& rec = recording_of(ctx);
     rec.launches_only = false;
+    if (!pool_has(rec.pool, 1, 2))
+        refuse(EG_NOT_WRITTEN, "eg_record_fork_begin: a device recording holds at most " + std::to_string(kRecordStreams) + " open arms and branches at once");
     Current current(ctx.dev);
     Frame frame;
     frame.outer = ctx.dev.stream;
-    frame.fork = fork_begin(ctx.dev.stream);
+    frame.fork = fork_begin(rec.pool, ctx.dev.stream);
     frame.branches.push_back(Branch{ fork_stream(frame.fork, 0), {}, {} });
     ctx.dev.stream = frame.branches.back().stream;
     rec.frames.push_back(std::move(frame));
@@ -1953,8 +1963,11 @@ void device_record_fork_begin(eg_ctx& ctx) {
 
 /** @brief eg_record_fork_branch on a device context: close the current branch (it must hold a node) and open the next. */
 void device_record_fork_branch(eg_ctx& ctx) {
-    Frame& f = innermost(recording_of(ctx), false, "eg_record_fork_branch");
+    DeviceRecording& rec = recording_of(ctx);
+    Frame& f = innermost(rec, false, "eg_record_fork_branch");
     if (f.branches.back().nodes.empty()) refuse(EG_BAD_REQUEST, "eg_record_fork_branch: the branch is empty");
+    if (!pool_has(rec.pool, 1, 1))
+        refuse(EG_NOT_WRITTEN, "eg_record_fork_branch: a device recording holds at most " + std::to_string(kRecordStreams) + " open arms and branches at once");
     Current current(ctx.dev);
     const std::uint64_t stream = fork_branch(f.fork);
     f.branches.push_back(Branch{ stream, {}, {} });
@@ -2005,6 +2018,8 @@ void device_record_wait(eg_ctx& ctx, std::int32_t n_planes, eg_plane_s* const* p
                     }
         if (!written) refuse(EG_BAD_REQUEST, "eg_record_wait: no earlier branch writes " + what);
     }
+    if (!pool_has(rec.pool, 0, static_cast<unsigned>(producers.size())))
+        refuse(EG_NOT_WRITTEN, "eg_record_wait: a device recording holds at most " + std::to_string(kRecordEvents) + " events for its forks and waits");
     Current current(ctx.dev);
     for (std::size_t j : producers) fork_wait(f.fork, static_cast<unsigned>(self), static_cast<unsigned>(j));
     branch.after.insert(branch.after.end(), ordered.begin(), ordered.end());
@@ -2057,6 +2072,8 @@ void device_record_end(eg_ctx& ctx, const eg_record_end_desc* desc, eg_graph** o
         failed = "unknown error";
     }
     rec->capture = nullptr;
+    pool_free(rec->pool);
+    rec->pool = nullptr;
     run_later(ctx, *rec);
     if (loop == nullptr) {
         release_hooks(ctx, rec->hooks);
@@ -2188,6 +2205,7 @@ void device_graphs_drop(eg_ctx& ctx) noexcept {
                 }
                 ctx.dev.stream = rec->stream;
                 capture_abort(rec->capture);
+                pool_free(rec->pool);
                 run_later(ctx, *rec);
             } catch (...) {
             }

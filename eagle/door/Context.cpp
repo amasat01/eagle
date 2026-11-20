@@ -168,7 +168,8 @@ void ctx_info(eg_ctx& ctx, struct eg_ctx_info* out) {
     info.abi_minor = EG_DOOR_VERSION_MINOR;
     const bool device = ctx.dev.ordinal >= 0;
     info.device = ctx.dev.ordinal;
-    info.capabilities = EG_CAP_HOST | EG_CAP_COND_IF_ELSE | EG_CAP_COND_SWITCH | (device ? EG_CAP_DEVICE : 0);
+    info.capabilities = EG_CAP_HOST | (device ? EG_CAP_DEVICE : 0);
+    if (!device || device_cond_arms_supported()) info.capabilities |= EG_CAP_COND_IF_ELSE | EG_CAP_COND_SWITCH;
     info.host_threads = host::team_threads(ctx);
     info.device_type = device ? kDLCUDA : 0;
     info.stream = device ? static_cast<std::int64_t>(ctx.dev.stream) : -1;

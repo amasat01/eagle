@@ -190,6 +190,15 @@ std::vector<std::uint64_t> capture_kernels(std::uint64_t stream, unsigned count)
 bool loop_set_kernel_args(DeviceLoop* loop, std::uint64_t node, const std::vector<void*>& args, std::int64_t base, std::int64_t count,
                           std::int64_t n);
 
+struct DevicePool;   ///< the streams and events a recording's conditionals and forks use, made before the capture opens (none can be made inside it)
+
+/** @brief Make @p streams streams and @p events events; free them with pool_free once the capture has ended. */
+DevicePool* pool_new(unsigned streams, unsigned events);
+void pool_free(DevicePool* pool) noexcept;
+
+/** @brief Whether @p pool still has @p streams streams and @p events events to hand out. */
+bool pool_has(const DevicePool* pool, unsigned streams, unsigned events);
+
 struct DeviceWeave;  ///< a conditional woven into the capture in progress: its arm streams and its nodes
 struct DeviceFork;   ///< parallel branches of the capture in progress: one stream each, joined back at the end
 
@@ -202,7 +211,7 @@ bool cond_arms_supported();
  * baseline), inverted when @p negate. A WHILE stops after @p cap iterations (0: no cap) and keeps
  * its state in the two device words @p loop_cells. Every arm is being captured on return; @p arms is the arm count.
  */
-DeviceWeave* cond_begin(std::uint64_t origin, int kind, const unsigned* cell, const unsigned* baseline, bool negate,
+DeviceWeave* cond_begin(DevicePool* pool, std::uint64_t origin, int kind, const unsigned* cell, const unsigned* baseline, bool negate,
                         unsigned arms, unsigned cap, unsigned* loop_cells);
 
 /** @brief The stream that captures arm @p arm of @p weave. */
@@ -214,8 +223,9 @@ void cond_end(DeviceWeave* weave);
 /** @brief Free @p weave, closing what is still open (NULL-safe, never throws). */
 void cond_drop(DeviceWeave* weave) noexcept;
 
-/** @brief Fork the capture on @p origin: branch 0 starts after everything recorded so far. */
-DeviceFork* fork_begin(std::uint64_t origin);
+/** @brief Fork the capture on @p origin: branch 0 starts after everything recorded so far. A fork takes an event, and each branch a
+ *  stream and an event; a wait one event; they come back to @p pool when the fork or conditional ends (the caller checks pool_has). */
+DeviceFork* fork_begin(DevicePool* pool, std::uint64_t origin);
 
 /** @brief Add a branch to @p fork, also starting after everything recorded before the fork; its stream. */
 std::uint64_t fork_branch(DeviceFork* fork);

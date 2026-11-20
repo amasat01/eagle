@@ -522,27 +522,64 @@ bool loop_set_kernel_args(DeviceLoop* loop, std::uint64_t node, const std::vecto
     return cudaGraphExecKernelNodeSetParams(loop->exec, at, &p) == cudaSuccess;
 }
 
-struct DeviceWeave {
-    std::unique_ptr<cuda::CaptureConditional> cond;
+struct DevicePool {
+    std::vector<std::unique_ptr<cuda::Stream>> streams;
+    std::vector<std::unique_ptr<cuda::Event>> events;
+    unsigned streams_taken = 0, events_taken = 0;
+    cudaStream_t stream() { return streams.at(streams_taken++)->cuda(); }
+    cudaEvent_t event() { return events.at(events_taken++)->cuda(); }
 };
 
+DevicePool* pool_new(unsigned streams, unsigned events) {
+    auto pool = std::make_unique<DevicePool>();
+    for (unsigned i = 0; i < streams; ++i) pool->streams.push_back(std::make_unique<cuda::Stream>(true));
+    for (unsigned i = 0; i < events; ++i) pool->events.push_back(std::make_unique<cuda::Event>(cudaEventDisableTiming));
+    return pool.release();
+}
+
+void pool_free(DevicePool* pool) noexcept { delete pool; }
+
+bool pool_has(const DevicePool* pool, unsigned streams, unsigned events) {
+    return pool->streams_taken + streams <= pool->streams.size() && pool->events_taken + events <= pool->events.size();
+}
+
+/** @brief A conditional: its eagle weave, and the pool streams it took (given back when it ends). */
+struct DeviceWeave {
+    std::unique_ptr<cuda::CaptureConditional> cond;
+    DevicePool* pool = nullptr;
+    unsigned streams_before = 0;
+    ~DeviceWeave() { if (pool != nullptr) pool->streams_taken = streams_before; }
+};
+
+/** @brief A fork: the pool streams and events it took (given back when it ends). */
 struct DeviceFork {
+    DevicePool* pool;
     cudaStream_t origin;
-    cuda::Event forked{ cudaEventDisableTiming };
-    std::vector<std::unique_ptr<cuda::Stream>> branches;
-    std::vector<std::unique_ptr<cuda::Event>> events;    ///< the waits' and the joins' events, alive until the capture ends
-    explicit DeviceFork(cudaStream_t o) : origin(o) {}
+    cudaEvent_t forked;
+    std::vector<cudaStream_t> branches;
+    std::vector<cudaEvent_t> joins;
+    unsigned streams_before, events_before;
+    DeviceFork(DevicePool* p, cudaStream_t o)
+        : pool(p), origin(o), forked(p->event()), streams_before(p->streams_taken), events_before(p->events_taken - 1) {}
+    ~DeviceFork() {
+        pool->streams_taken = streams_before;
+        pool->events_taken = events_before;
+    }
 };
 
 bool cond_arms_supported() { return cuda::conditionalArmsSupported(); }
 
-DeviceWeave* cond_begin(std::uint64_t origin, int kind, const unsigned* cell, const unsigned* baseline, bool negate,
+DeviceWeave* cond_begin(DevicePool* pool, std::uint64_t origin, int kind, const unsigned* cell, const unsigned* baseline, bool negate,
                         unsigned arms, unsigned cap, unsigned* loop_cells) {
     const auto stream = reinterpret_cast<cudaStream_t>(origin);
     auto weave = std::make_unique<DeviceWeave>();
+    weave->streams_before = pool->streams_taken;
+    std::vector<cudaStream_t> borrowed;
+    for (unsigned k = 0; k < arms; ++k) borrowed.push_back(pool->stream());
+    weave->pool = pool;
     const conditional::LoopTerms terms{ cap == 0 ? conditional::kLoopUncapped : cap, loop_cells };
     weave->cond = std::make_unique<cuda::CaptureConditional>(stream, static_cast<cuda::CondKind>(kind), CountGuard{ cell, baseline }, arms,
-                                                             negate ? 1u : 0u, terms);
+                                                             negate ? 1u : 0u, terms, borrowed);
     weave->cond->begin();
     return weave.release();
 }
@@ -558,36 +595,36 @@ void cond_end(DeviceWeave* weave) {
 
 void cond_drop(DeviceWeave* weave) noexcept { delete weave; }
 
-DeviceFork* fork_begin(std::uint64_t origin) {
-    auto fork = std::make_unique<DeviceFork>(reinterpret_cast<cudaStream_t>(origin));
-    EAGLE_CHECK_ALWAYS(cudaEventRecord(fork->forked.cuda(), fork->origin));
+DeviceFork* fork_begin(DevicePool* pool, std::uint64_t origin) {
+    auto fork = std::make_unique<DeviceFork>(pool, reinterpret_cast<cudaStream_t>(origin));
+    EAGLE_CHECK_ALWAYS(cudaEventRecord(fork->forked, fork->origin));
     fork_branch(fork.get());
     return fork.release();
 }
 
 std::uint64_t fork_branch(DeviceFork* fork) {
-    fork->branches.push_back(std::make_unique<cuda::Stream>(true));
-    const cudaStream_t s = fork->branches.back()->cuda();
-    EAGLE_CHECK_ALWAYS(cudaStreamWaitEvent(s, fork->forked.cuda(), 0));
+    const cudaStream_t s = fork->pool->stream();
+    fork->branches.push_back(s);
+    fork->joins.push_back(fork->pool->event());
+    EAGLE_CHECK_ALWAYS(cudaStreamWaitEvent(s, fork->forked, 0));
     return reinterpret_cast<std::uint64_t>(s);
 }
 
 std::uint64_t fork_stream(const DeviceFork* fork, unsigned branch) {
-    return reinterpret_cast<std::uint64_t>(fork->branches.at(branch)->cuda());
+    return reinterpret_cast<std::uint64_t>(fork->branches.at(branch));
 }
 
 void fork_wait(DeviceFork* fork, unsigned waiter, unsigned producer) {
-    fork->events.push_back(std::make_unique<cuda::Event>(cudaEventDisableTiming));
-    EAGLE_CHECK_ALWAYS(cudaEventRecord(fork->events.back()->cuda(), fork->branches.at(producer)->cuda()));
-    EAGLE_CHECK_ALWAYS(cudaStreamWaitEvent(fork->branches.at(waiter)->cuda(), fork->events.back()->cuda(), 0));
+    const cudaEvent_t done = fork->pool->event();
+    EAGLE_CHECK_ALWAYS(cudaEventRecord(done, fork->branches.at(producer)));
+    EAGLE_CHECK_ALWAYS(cudaStreamWaitEvent(fork->branches.at(waiter), done, 0));
 }
 
 void fork_end(DeviceFork* fork) {
     const std::unique_ptr<DeviceFork> owned(fork);
-    for (const auto& branch : owned->branches) {
-        owned->events.push_back(std::make_unique<cuda::Event>(cudaEventDisableTiming));
-        EAGLE_CHECK_ALWAYS(cudaEventRecord(owned->events.back()->cuda(), branch->cuda()));
-        EAGLE_CHECK_ALWAYS(cudaStreamWaitEvent(owned->origin, owned->events.back()->cuda(), 0));
+    for (std::size_t i = 0; i < owned->branches.size(); ++i) {
+        EAGLE_CHECK_ALWAYS(cudaEventRecord(owned->joins[i], owned->branches[i]));
+        EAGLE_CHECK_ALWAYS(cudaStreamWaitEvent(owned->origin, owned->joins[i], 0));
     }
 }
 

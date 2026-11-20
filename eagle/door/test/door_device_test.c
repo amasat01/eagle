@@ -1792,13 +1792,24 @@ static eg_status gb_cond(struct gb* g, int kind, uint32_t flags, int32_t arms, e
 /* One replay of the graph, then eg_sync: OK. */
 static int gb_replay(struct gb* g, eg_graph* gr) { return eg_graph_launch(g->ctx, gr) == EG_OK && eg_sync(g->ctx) == EG_OK; }
 
+/* A recording a failed row left open would fail every row after it: start over on a fresh context. */
+#define GB_SECTION_END()                                         \
+    do {                                                         \
+        if (failures != mark) {                                  \
+            gb_free(&g);                                         \
+            if (!gb_make(&g, dev_lib)) return;                   \
+            c = g.ctx, gr = NULL;                                \
+        }                                                        \
+        mark = failures;                                         \
+    } while (0)
+
 static void graph_builder_device(const char* dev_lib) {
     struct gb g;
     check(gb_make(&g, dev_lib), "graph builder: a device context, dprefix and its planes made");
     if (g.ctx == NULL || g.a == NULL || g.d == NULL) return;
     eg_ctx* c = g.ctx;
     eg_graph* gr = NULL;
-    int ok;
+    int ok, mark = failures;
 
     /* fork and join */
     gb_clear(&g);
@@ -1809,6 +1820,7 @@ static void graph_builder_device(const char* dev_lib) {
     check(ok && gb_holds(g.d1, 1) && gb_holds(g.d2, 1), "device fork/join: two branches writing disjoint planes replay to the add-order values");
     if (gr) eg_graph_free(c, gr);
     gr = NULL;
+    GB_SECTION_END();
 
     /* wait: its refusals, then a dependent branch ordered after the producer */
     gb_clear(&g);
@@ -1817,12 +1829,12 @@ static void graph_builder_device(const char* dev_lib) {
     eg_plane* w2[1] = { g.p2 };
     ok = eg_record_begin(c) == EG_OK && refused(eg_record_wait(c, 1, w1), EG_BAD_REQUEST, c, "outside a fork branch") &&
          eg_record_fork_begin(c) == EG_OK && refused(eg_record_fork_branch(c), EG_BAD_REQUEST, c, "empty") && eg_launch(c, g.a, NULL) == EG_OK &&
-         refused(eg_record_wait(c, 1, w1), EG_BAD_REQUEST, c, "no earlier branch writes") && eg_record_fork_branch(c) == EG_OK &&
+         refused(eg_record_wait(c, 1, w1), EG_BAD_REQUEST, c, "written by this branch") && eg_record_fork_branch(c) == EG_OK &&
          refused(eg_record_wait(c, 1, wx), EG_BAD_REQUEST, c, "no earlier branch writes") && eg_record_wait(c, 1, w1) == EG_OK &&
          eg_launch(c, g.c, NULL) == EG_OK && refused(eg_record_wait(c, 1, w2), EG_BAD_REQUEST, c, "written by this branch") &&
          eg_record_fork_end(c) == EG_OK && eg_record_end(c, NULL, &gr) == EG_OK;
     if (!ok) reason_has(c, "(the wait recording was refused)");
-    check(ok, "device wait: refused outside a branch, for an empty branch, for a plane no earlier branch writes and one this branch writes; accepted after its producer");
+    check(ok, "device wait: refused outside a branch, for an empty branch, for a plane this branch writes and one no earlier branch writes; accepted after its producer");
     for (int k = 0; ok && k < 3; ++k) ok = gb_replay(&g, gr);
     {
         double got[BN];
@@ -1836,6 +1848,7 @@ static void graph_builder_device(const char* dev_lib) {
     }
     if (gr) eg_graph_free(c, gr);
     gr = NULL;
+    GB_SECTION_END();
 
     /* conditionals over a lane of a flag array */
     gb_clear(&g);
@@ -1855,6 +1868,7 @@ static void graph_builder_device(const char* dev_lib) {
     check(ok && gb_holds(g.d1, 1), "device IF: lane 2 rewritten to 7, the arm runs again (the test is read at each replay)");
     if (gr) eg_graph_free(c, gr);
     gr = NULL;
+    GB_SECTION_END();
 
     gb_clear(&g);
     gb_flags(&g, 0, 0, 0);
@@ -1867,6 +1881,7 @@ static void graph_builder_device(const char* dev_lib) {
     check(ok && gb_holds(g.d1, 0), "device negated IF: lane 2 is 3, the arm does not run");
     if (gr) eg_graph_free(c, gr);
     gr = NULL;
+    GB_SECTION_END();
 
     /* a count against a baseline: equal skips the arm, different runs it; negated, the other way */
     for (int negate = 0; negate < 2; ++negate) {
@@ -1883,6 +1898,7 @@ static void graph_builder_device(const char* dev_lib) {
               negate ? "device negated count/baseline test: equal runs the arm, different skips it" : "device count/baseline test: equal skips the arm, different runs it");
         if (gr) eg_graph_free(c, gr);
         gr = NULL;
+        GB_SECTION_END();
     }
 
     /* IF_ELSE: by the capability, refused by name without it */
@@ -1903,6 +1919,8 @@ static void graph_builder_device(const char* dev_lib) {
         gr = NULL;
     }
 
+    GB_SECTION_END();
+
     /* WHILE: the test never changes, so only max_iters ends it; a test that is false runs nothing */
     gb_clear(&g);
     gb_flags(&g, 0, 0, 1);
@@ -1915,6 +1933,7 @@ static void graph_builder_device(const char* dev_lib) {
     check(ok && gb_holds(g.d1, 0), "device WHILE with a false test runs no iteration");
     if (gr) eg_graph_free(c, gr);
     gr = NULL;
+    GB_SECTION_END();
 
     /* refusals of a conditional (nothing is opened by them), then a fork inside an arm, a conditional inside a branch */
     gb_clear(&g);
