@@ -10,6 +10,8 @@
  * Usage: door_test <fixture> <fixture: wrong size> <fixture: no size block> <fixture: v1 tag>
  */
 #define _POSIX_C_SOURCE 200809L
+/* macOS hides dlopen's RTLD_NOLOAD under a strict POSIX request unless its own extensions are asked for too */
+#define _DARWIN_C_SOURCE
 
 #include "eagle/door/eg_door.h"
 #include "plugin/dlpack.h"
