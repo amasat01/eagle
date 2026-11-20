@@ -114,10 +114,10 @@ void restore(ActiveState& a, const std::vector<Owned>& owned) {
 }
 
 /** @brief The loop of an active set (``_host_loop.py``, the fixed-steps branch): per iteration up to
- *  ``every_launches`` launches over the live prefix, then a compaction when the finished count moved
+ *  ``every_launches`` launches (the step graph, then the plans over the live prefix), then a compaction when the finished count moved
  *  since the last one, then the reorder when the compaction fired it; the planes land back in sample
  *  order at the end. Counts iterations, compactions and reorders of this run. */
-void run_active(eg_runner_s& runner, int threads, std::int64_t& iterations, std::int64_t& compactions,
+void run_active(eg_ctx& ctx, eg_runner_s& runner, int threads, std::int64_t& iterations, std::int64_t& compactions,
                 std::int64_t& reorders) {
     ActiveState& a = runner.act;
     eg_plan_s& first = *runner.plans[0];
@@ -130,6 +130,7 @@ void run_active(eg_runner_s& runner, int threads, std::int64_t& iterations, std:
         for (std::int64_t l = 0; l < a.every_launches; ++l) {
             const std::int64_t live = a.count;
             if (live <= 0 || static_cast<std::int64_t>(first.finished) == n) break;
+            if (runner.step_graph != nullptr) graph_launch(ctx, runner.step_graph);
             for (const eg_plan_s* p : runner.plans) host::run_prefix(*p, threads, live);
         }
         if (first.finished != a.done_at_last) {
@@ -260,6 +261,7 @@ void runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out) {
     try {
         runner->plans.assign(d.plans, d.plans + d.n_plans);
         runner->max_steps = d.max_steps;
+        runner->step_graph = d.step_graph;
         if (active) {
             const std::int64_t k = launch_steps(d.plans[0]->unit->finish, static_cast<std::size_t>(d.n_plans)), n = d.plans[0]->n_samples;
             ActiveState& a = runner->act;
@@ -420,10 +422,11 @@ void run_loop(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
     if (automatic) {
         run_auto(*runner, threads, launches, compactions, reorders, aut);
     } else if (runner->active) {
-        run_active(*runner, threads, launches, compactions, reorders);
+        run_active(ctx, *runner, threads, launches, compactions, reorders);
     } else {
         const std::int64_t cap = runner->max_steps / k + (runner->max_steps % k != 0);
         while (launches < cap && static_cast<std::int64_t>(first.finished) != n) {
+            if (runner->step_graph != nullptr) graph_launch(ctx, runner->step_graph);
             for (const eg_plan_s* p : runner->plans) host::run_plan(*p, threads);
             ++launches;
         }

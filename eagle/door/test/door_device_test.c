@@ -1362,6 +1362,194 @@ static void reset_device(eg_ctx* ctx, const char* dev_lib) {
     eg_unit_free(ctx, active);
 }
 
+/* ---- step graphs on a device runner -------------------------------------- */
+
+/* The runner's own planes (k, limit, mask) and the step work's: a second count plan (k2, limit2, mask2) and a copy of k (kc).
+ * The step work is "copy k into kc, launch the second count plan" (the launch inside an IF on `cell` when conditional). */
+struct dsteps {
+    double *dk, *dl, *dk2, *dl2, *dkc;
+    unsigned char *dm, *dm2;
+    int32_t* dcell;
+    struct tensor t[8];
+    eg_plane* pl[8];
+    eg_plan *p1, *p2;
+    double k[DN], k2[DN], kc[DN];
+};
+
+static eg_status dsteps_new(eg_ctx* ctx, eg_unit* unit, eg_unit* plain, int32_t flag, struct dsteps* q) {
+    static double limit[DN];
+    static unsigned char mask[DN], zero[DN];
+    memset(q, 0, sizeof(*q));
+    memset(zero, 0, sizeof(zero));
+    for (int i = 0; i < DN; ++i) limit[i] = (double)(1 + (i * 37) % 50), mask[i] = i % 97 == 0;
+    void** d[7] = { (void**)&q->dk, (void**)&q->dl, (void**)&q->dk2, (void**)&q->dl2, (void**)&q->dkc, (void**)&q->dm, (void**)&q->dm2 };
+    const size_t bytes[7] = { sizeof(limit), sizeof(limit), sizeof(limit), sizeof(limit), sizeof(limit), DN, DN };
+    for (int i = 0; i < 7; ++i) cudaMalloc(d[i], bytes[i]), cudaMemset(*d[i], 0, bytes[i]);
+    cudaMalloc((void**)&q->dcell, sizeof(int32_t));
+    cudaMemcpy(q->dl, limit, sizeof(limit), cudaMemcpyHostToDevice);
+    cudaMemcpy(q->dl2, limit, sizeof(limit), cudaMemcpyHostToDevice);
+    cudaMemcpy(q->dm, mask, DN, cudaMemcpyHostToDevice);
+    cudaMemcpy(q->dcell, &flag, sizeof(flag), cudaMemcpyHostToDevice);
+    q->pl[0] = wrap(ctx, &q->t[0], q->dk, 1, DN, 0, 1, 0);
+    q->pl[1] = wrap(ctx, &q->t[1], q->dl, 1, DN, 0, 1, 0);
+    q->pl[2] = wrap_device_typed(ctx, &q->t[2], q->dm, DN, kDLBool, 8);
+    q->pl[3] = wrap(ctx, &q->t[3], q->dk2, 1, DN, 0, 1, 0);
+    q->pl[4] = wrap(ctx, &q->t[4], q->dl2, 1, DN, 0, 1, 0);
+    q->pl[5] = wrap_device_typed(ctx, &q->t[5], q->dm2, DN, kDLBool, 8);
+    q->pl[6] = wrap(ctx, &q->t[6], q->dkc, 1, DN, 0, 1, 0);
+    q->pl[7] = wrap_device_typed(ctx, &q->t[7], q->dcell, 1, kDLInt, 32);
+    for (int i = 0; i < 8; ++i)
+        if (q->pl[i] == NULL) return EG_FAULT;
+    const int32_t slots[3] = { 0, 1, 2 };
+    eg_plane* first[3] = { q->pl[0], q->pl[1], q->pl[2] };
+    eg_plane* second[3] = { q->pl[3], q->pl[4], q->pl[5] };
+    eg_status s = plan_n(ctx, unit, EG_STRUCTURE_DEVICE, DN, 0, NULL, NULL, &q->p1);
+    if (s == EG_OK) s = bind_planes(ctx, q->p1, 3, slots, first);
+    if (s == EG_OK) s = plan_n(ctx, plain, EG_STRUCTURE_DEVICE, DN, 0, NULL, NULL, &q->p2);
+    if (s == EG_OK) s = bind_planes(ctx, q->p2, 3, slots, second);
+    return s;
+}
+
+static void dsteps_free(eg_ctx* ctx, struct dsteps* q) {
+    eg_plan_free(ctx, q->p1);
+    eg_plan_free(ctx, q->p2);
+    for (int i = 0; i < 8; ++i) eg_plane_free(ctx, q->pl[i]);
+    cudaFree(q->dk), cudaFree(q->dl), cudaFree(q->dk2), cudaFree(q->dl2), cudaFree(q->dkc), cudaFree(q->dm), cudaFree(q->dm2),
+        cudaFree(q->dcell);
+}
+
+static eg_graph* dsteps_record(eg_ctx* ctx, struct dsteps* q, int conditional) {
+    eg_graph* g = NULL;
+    int ok = eg_record_begin(ctx) == EG_OK && eg_copy(ctx, q->pl[0], q->pl[6]) == EG_OK;
+    if (ok && conditional) {
+        struct eg_cond_desc d;
+        memset(&d, 0, sizeof(d));
+        d.struct_size = sizeof(d);
+        d.kind = EG_COND_IF;
+        d.cell = q->pl[7];
+        ok = eg_record_cond_begin(ctx, &d) == EG_OK && eg_launch(ctx, q->p2, NULL) == EG_OK && eg_record_cond_end(ctx) == EG_OK;
+    } else if (ok) {
+        ok = eg_launch(ctx, q->p2, NULL) == EG_OK;
+    }
+    return ok && eg_record_end(ctx, NULL, &g) == EG_OK ? g : NULL;
+}
+
+/* One batch: the step work as a step graph of a runner over `unit` (graphed), or as calls ahead of the count launch for
+ * `plain_steps` steps (unit is then dcount1). Returns whether every call succeeded; k, k2 and kc are read back into q. */
+static int dsteps_case(eg_ctx* ctx, eg_unit* unit, eg_unit* plain, int64_t every, int conditional, int32_t flag, int graphed,
+                       int64_t plain_steps, struct dsteps* q) {
+    eg_status s = dsteps_new(ctx, unit, plain, flag, q);
+    if (s == EG_OK && graphed) {
+        eg_graph* g = dsteps_record(ctx, q, conditional);
+        eg_runner* r = NULL;
+        struct eg_runner_desc d;
+        memset(&d, 0, sizeof(d));
+        d.struct_size = sizeof(d);
+        d.n_plans = 1;
+        d.plans = &q->p1;
+        d.max_steps = 1000;
+        d.every = every;
+        d.step_graph = g;
+        struct eg_run_report rep;
+        memset(&rep, 0, sizeof(rep));
+        rep.struct_size = sizeof(rep);
+        s = g ? eg_runner_new(ctx, &d, &r) : EG_FAULT;
+        if (s == EG_OK) s = eg_run(ctx, r, &rep);
+        if (s == EG_OK) s = eg_sync(ctx);
+        if (s == EG_OK) s = eg_runner_free(ctx, r);
+        if (s == EG_OK) s = eg_graph_free(ctx, g);
+    } else if (s == EG_OK) {
+        for (int64_t st = 0; s == EG_OK && st < plain_steps; ++st) {
+            s = eg_copy(ctx, q->pl[0], q->pl[6]);
+            if (s == EG_OK && (!conditional || flag != 0)) s = eg_launch(ctx, q->p2, NULL);
+            if (s == EG_OK) s = eg_launch(ctx, q->p1, NULL);
+        }
+        if (s == EG_OK) s = eg_sync(ctx);
+    }
+    if (s != EG_OK) printf("      step graph case failed with status %d\n", (int)s), reason_has(ctx, "\1");
+    cudaMemcpy(q->k, q->dk, sizeof(q->k), cudaMemcpyDeviceToHost);
+    cudaMemcpy(q->k2, q->dk2, sizeof(q->k2), cudaMemcpyDeviceToHost);
+    cudaMemcpy(q->kc, q->dkc, sizeof(q->kc), cudaMemcpyDeviceToHost);
+    return s == EG_OK;
+}
+
+static void step_graph_device(eg_ctx* ctx, const char* dev_lib) {
+    eg_unit *plain = NULL, *active = NULL;
+    if (load(ctx, dev_lib, "dcount1", 0xD9, &plain) != EG_OK || load(ctx, dev_lib, "dcount1a", 0xDA, &active) != EG_OK) {
+        check(0, "step graph: dcount1 and dcount1a loaded");
+        return;
+    }
+    static struct dsteps g, p;
+    static double want_k2[DN], want_kc[DN];
+    const int64_t need = 50;    /* the longest limit among the live samples: steps the batch takes */
+    for (int i = 0; i < DN; ++i) {
+        const double limit = (double)(1 + (i * 37) % 50);
+        want_k2[i] = limit;     /* the second count plan counts up to its limit, one a step */
+        want_kc[i] = i % 97 == 0 ? 0.0 : (limit < (double)(need - 1) ? limit : (double)(need - 1));    /* k before the last step */
+    }
+    const struct { int64_t every; double theta; int conditional; int32_t flag; const char* what; } rows[] = {
+        { 0, 0.0, 0, 1, "a device step graph of a copy and a launch runs once per step inside the captured loop: bitwise the plain loop, and the closed form" },
+    };
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); ++i) {
+        const int on = rows[i].flag != 0;
+        int ok = dsteps_case(ctx, plain, plain, rows[i].every, rows[i].conditional, rows[i].flag, 1, 0, &g) &&
+                 dsteps_case(ctx, plain, plain, rows[i].every, rows[i].conditional, rows[i].flag, 0, on ? need : need, &p);
+        ok = ok && memcmp(g.k, p.k, sizeof(g.k)) == 0 && memcmp(g.k2, p.k2, sizeof(g.k2)) == 0 && memcmp(g.kc, p.kc, sizeof(g.kc)) == 0;
+        if (on) ok = ok && memcmp(g.k2, want_k2, sizeof(g.k2)) == 0 && memcmp(g.kc, want_kc, sizeof(g.kc)) == 0;
+        else for (int j = 0; ok && j < DN; ++j) ok = g.k2[j] == 0.0;
+        check(ok, rows[i].what);
+        dsteps_free(ctx, &g);
+        dsteps_free(ctx, &p);
+    }
+    {   /* a conditional: refused by name, nothing left held */
+        eg_status s = dsteps_new(ctx, plain, plain, 1, &g);
+        eg_graph* graph = s == EG_OK ? dsteps_record(ctx, &g, 1) : NULL;
+        eg_runner* r = NULL;
+        struct eg_runner_desc d;
+        memset(&d, 0, sizeof(d));
+        d.struct_size = sizeof(d);
+        d.n_plans = 1;
+        d.plans = &g.p1;
+        d.max_steps = 1000;
+        d.step_graph = graph;
+        check(graph != NULL && refused(eg_runner_new(ctx, &d, &r), EG_NOT_WRITTEN, ctx, "a conditional inside a device step graph") && r == NULL &&
+                  eg_graph_free(ctx, graph) == EG_OK,
+              "a device step graph holding a conditional refused NOT_WRITTEN by name (the host takes it)");
+        dsteps_free(ctx, &g);
+    }
+    {   /* an active set (every 4, a reorder): the graph runs ahead of each launch */
+        int ok = dsteps_case(ctx, active, plain, 4, 0, 1, 1, 0, &g) && dsteps_case(ctx, plain, plain, 0, 0, 1, 0, 52, &p);
+        /* the captured loop runs whole intervals of 4 launches: 13 of them to finish at step 50, so 52 steps with the graph each */
+        ok = ok && memcmp(g.k, p.k, sizeof(g.k)) == 0 && memcmp(g.k2, p.k2, sizeof(g.k2)) == 0 && memcmp(g.kc, p.kc, sizeof(g.kc)) == 0;
+        check(ok, "a device step graph on a runner with an active set (every 4): bitwise the plain loop of the 52 steps of its 13 whole intervals");
+        dsteps_free(ctx, &g);
+        dsteps_free(ctx, &p);
+    }
+    {   /* refusals */
+        eg_status s = dsteps_new(ctx, active, plain, 1, &g);
+        eg_graph* graph = s == EG_OK ? dsteps_record(ctx, &g, 0) : NULL;
+        eg_runner* r = NULL;
+        struct eg_runner_desc d;
+        memset(&d, 0, sizeof(d));
+        d.struct_size = sizeof(d);
+        d.n_plans = 1;
+        d.plans = &g.p1;
+        d.max_steps = 1000;
+        d.flags = EG_RUN_REORDER;
+        d.reorder_theta = 0.5;
+        d.step_graph = graph;
+        int ok = graph != NULL && refused(eg_runner_new(ctx, &d, &r), EG_BAD_REQUEST, ctx, "only the step_graph touches") && r == NULL;
+        d.flags = 0;
+        d.reorder_theta = 0;
+        ok = ok && eg_runner_new(ctx, &d, &r) == EG_OK && refused(eg_graph_free(ctx, graph), EG_BAD_REQUEST, ctx, "free the runner first");
+        ok = ok && eg_runner_free(ctx, r) == EG_OK && eg_graph_free(ctx, graph) == EG_OK;
+        check(ok, "a device step graph: reorder refused for a per-sample plane only the graph touches, the graph held by its runner, by name");
+        dsteps_free(ctx, &g);
+    }
+    eg_unit_free(ctx, plain);
+    eg_unit_free(ctx, active);
+}
+
 /* A device plane of @p n elements of the given DLPack type, wrapped; @p real_n of them are allocated and zeroed (a refusal
  * row never reads the plane, so it may name a length it does not own). */
 static eg_plane* zero_plane(eg_ctx* ctx, struct tensor* t, int64_t n, size_t real_n, int code, int bits, void** dev) {
@@ -2266,6 +2454,7 @@ int main(int argc, char** argv) {
     host_steps_in_graph(ctx, dev_lib, host_lib);
     cell_rows_device(ctx, dev_lib);
     reset_device(ctx, dev_lib);
+    step_graph_device(ctx, dev_lib);
     check_segmented_device(ctx, dev_lib);
     check_auto_device(ctx, dev_lib);
     fast_entries(ctx, dev_lib);

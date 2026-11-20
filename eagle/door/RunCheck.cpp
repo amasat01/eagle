@@ -3,11 +3,13 @@
 // What a host and a DEVICE runner check alike: the runner description, the
 // step's plans, and the report eg_run fills.
 #include "eagle/door/Context.h"
+#include "eagle/door/device/Seam.h"
 #include "eagle/door/eg_unit_meta.h"
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <set>
 #include <tuple>
 
 namespace eagle {
@@ -16,7 +18,7 @@ namespace door {
 namespace {
 
 /** @brief Refuse what this build of the runner does not run, by name. */
-void check_desc(const eg_runner_desc& d, bool device) {
+void check_desc(const eg_runner_desc& d) {
     if (d.flags & ~(EG_RUN_RECORD | EG_RUN_REORDER))
         refuse(EG_BAD_REQUEST, "eg_runner_desc.flags: unknown bits " + std::to_string(d.flags));
     const bool record = (d.flags & EG_RUN_RECORD) != 0;
@@ -35,12 +37,6 @@ void check_desc(const eg_runner_desc& d, bool device) {
                "written in this build of the door");
     if (record && (d.n_derived == 0 || d.derived_roles == nullptr || d.derived_units == nullptr))
         refuse(EG_BAD_REQUEST, "EG_RUN_RECORD needs its derived units: n_derived, derived_roles and derived_units");
-    if (d.step_graph != nullptr) {
-        if (device)
-            refuse(EG_NOT_WRITTEN, "step_graph (recorded device work run once per step) is not written in this build "
-                   "of the door");
-        refuse(EG_BAD_REQUEST, "step_graph: a host runner runs no recorded device work per step; pass NULL");
-    }
     if (!record && (d.window != 0 || d.memory_budget != 0))
         refuse(EG_BAD_REQUEST, "window and memory_budget set how a recorded run is reversed: without "
                "EG_RUN_RECORD both are 0");
@@ -140,6 +136,47 @@ void resolve_steps_reverse(const eg_ctx& ctx, eg_runner_desc& d, bool device, Ke
     d.derived_units = kept.units.data();
 }
 
+/** @brief Refuse a step_graph the runner cannot run once per step, by name: a graph of another context or side, one holding a run, a
+ *  tape or a host node, a unit that advances more or fewer than one step per launch, a recorded or refined run, and (with
+ *  EG_RUN_REORDER) a per-sample plane that only the graph touches, which the reorder would leave in sample order while the plans' move. */
+void check_step_graph(eg_ctx& ctx, const eg_runner_desc& d, bool device) {
+    eg_graph_s* graph = d.step_graph;
+    const bool on_device = ctx.dev_graphs.count(reinterpret_cast<DeviceGraph*>(graph)) != 0;
+    if (!on_device && ctx.graphs.count(graph) == 0)
+        refuse(EG_BAD_REQUEST, "step_graph: not a graph recorded on this context");
+    if (on_device != device)
+        refuse(EG_BAD_REQUEST, std::string("step_graph: a ") + (on_device ? "device" : "host") + " graph in a " +
+               (device ? "device" : "host") + " runner; a runner runs graphs recorded on its own side");
+    if ((d.flags & EG_RUN_RECORD) || d.events == EG_EVENTS_REFINE)
+        refuse(EG_NOT_WRITTEN, "step_graph in a recorded or refined run: reversing the per-step graph is not written in this build "
+               "of the door");
+    const std::int64_t k = launch_steps(d.plans[0]->unit->finish, static_cast<std::size_t>(d.n_plans));
+    if (k != 1)
+        refuse(EG_BAD_REQUEST, "step_graph: the graph runs once per step, so the plans must advance one step per launch (unit '" +
+               d.plans[0]->unit->name + "' advances " + (k == EG_STEPS_AUTO ? "an automatic count of" : std::to_string(k)) + " steps)");
+    eg_graph_description desc{};
+    desc.struct_size = sizeof(desc);
+    if (on_device) device_graph_describe(ctx, graph, &desc);
+    else graph_describe(ctx, graph, &desc);
+    if ((desc.flags & EG_RECORD_DIFF) != 0)
+        refuse(EG_BAD_REQUEST, "step_graph: a graph ended with EG_RECORD_DIFF carries a tape per launch; record the step graph without it");
+    std::set<const eg_plane_s*> bound;
+    for (int i = 0; i < d.n_plans; ++i)
+        for (const eg_plan_s::Binding& b : d.plans[i]->bindings) bound.insert(b.plane);
+    for (int i = 0; i < desc.n_nodes; ++i) {
+        const eg_graph_node& n = *reinterpret_cast<const eg_graph_node*>(reinterpret_cast<const char*>(desc.nodes) + static_cast<std::size_t>(i) * desc.node_size);
+        if (n.kind == EG_GNODE_RUN) refuse(EG_BAD_REQUEST, "step_graph: a graph that runs a runner cannot be a step: a run is not per-step work");
+        if (on_device && n.kind == EG_GNODE_COND)
+            refuse(EG_NOT_WRITTEN, "step_graph: a conditional inside a device step graph is not written in this build of the door (the driver "
+                   "refuses a conditional node in the child graph of the loop's own conditional body)");
+        if ((d.flags & EG_RUN_REORDER) == 0) continue;
+        for (int j = 0; j < n.n_planes; ++j)
+            if (bound.count(reinterpret_cast<const eg_plane_s*>(n.planes[j])) == 0 && elements(reinterpret_cast<const eg_plane_s*>(n.planes[j])->tensor->dl_tensor) >= d.plans[0]->n_samples)
+                refuse(EG_BAD_REQUEST, "EG_RUN_REORDER cannot move a per-sample plane only the step_graph touches (node " + std::to_string(i) +
+                       ", plane " + std::to_string(j) + "): drop EG_RUN_REORDER or bind the plane to a plan of the runner");
+    }
+}
+
 constexpr std::int64_t kMinEvery = 4;            ///< the fewest steps between two compactions
 constexpr std::int64_t kDefaultEvery = 16;       ///< the cadence when ``every`` is 0, rounded up to whole launches
 constexpr double kThetaLow = 0.25, kThetaHigh = 0.75;
@@ -148,10 +185,18 @@ constexpr double kThetaLow = 0.25, kThetaHigh = 0.75;
 
 /** @brief eg_runner_new's checks of @p d both runners share (@p device: a DEVICE runner); steps_reverse AUTO is
  *  resolved in @p d (@p kept holds a derived set it had to shorten). */
-void check_runner(const eg_ctx& ctx, eg_runner_desc& d, bool device, KeptDerived& kept) {
-    check_desc(d, device);
+void check_runner(eg_ctx& ctx, eg_runner_desc& d, bool device, KeptDerived& kept) {
+    check_desc(d);
     check_plans(ctx, d);
+    if (d.step_graph != nullptr) check_step_graph(ctx, d, device);
     resolve_steps_reverse(ctx, d, device, kept);
+}
+
+/** @brief Refuse freeing @p graph while a runner of @p ctx holds it as its step_graph. */
+void check_graph_unheld(const eg_ctx& ctx, const eg_graph_s* graph) {
+    for (const eg_runner_s* r : ctx.runners)
+        if (r->step_graph == graph)
+            refuse(EG_BAD_REQUEST, "eg_graph_free: the graph is the step_graph of a runner; free the runner first");
 }
 
 /** @brief The active set the plans read, or none: all of them or none must read one. */

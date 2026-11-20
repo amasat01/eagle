@@ -40,6 +40,10 @@ DeviceLoop* loop_capture(std::uint64_t stream, const unsigned* finished, const u
 /** @brief Queue one launch of @p loop on @p stream. */
 void loop_launch(DeviceLoop* loop, std::uint64_t stream);
 
+/** @brief Insert @p loop's graph as one child node at the tip of the capture of the loop body on @p stream (a graph cannot be launched into a
+ *  capture); the capture continues after it. The captured copy keeps the arguments @p loop has now. */
+void loop_embed(DeviceLoop* loop, std::uint64_t stream);
+
 /** @brief Page-locked host memory of @p bytes; freed by host_pinned_free. */
 void* host_pinned_new(std::size_t bytes);
 

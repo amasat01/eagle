@@ -1070,6 +1070,173 @@ static eg_graph* record_copy_cond(eg_ctx* ctx, eg_cond_kind kind, int32_t n_arms
     return ok ? g : NULL;
 }
 
+/* ---- step graphs: per-step work of a runner ------------------------------ */
+
+/* The per-step work y <- a*y + b on the host: copy y into x, then launch axpb (y = a*x + b). A step graph holds these two
+ * calls (the launch inside an IF when `conditional`); the plain loop writes them as calls ahead of the count launch. */
+struct step_work {
+    eg_plan *pa, *pc;
+    eg_plane *px, *py, *pcell;
+    int32_t flag;
+    int conditional;
+};
+
+static void step_work_plain(eg_ctx* ctx, const struct step_work* w, int64_t steps) {
+    for (int64_t s = 0; s < steps; ++s) {
+        eg_copy(ctx, w->py, w->px);
+        if (!w->conditional || w->flag != 0) eg_launch(ctx, w->pa, NULL);
+        eg_launch(ctx, w->pc, NULL);
+    }
+}
+
+static eg_graph* step_work_record(eg_ctx* ctx, const struct step_work* w) {
+    eg_graph* g = NULL;
+    int ok = eg_record_begin(ctx) == EG_OK && eg_copy(ctx, w->py, w->px) == EG_OK;
+    if (ok && w->conditional) {
+        struct eg_cond_desc d;
+        memset(&d, 0, sizeof(d));
+        d.struct_size = sizeof(d);
+        d.kind = EG_COND_IF;
+        d.cell = w->pcell;
+        ok = eg_record_cond_begin(ctx, &d) == EG_OK && eg_launch(ctx, w->pa, NULL) == EG_OK && eg_record_cond_end(ctx) == EG_OK;
+    } else if (ok) {
+        ok = eg_launch(ctx, w->pa, NULL) == EG_OK;
+    }
+    return ok && eg_record_end(ctx, NULL, &g) == EG_OK ? g : NULL;
+}
+
+/* One batch of the count unit `cu` with the step work attached as the runner's step graph (graphed: `every` and `flags` as
+ * the runner's), or written into a plain loop of `plain_steps` steps over count1's plan (`cu` is then count1). Fills y and k
+ * and the runner's launch count; `ran` is 0 when a call failed. */
+static void step_graph_case(eg_ctx* ctx, eg_unit* axpb, eg_unit* cu, eg_structure structure, int32_t threads, int conditional,
+                            int32_t flag, int graphed, int64_t every, int64_t plain_steps, double* y_out, double* k_out,
+                            int64_t* launches, int* ran) {
+    static double k[RN], limit[RN], x[RN], y[RN];
+    static unsigned char mask[RN];
+    struct tensor t[3], tx, ty, tc;
+    const double a = 1.0009765625, b = 0.5;
+    count_inputs(k, limit, mask);
+    for (int64_t i = 0; i < RN; ++i) x[i] = 0.0, y[i] = 1.0 + (double)(i % 7) * 0.125;
+    eg_host_threads(ctx, threads);
+    struct step_work w;
+    memset(&w, 0, sizeof(w));
+    w.flag = flag;
+    w.conditional = conditional;
+    w.px = wrap(ctx, &tx, x, RN, kDLFloat, 64);
+    w.py = wrap(ctx, &ty, y, RN, kDLFloat, 64);
+    w.pcell = cell_at(ctx, &tc, &w.flag);
+    w.pc = count_plan(ctx, cu, structure, k, limit, mask, t);
+    eg_status s = w.px && w.py && w.pcell && w.pc ? plan(ctx, axpb, structure, RN, 0, NULL, NULL, &w.pa) : EG_FAULT;
+    if (s == EG_OK) s = bind(ctx, w.pa, w.py, w.px, &a, &b);
+    *launches = plain_steps;
+    if (s == EG_OK && graphed) {
+        eg_graph* g = step_work_record(ctx, &w);
+        eg_runner* r = NULL;
+        struct eg_runner_desc d = runner_desc(&w.pc, 1, 1000);
+        d.every = every;
+        d.step_graph = g;
+        s = g ? eg_runner_new(ctx, &d, &r) : EG_FAULT;
+        struct eg_run_report rep;
+        memset(&rep, 0, sizeof(rep));
+        rep.struct_size = sizeof(rep);
+        if (s == EG_OK) s = eg_run(ctx, r, &rep);
+        *launches = rep.launches;
+        if (s == EG_OK) s = eg_runner_free(ctx, r);
+        if (s == EG_OK) s = eg_graph_free(ctx, g);
+    } else if (s == EG_OK) {
+        step_work_plain(ctx, &w, plain_steps);
+    }
+    *ran = s == EG_OK;
+    memcpy(y_out, y, sizeof(y));
+    memcpy(k_out, k, sizeof(k));
+    eg_plan_free(ctx, w.pa);
+    eg_plan_free(ctx, w.pc);
+    eg_plane_free(ctx, w.px);
+    eg_plane_free(ctx, w.py);
+    eg_plane_free(ctx, w.pcell);
+}
+
+static void check_step_graph(eg_ctx* ctx, eg_unit* axpb) {
+    eg_unit *c1 = NULL, *a1 = NULL;
+    if (load(ctx, "count1", 0xD1, &c1) != EG_OK || load(ctx, "count1a", 0xE1, &a1) != EG_OK) {
+        check(0, "step graph: count1 and count1a loaded");
+        return;
+    }
+    static double yg[RN], kg[RN], yp[RN], kp[RN], k0[RN], l0[RN], y0[RN], want_k[RN];
+    static unsigned char m0[RN];
+    count_inputs(k0, l0, m0);
+    for (int64_t i = 0; i < RN; ++i) y0[i] = 1.0 + (double)(i % 7) * 0.125;
+    int64_t want_launches = 0, want_finished = 0;
+    count_oracle(l0, m0, 1, 1000, want_k, &want_launches, &want_finished);
+    const eg_structure structures[2] = { EG_STRUCTURE_HOST_SERIAL, EG_STRUCTURE_HOST_TEAM };
+    const int32_t threads[2] = { 1, 3 };
+    for (int si = 0; si < 2; ++si) {
+        int64_t launches = 0, ignore = 0;
+        int ran_g = 0, ran_p = 0;
+        step_graph_case(ctx, axpb, c1, structures[si], threads[si], 0, 1, 1, 0, 0, yg, kg, &launches, &ran_g);
+        step_graph_case(ctx, axpb, c1, structures[si], threads[si], 0, 1, 0, 0, launches, yp, kp, &ignore, &ran_p);
+        check(ran_g && ran_p && launches == want_launches && memcmp(yg, yp, sizeof(yg)) == 0 && memcmp(kg, kp, sizeof(kg)) == 0 &&
+                  memcmp(kg, want_k, sizeof(kg)) == 0 && memcmp(yg, y0, sizeof(yg)) != 0,
+              "a step graph of a copy and a launch runs once per step: y and k equal the plain loop with the same work, bitwise");
+        step_graph_case(ctx, axpb, c1, structures[si], threads[si], 1, 1, 1, 0, 0, yg, kg, &launches, &ran_g);
+        step_graph_case(ctx, axpb, c1, structures[si], threads[si], 1, 1, 0, 0, launches, yp, kp, &ignore, &ran_p);
+        check(ran_g && ran_p && memcmp(yg, yp, sizeof(yg)) == 0 && memcmp(yg, y0, sizeof(yg)) != 0,
+              "a step graph with a conditional whose cell is set: bitwise the plain loop that takes the arm");
+        step_graph_case(ctx, axpb, c1, structures[si], threads[si], 1, 0, 1, 0, 0, yg, kg, &launches, &ran_g);
+        check(ran_g && launches == want_launches && memcmp(yg, y0, sizeof(yg)) == 0 && memcmp(kg, want_k, sizeof(kg)) == 0,
+              "a step graph whose conditional cell is clear leaves y untouched and the plans' k as the closed form");
+    }
+    {   /* an active set: the graph runs ahead of each launch, so as often as the plain loop steps */
+        int64_t launches = 0;
+        int ran_g = 0;
+        step_graph_case(ctx, axpb, a1, EG_STRUCTURE_HOST_TEAM, 3, 0, 1, 1, 4, 0, yg, kg, &launches, &ran_g);
+        step_graph_case(ctx, axpb, c1, EG_STRUCTURE_HOST_TEAM, 3, 0, 1, 0, 0, want_launches, yp, kp, &launches, &ran_g);
+        check(ran_g && memcmp(yg, yp, sizeof(yg)) == 0 && memcmp(kg, kp, sizeof(kg)) == 0,
+              "a step graph on a runner with an active set (every 4) runs once per step: bitwise the plain loop");
+    }
+    {   /* refusals, each by name */
+        static double k[RN], limit[RN], x[RN], y[RN];
+        static unsigned char mask[RN];
+        struct tensor t[3], t3[3], tx, ty;
+        const double a = 2.0, b = 1.0;
+        count_inputs(k, limit, mask);
+        eg_unit* c3 = NULL;
+        load(ctx, "count3", 0xD3, &c3);
+        eg_plane* px = wrap(ctx, &tx, x, RN, kDLFloat, 64);
+        eg_plane* py = wrap(ctx, &ty, y, RN, kDLFloat, 64);
+        eg_plan* pa = NULL;
+        eg_plan* pc = count_plan(ctx, c1, EG_STRUCTURE_HOST_TEAM, k, limit, mask, t);
+        eg_plan* pa1 = count_plan(ctx, a1, EG_STRUCTURE_HOST_TEAM, k, limit, mask, t3);
+        eg_plan* p3 = c3 ? count_plan(ctx, c3, EG_STRUCTURE_HOST_TEAM, k, limit, mask, t3) : NULL;
+        eg_status s = px && py && pc && pa1 && p3 ? plan(ctx, axpb, EG_STRUCTURE_HOST_TEAM, RN, 0, NULL, NULL, &pa) : EG_FAULT;
+        if (s == EG_OK) s = bind(ctx, pa, py, px, &a, &b);
+        struct step_work w = { pa, pc, px, py, NULL, 0, 0 };
+        eg_graph* g = s == EG_OK ? step_work_record(ctx, &w) : NULL;
+        eg_runner* r = NULL;
+        int all = g != NULL;
+        struct eg_runner_desc d = runner_desc(&pa1, 1, 1000);
+        d.flags = EG_RUN_REORDER;
+        d.reorder_theta = 0.5;
+        d.step_graph = g;
+        all = all && eg_runner_new(ctx, &d, &r) == EG_BAD_REQUEST && r == NULL && reason_has(ctx, "only the step_graph touches");
+        d = runner_desc(&p3, 1, 1000);
+        d.step_graph = g;
+        all = all && eg_runner_new(ctx, &d, &r) == EG_BAD_REQUEST && r == NULL && reason_has(ctx, "one step per launch");
+        d = runner_desc(&pc, 1, 1000);
+        d.step_graph = g;
+        all = all && eg_runner_new(ctx, &d, &r) == EG_OK && eg_graph_free(ctx, g) == EG_BAD_REQUEST && reason_has(ctx, "free the runner first");
+        all = all && eg_runner_free(ctx, r) == EG_OK && eg_graph_free(ctx, g) == EG_OK;
+        check(all, "a step graph: reorder refused for a per-sample plane only the graph touches, a K=3 unit refused, the graph "
+                   "held by its runner until the runner is freed, each by name");
+        eg_plan_free(ctx, pa);
+        eg_plan_free(ctx, pc);
+        eg_plan_free(ctx, pa1);
+        eg_plan_free(ctx, p3);
+        eg_plane_free(ctx, px);
+        eg_plane_free(ctx, py);
+    }
+}
+
 static void check_conditionals(eg_ctx* ctx) {
     int32_t cell = 0;
     double vals[3] = { 11.0, 22.0, 33.0 }, out = 0.0;
@@ -4852,6 +5019,7 @@ int main(int argc, char** argv) {
     eg_host_threads(ctx, 1);
     oracle(ctx, unit, 100001, 50000, "n=100001 threads=1");
     check_runner(ctx, unit);
+    check_step_graph(ctx, unit);
     check_weight_row(ctx);
     check_auto_look(ctx);
     check_segmented_runner(ctx);

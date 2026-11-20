@@ -563,6 +563,7 @@ struct eg_runner_s {
     eagle::door::DeviceRun dev;               ///< a DEVICE runner's loop and cells
     eagle::door::RunRecord* record = nullptr; ///< EG_RUN_RECORD: the derived plans and the last record
     eagle::door::AutoLook* look = nullptr;    ///< a runner over an AUTO group that names its segmented set: the look that decides each run
+    eg_graph_s* step_graph = nullptr;         ///< the graph run once per step (not owned: eg_graph_free refuses while a runner holds it)
 };
 
 namespace eagle {
@@ -909,7 +910,8 @@ struct KeptDerived {
     std::vector<eg_derived_role> roles;
     std::vector<eg_unit*> units;
 };
-void check_runner(const eg_ctx& ctx, eg_runner_desc& d, bool device, KeptDerived& kept);
+void check_runner(eg_ctx& ctx, eg_runner_desc& d, bool device, KeptDerived& kept);
+void check_graph_unheld(const eg_ctx& ctx, const eg_graph_s* graph);
 /** @brief A plane the reorder moves: its first byte and element size. */
 struct Owned {
     char* data;

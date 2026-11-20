@@ -280,6 +280,13 @@ static void lin_rows(eg_ctx* ctx, const char* lib) {
     d.n_derived = 0;
     check(eg_runner_new(ctx, &d, &none) == EG_BAD_REQUEST && reason_has(ctx, "needs its derived units"),
           "EG_RUN_RECORD with no derived units refused BAD_REQUEST");
+    eg_graph* step = NULL;    /* per-step work in a recorded run: the tape holds nothing of it, so the reverse is refused by name */
+    d = recorded(&plan, LSTEPS, 3, 0, roles, good);
+    check(eg_record_begin(ctx) == EG_OK && eg_launch(ctx, plan, NULL) == EG_OK && eg_record_end(ctx, NULL, &step) == EG_OK &&
+              (d.step_graph = step, eg_runner_new(ctx, &d, &none) == EG_NOT_WRITTEN) && none == NULL &&
+              reason_has(ctx, "reversing the per-step graph"),
+          "a step graph on an EG_RUN_RECORD runner refused NOT_WRITTEN by name: its reverse is not written");
+    eg_graph_free(ctx, step);
     const eg_derived_role swapped[2] = { EG_DERIVED_STEP_VJP, EG_DERIVED_TAPE };
     d = recorded(&plan, LSTEPS, 3, 0, swapped, good);
     check(eg_runner_new(ctx, &d, &none) == EG_BAD_REQUEST && reason_has(ctx, "derived.role"),

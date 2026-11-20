@@ -372,8 +372,25 @@ struct eg_runner_desc {
     eg_events events;
     eg_no_event on_no_event;
     int32_t reserved0;
-    eg_graph* step_graph;               /**< device only: recorded device work run once per step inside the
-                                             captured loop, or NULL; a host runner refuses a non-NULL one */
+    eg_graph* step_graph;               /**< per-step work, or NULL: a graph recorded on the runner's own side (a host graph for a host
+                                             runner, a device graph for a device one) that runs once per step, BEFORE the step's plans,
+                                             on every launch, on the planes it was recorded over. It may hold launches, copies, reduces, transforms,
+                                             products, forks and, on the host, conditionals; never a run of a runner (a device graph
+                                             with a conditional is NOT_WRITTEN: the driver refuses a conditional node inside the loop's
+                                             own conditional body). The plans must advance one step per launch (finish steps 1, or a several-plan
+                                             step): a unit that advances K > 1 steps per launch, or an automatic count, is BAD_REQUEST.
+                                             On the host the graph is replayed ahead of each launch, with an active set ahead of each of
+                                             the ``every`` launches between compactions, over all samples, not the live prefix, and
+                                             stops with the plans when every sample finished. On a device it is captured into the loop
+                                             as a child graph, so it runs for each launch of every whole interval the loop runs, the
+                                             last one included even when the batch finished inside it, and a plan of it rebound after the
+                                             first run makes the loop capture again at the next run; a device graph holding host nodes
+                                             is BAD_REQUEST. The runner holds the graph without a reference: eg_graph_free of it is
+                                             BAD_REQUEST until the runner is freed. BAD_REQUEST too: a graph of another context or side,
+                                             a graph ended with EG_RECORD_DIFF, and, with EG_RUN_REORDER, a per-sample plane only the
+                                             graph touches (the reorder moves the plans' planes, not it). With EG_RUN_RECORD or events
+                                             REFINE it is NOT_WRITTEN: a recording run stores nothing of the graph and so cannot reverse
+                                             it. */
 };
 
 /** Report flags. */

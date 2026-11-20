@@ -7,6 +7,7 @@
 // (``repeat_while`` under ``GraphPipeline.build``).
 #include "eagle/door/device/Loop.h"
 
+#include "eagle/cuda/CaptureAttribution.h"
 #include "eagle/cuda/CaptureConditional.h"
 #include "eagle/cuda/CapturedGraph.h"
 #include "eagle/cuda/StreamCapturer.h"
@@ -467,6 +468,10 @@ void capture_abort(DeviceCapture* capture) noexcept {
 
 void loop_launch(DeviceLoop* loop, std::uint64_t stream) {
     EAGLE_CHECK_ALWAYS(cudaGraphLaunch(loop->exec, reinterpret_cast<cudaStream_t>(stream)));
+}
+
+void loop_embed(DeviceLoop* loop, std::uint64_t stream) {
+    cuda::captureAddChild(reinterpret_cast<cudaStream_t>(stream), loop->graph.graph(), true);
 }
 
 void loop_free(DeviceLoop* loop) noexcept {

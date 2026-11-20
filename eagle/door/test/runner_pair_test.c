@@ -185,8 +185,8 @@ static void run_unit(eg_ctx* ctx, const char* lib, const char* name, const char*
                   "device runner: every other than K refused BAD_REQUEST (no active set)");
             bad = rd;
             bad.step_graph = (eg_graph*)&bad;
-            check(eg_runner_new(ctx, &bad, &none) == EG_NOT_WRITTEN && reason_has(ctx, "step_graph"),
-                  "device runner: a step_graph refused NOT_WRITTEN by name");
+            check(eg_runner_new(ctx, &bad, &none) == EG_BAD_REQUEST && reason_has(ctx, "step_graph"),
+                  "device runner: a step_graph that is not a graph of the context refused BAD_REQUEST by name");
         }
         check(eg_runner_free(ctx, runner) == EG_OK && eg_plan_free(ctx, plan) == EG_OK, "eg_runner_free and eg_plan_free");
         planes_free(ctx, &s);
