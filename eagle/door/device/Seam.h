@@ -17,6 +17,8 @@ void device_open(eg_ctx& ctx, std::int32_t device);
 void device_close(eg_ctx& ctx) noexcept;
 /** @brief The devices the driver sees (device/Device.cpp); 0 with no driver, no device, or no device group built. */
 std::int32_t device_count(eg_ctx& ctx);
+/** @brief eg_device_props: the driver's facts of device @p device and the roofline figures derived from them. */
+void device_props(std::int32_t device, struct eg_device_props& out);
 void device_unit_load(eg_unit_s& unit, const eg_unit_meta& meta, void* library);
 void device_unit_free(eg_unit_s& unit) noexcept;
 void device_plan_check(const eg_ctx& ctx, const eg_unit_s& unit);

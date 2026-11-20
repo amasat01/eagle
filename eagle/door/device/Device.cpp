@@ -44,6 +44,7 @@ void device_open(eg_ctx&, std::int32_t device) {
 }
 void device_close(eg_ctx&) noexcept {}
 std::int32_t device_count(eg_ctx&) { return 0; }
+void device_props(std::int32_t, struct eg_device_props&) { refuse(EG_NOT_WRITTEN, "eg_device_props: the device group is not built"); }
 void device_unit_load(eg_unit_s&, const eg_unit_meta&, void*) {}
 void device_unit_free(eg_unit_s&) noexcept {}
 void device_plan_check(const eg_ctx&, const eg_unit_s&) {
@@ -461,6 +462,56 @@ std::int32_t driver_device_count(std::string& why) {
 std::int32_t device_count(eg_ctx&) {
     std::string why;
     return std::max<std::int32_t>(0, driver_device_count(why));
+}
+
+/** @brief eg_device_props: the raw attributes of device @p device, then the derived fields by eagle::deriveFields (the
+ *  formulas the dispatch rule reads). */
+void device_props(std::int32_t device, struct eg_device_props& out) {
+    std::string why;
+    const std::int32_t count = driver_device_count(why);
+    if (count < 0) refuse(EG_BAD_REQUEST, "eg_device_props: no CUDA driver could be opened (" + why + ")");
+    if (device < 0 || device >= count)
+        refuse(EG_BAD_REQUEST, "eg_device_props: device " + std::to_string(device) + ": the driver sees " + std::to_string(count) + " device(s)");
+    EG_DRIVER(cuDeviceGet);
+    EG_DRIVER(cuDeviceGetName);
+    CUdevice dev = 0;
+    check(cuDeviceGet_(&dev, device), "cuDeviceGet");
+    eagle::DeviceProps p;
+    p.cc_major = attribute(dev, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, "compute capability");
+    p.cc_minor = attribute(dev, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, "compute capability");
+    p.sm_count = attribute(dev, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, "SMs");
+    p.clock_rate_khz = attribute(dev, CU_DEVICE_ATTRIBUTE_CLOCK_RATE, "clock rate");
+    p.memory_clock_rate_khz = attribute(dev, CU_DEVICE_ATTRIBUTE_MEMORY_CLOCK_RATE, "memory clock rate");
+    p.memory_bus_width_bits = attribute(dev, CU_DEVICE_ATTRIBUTE_GLOBAL_MEMORY_BUS_WIDTH, "memory bus width");
+    p.shared_mem_per_block = static_cast<std::size_t>(attribute(dev, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK, "shared memory per block"));
+    p.shared_mem_per_sm = static_cast<std::size_t>(attribute(dev, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR, "shared memory per SM"));
+    p.regs_per_block = attribute(dev, CU_DEVICE_ATTRIBUTE_MAX_REGISTERS_PER_BLOCK, "registers per block");
+    p.regs_per_sm = attribute(dev, CU_DEVICE_ATTRIBUTE_MAX_REGISTERS_PER_MULTIPROCESSOR, "registers per SM");
+    p.warp_size = attribute(dev, CU_DEVICE_ATTRIBUTE_WARP_SIZE, "warp size");
+    p = eagle::deriveFields(p);
+    char name[sizeof(out.name)] = {};
+    check(cuDeviceGetName_(name, static_cast<int>(sizeof(name) - 1), dev), "cuDeviceGetName");
+    const std::uint32_t size = out.struct_size;
+    std::memset(&out, 0, sizeof(out));
+    out.struct_size = size;
+    out.cc_major = p.cc_major;
+    out.cc_minor = p.cc_minor;
+    out.sm_count = p.sm_count;
+    out.warp_size = p.warp_size;
+    out.regs_per_sm = p.regs_per_sm;
+    out.regs_per_block = p.regs_per_block;
+    out.shared_mem_per_block = static_cast<std::int64_t>(p.shared_mem_per_block);
+    out.shared_mem_per_sm = static_cast<std::int64_t>(p.shared_mem_per_sm);
+    std::memcpy(out.name, name, sizeof(name));
+    out.clock_rate_khz = p.clock_rate_khz;
+    out.memory_clock_rate_khz = p.memory_clock_rate_khz;
+    out.memory_bus_width_bits = p.memory_bus_width_bits;
+    out.peak_bytes_per_s = p.peak_bytes_per_s;
+    out.peak_flops_sp = p.peak_flops_sp;
+    out.peak_flops_dp = p.peak_flops_dp;
+    out.fp64_ratio = p.fp64_ratio;
+    out.ridge_flops_per_byte_sp = p.ridgeFlopsPerByte("float32");
+    out.ridge_flops_per_byte_dp = p.ridgeFlopsPerByte("float64");
 }
 
 /** @brief EG_CTX_DEVICE: retain the device's primary context, make the context's stream, read the launch facts. */
@@ -2583,8 +2634,6 @@ void device_graphs_drop(eg_ctx& ctx) noexcept {
 
 /** @brief eg_stream_use: make @p stream (a stream of the context's device; 0: eagle's own) the stream in scope; the
  *  launches, runs and replays after it are ordered on it (the old path's ``stream_create`` over an external stream). */
-void device_group_check(const char*) {}
-
 void device_stream_use(eg_ctx& ctx, std::uint64_t stream) {
     if (ctx.dev.ordinal < 0)
         refuse(EG_BAD_REQUEST, "eg_stream_use on a host-only context (made without EG_CTX_DEVICE): it has no stream");

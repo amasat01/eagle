@@ -2315,6 +2315,36 @@ int main(int argc, char** argv) {
               "a host context of a door with the device group: eg_sync OK, eg_stream_use BAD_REQUEST (host-only context), "
               "eg_device_count OK with a count of 1 or more");
     }
+    {   /* eg_device_props against the CUDA runtime's own attributes, and the derived figures against their formulas */
+        struct eg_device_props p;
+        memset(&p, 0, sizeof(p));
+        p.struct_size = sizeof(p);
+        int32_t count = 0;
+        int ok = eg_device_props(host, 0, &p) == EG_OK && eg_device_count(host, &count) == EG_OK;
+        int a[11];
+        const enum cudaDeviceAttr attrs[11] = { cudaDevAttrComputeCapabilityMajor, cudaDevAttrComputeCapabilityMinor,
+            cudaDevAttrMultiProcessorCount, cudaDevAttrWarpSize, cudaDevAttrMaxRegistersPerMultiprocessor,
+            cudaDevAttrMaxRegistersPerBlock, cudaDevAttrMaxSharedMemoryPerBlock, cudaDevAttrMaxSharedMemoryPerMultiprocessor,
+            cudaDevAttrClockRate, cudaDevAttrMemoryClockRate, cudaDevAttrGlobalMemoryBusWidth };
+        for (int i = 0; i < 11; ++i) ok = ok && cudaDeviceGetAttribute(&a[i], attrs[i], 0) == cudaSuccess;
+        struct cudaDeviceProp rp;
+        ok = ok && cudaGetDeviceProperties(&rp, 0) == cudaSuccess;
+        ok = ok && p.cc_major == a[0] && p.cc_minor == a[1] && p.sm_count == a[2] && p.warp_size == a[3] && p.regs_per_sm == a[4] &&
+             p.regs_per_block == a[5] && p.shared_mem_per_block == a[6] && p.shared_mem_per_sm == a[7] && p.clock_rate_khz == a[8] &&
+             p.memory_clock_rate_khz == a[9] && p.memory_bus_width_bits == a[10] && strcmp(p.name, rp.name) == 0;
+        const double bytes = 2.0 * a[9] * 1e3 * (a[10] / 8.0);
+        ok = ok && p.peak_bytes_per_s == bytes && p.fp64_ratio >= 1.0 && p.peak_flops_dp == p.peak_flops_sp / p.fp64_ratio &&
+             p.ridge_flops_per_byte_sp == p.peak_flops_sp / bytes && p.ridge_flops_per_byte_dp == p.peak_flops_dp / bytes;
+        if (a[0] == 6 && a[1] == 1) ok = ok && p.fp64_ratio == 32.0;    /* sm_61 runs double precision at 1/32 */
+        check(ok, "eg_device_props: every raw field equals the CUDA runtime's attribute (and name); peak bandwidth, the "
+                  "double-precision peak and both ridge points equal their formulas over those fields");
+        struct eg_device_props small;
+        memset(&small, 0, sizeof(small));
+        small.struct_size = 8;
+        check(refused(eg_device_props(host, 0, &small), EG_BAD_REQUEST, host, "struct_size") &&
+                  refused(eg_device_props(host, count, &p), EG_BAD_REQUEST, host, "the driver sees"),
+              "eg_device_props: a short struct_size and an ordinal the driver does not see are refused BAD_REQUEST by name");
+    }
 
     /* Units. */
     eg_unit *axpy = NULL, *axpy64 = NULL, *u = NULL, *fat129 = NULL;

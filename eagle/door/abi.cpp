@@ -12,18 +12,6 @@
 
 namespace door = eagle::door;
 
-namespace {
-
-/** @brief The body of a device-group function not written in this build: a door without the device group says so first. */
-eg_status not_written(eg_ctx* ctx, const char* name) {
-    return door::call(ctx, [name](eg_ctx&) {
-        door::device_group_check(name);
-        door::refuse(EG_NOT_WRITTEN, std::string(name) + " is not written in this build of the door");
-    });
-}
-
-}  // namespace
-
 // ---- context ---------------------------------------------------------------
 
 EG_EXPORT eg_status eg_ctx_new(const struct eg_ctx_settings* settings, eg_ctx** out) {
@@ -356,11 +344,13 @@ EG_EXPORT eg_status eg_device_count(eg_ctx* ctx, int32_t* count) {
     });
 }
 
-// ---- not written in this build ---------------------------------------------
-
 EG_EXPORT eg_status eg_run_events(eg_ctx* ctx, eg_runner* runner, eg_plane* t_stop, eg_plane* status) {
     return door::call(ctx, [=](eg_ctx& c) { door::run_events(c, runner, t_stop, status); });
 }
-EG_EXPORT eg_status eg_device_props(eg_ctx* ctx, int32_t, struct eg_device_props*) {
-    return not_written(ctx, "eg_device_props");
+EG_EXPORT eg_status eg_device_props(eg_ctx* ctx, int32_t device, struct eg_device_props* out) {
+    return door::call(ctx, [=](eg_ctx&) {
+        if (out == nullptr || out->struct_size < sizeof(struct eg_device_props))
+            door::refuse(EG_BAD_REQUEST, "eg_device_props: out is NULL or its struct_size is below sizeof(struct eg_device_props)");
+        door::device_props(device, *out);
+    });
 }

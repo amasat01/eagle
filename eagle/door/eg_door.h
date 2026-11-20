@@ -502,14 +502,25 @@ struct eg_cond_desc {
     int64_t baseline_index;  /**< the element of ``baseline`` read; ignored without a baseline */
 };
 
-/** OUTPUT of ``eg_device_props`` (device group). */
+/** OUTPUT of ``eg_device_props`` (device group): the driver's raw facts of one device and the roofline figures derived
+ *  from them (peak rates and ridge points: the figures the dispatch rule reads). */
 struct eg_device_props {
     uint32_t struct_size;
     int32_t cc_major, cc_minor;
     int32_t sm_count, warp_size;
-    int32_t regs_per_sm, regs_per_block;
+    int32_t regs_per_sm, regs_per_block;     /**< 32-bit registers */
     int32_t reserved0;
-    int64_t shared_mem_per_block, shared_mem_per_sm;
+    int64_t shared_mem_per_block, shared_mem_per_sm; /**< bytes */
+    char name[256];                          /**< the driver's device name, NUL-terminated */
+    int32_t clock_rate_khz;                  /**< core clock */
+    int32_t memory_clock_rate_khz;
+    int32_t memory_bus_width_bits;
+    int32_t reserved1;
+    double peak_bytes_per_s;                 /**< 2 x memory clock (Hz) x bus width (bytes) */
+    double peak_flops_sp, peak_flops_dp;     /**< SMs x clock (Hz) x FMA lanes per SM x 2; dp = sp / fp64_ratio */
+    double fp64_ratio;                       /**< single- to double-precision throughput, by compute capability */
+    double ridge_flops_per_byte_sp;          /**< peak_flops_sp / peak_bytes_per_s (0 when no bandwidth is known) */
+    double ridge_flops_per_byte_dp;
 };
 
 /* ======================================================================== */
@@ -1362,8 +1373,7 @@ eg_status eg_graph_free(eg_ctx* ctx, eg_graph* graph);
  * ``eg_device_count``, which is EG_OK with 0. In a door built WITH it, on a
  * host context (made without EG_CTX_DEVICE): ``eg_sync`` is EG_OK,
  * ``eg_stream_use`` is EG_BAD_REQUEST ("host-only context": it has no
- * stream), ``eg_device_count`` answers, and ``eg_device_props`` is EG_NOT_WRITTEN, as on a device context: it is
- * not written in either build yet.
+ * stream), ``eg_device_count`` and ``eg_device_props`` answer.
  */
 
 /** Number of devices the driver sees (seam ``device_count``): 0, with EG_OK, when the driver library cannot be
@@ -1371,7 +1381,10 @@ eg_status eg_graph_free(eg_ctx* ctx, eg_graph* graph);
  *  Status: OK; BAD_REQUEST (``count`` NULL); FAULT (a driver that failed after it opened). */
 eg_status eg_device_count(eg_ctx* ctx, int32_t* count);
 
-/** Properties of a device (seam ``device_props``). */
+/** Properties of device ``device`` (an ordinal below eg_device_count; seam ``device_props``), read from the driver; any
+ *  context answers for any device. Status: OK; BAD_REQUEST (``out`` NULL or with a ``struct_size`` below the door's
+ *  ``sizeof(struct eg_device_props)``, an ordinal the driver does not see, no driver); NOT_WRITTEN (a door built
+ *  without the device group); FAULT (a driver that failed after it opened). */
 eg_status eg_device_props(eg_ctx* ctx, int32_t device, struct eg_device_props* out);
 
 /** Make ``stream`` (a raw stream of the context's device, 0: eagle's own) the
