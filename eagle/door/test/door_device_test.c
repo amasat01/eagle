@@ -518,7 +518,9 @@ static void host_steps_in_graph(eg_ctx* ctx, const char* dev_lib, const char* ho
     ok = ok && ticks == 1 && memcmp(got, want, sizeof(got)) == 0;
     check(ok, "host steps: the eager sequence (device plan, host plan, device plan) gives the chained values and one tick");
     ticks = 0;
+    cudaMemset(d1, 0, sizeof(got));    /* the legacy stream is not ordered against the context's stream: settle the reset first */
     cudaMemset(d2, 0, sizeof(got));
+    cudaDeviceSynchronize();
     eg_graph* g = NULL;
     ok = eg_record_begin(ctx) == EG_OK && eg_launch(ctx, a, NULL) == EG_OK && eg_launch(ctx, h, NULL) == EG_OK &&
          eg_launch(ctx, b, NULL) == EG_OK && eg_record_end(ctx, &g) == EG_OK;
@@ -526,8 +528,14 @@ static void host_steps_in_graph(eg_ctx* ctx, const char* dev_lib, const char* ho
     check(ok && ticks == 0, "host steps: a host launch recorded inside a device recording runs nothing at record time");
     for (int k = 0; ok && k < REPLAYS; ++k) ok = eg_graph_launch(ctx, g) == EG_OK && eg_sync(ctx) == EG_OK;
     cudaMemcpy(got, d2, sizeof(got), cudaMemcpyDeviceToHost);
-    check(ok && ticks == REPLAYS && memcmp(got, want, sizeof(got)) == 0,
-          "host steps: 3 replays of device plan, host plan, device plan: the host plan ran 3 times and the values equal the eager sequence bitwise");
+    int first_diff = -1;
+    for (int i = 0; i < HN && first_diff < 0; ++i)
+        if (memcmp(&got[i], &want[i], sizeof(double)) != 0) first_diff = i;
+    if (ticks != REPLAYS || first_diff >= 0)
+        printf("      ticks %lld (want %d), first differing value at %d: got %.17g want %.17g\n", (long long)ticks, REPLAYS, first_diff,
+               first_diff >= 0 ? got[first_diff] : 0.0, first_diff >= 0 ? want[first_diff] : 0.0);
+    check(ok && ticks == REPLAYS, "host steps: 3 replays of device plan, host plan, device plan: the host plan ran 3 times");
+    check(ok && first_diff < 0, "host steps: after the 3 replays the values equal the eager sequence bitwise");
     /* freed while replays are queued */
     ticks = 0;
     ok = ok && eg_graph_launch(ctx, g) == EG_OK && eg_graph_launch(ctx, g) == EG_OK && eg_graph_launch(ctx, g) == EG_OK &&
