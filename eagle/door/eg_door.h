@@ -1225,10 +1225,17 @@ struct eg_graph_node {
     int32_t level;        /**< the schedule level: nodes of one level may run at the same time */
     int32_t arm;          /**< ARM: its index; COND: its ``eg_cond_kind``; else -1 */
     int32_t n_planes;     /**< the planes the node reads or writes (a plane bound to two slots appears twice) */
-    const char* unit;     /**< LAUNCH: the unit's name; else NULL */
+    const char* unit;     /**< LAUNCH: the unit's name; RUN: the first plan's unit name; else NULL */
     eg_plane* const* planes;
     const uint8_t* access;  /**< per plane: 1 read, 2 write, 3 both */
     const int32_t* slot;    /**< per plane: the unit slot of a LAUNCH, else -1 */
+    /* appended: a struct_size that ends before a member reads it as 0 */
+    uint32_t cond_flags;    /**< COND: the ``eg_cond_desc.flags`` it was opened with (EG_COND_NEGATE) */
+    int32_t has_baseline;   /**< COND: 1 when its test compares with a baseline plane (the second plane), else 0 */
+    int64_t max_iters;      /**< COND: the WHILE cap, 0 for none */
+    int64_t cell_index;     /**< COND: the element of the cell the test reads */
+    int32_t n_plans;        /**< RUN: the plans of the runner (``unit`` is the first plan's unit name) */
+    int32_t launch;         /**< LAUNCH: its ordinal among the ``eg_launch`` calls of the recording, the number ``eg_node_vjp.launch`` takes; else -1 */
 };
 
 /** One edge of a graph description: ``from`` must finish before ``to`` starts. ``plane`` is NULL for JOIN and ORDER. */
@@ -1255,7 +1262,7 @@ struct eg_graph_description {
  * call), the hazard, wait, join and order edges, and the schedule level of each node (the longest path from a root). The same
  * description is kept for a host and a device graph: the door builds it at record time, it is not read back from a driver.
  * Read-only and callback-free; the arrays are the door's and stay valid until ``eg_graph_free`` of the graph or the next
- * ``eg_graph_describe`` of it, so a caller copies what it keeps. A host graph replays in recording order, which respects every
+ * ``eg_graph_describe`` of it, so a caller copies what it keeps. Node indices are the ordinals a race refusal names. A host graph replays in recording order, which respects every
  * level. Status: OK; BAD_REQUEST (a NULL, freed or foreign graph; ``out`` NULL); NOT_WRITTEN (a device graph, where the
  * recording does not keep the description yet).
  */

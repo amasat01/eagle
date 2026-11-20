@@ -34,10 +34,17 @@ struct DescribeStore {
     std::vector<eg_graph_edge> edges;
 };
 
+/** @brief What a node reports beyond its planes: a conditional's test, a run's plan count. */
+struct NodeFacts {
+    std::uint32_t cond_flags = 0;
+    std::int32_t has_baseline = 0, n_plans = 0;
+    std::int64_t max_iters = 0, cell_index = 0;
+};
+
 class GraphShape {
 public:
     /** @brief A call recorded (a launch, run, reduce, copy, fft, gemm or conditional test) into the current container; returns its ordinal. */
-    int add(eg_gnode_kind kind, std::string label, std::string unit, std::vector<PlaneUse> uses);
+    int add(eg_gnode_kind kind, std::string label, std::string unit, std::vector<PlaneUse> uses, NodeFacts facts = {});
     void fork_begin();
     void fork_branch();
     /** @brief Close the last branch. Returns "" when it joined, else the reason of the race between two branches (the fork stays open). */
@@ -59,6 +66,8 @@ private:
         int closes = -1;                        ///< a JOIN: the FORK it closes
         std::string label, unit;
         std::vector<PlaneUse> uses;
+        NodeFacts facts;
+        int launch = -1;                        ///< a LAUNCH: its ordinal among the launches
         std::vector<graph::PlaneRef> refs;      ///< ``uses`` as hazard references; ``name`` is the index in ``uses``
     };
     struct Order {
@@ -76,6 +85,7 @@ private:
 
     int container() const { return frames_.empty() ? -1 : frames_.back().branches.back(); }
     int push(eg_gnode_kind kind, int parent, int arm, std::string label, std::vector<PlaneUse> uses = {}, std::string unit = "");
+    int launches_ = 0;
     Frame& innermost(bool fork, const char* call);
     bool within(int node, int ancestor) const;
     bool apart(int a, int b, eg_gnode_kind through) const;

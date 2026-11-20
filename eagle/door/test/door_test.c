@@ -1515,6 +1515,31 @@ static void check_graph_describe(eg_ctx* ctx) {
     check(ok && eg_graph_free(ctx, g) == EG_OK, "a plain chain of copies: levels 0, 1, 2 and a RAW edge per link naming the plane");
     ok = eg_record_begin(ctx) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK && eg_graph_describe(ctx, g, &d) == EG_OK && d.n_nodes == 0 && d.n_levels == 0;
     check(ok && eg_graph_free(ctx, g) == EG_OK, "an empty graph describes with no nodes and no levels");
+    /* a COND node reports what its test was opened with */
+    int32_t lanes[4] = { 0, 0, 3, 0 }, base[1] = { 3 };
+    struct tensor tl, tb;
+    eg_plane *pl = wrap(ctx, &tl, lanes, 4, kDLInt, 32), *pb = wrap(ctx, &tb, base, 1, kDLInt, 32);
+    cd.kind = EG_COND_WHILE;
+    cd.flags = EG_COND_NEGATE;
+    cd.max_iters = 3;
+    cd.cell = pc;
+    ok = pl && pb && eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &cd) == EG_OK && eg_copy(ctx, p[0], p[2]) == EG_OK &&
+         eg_record_cond_end(ctx) == EG_OK;
+    memset(&cd, 0, sizeof(cd));
+    cd.struct_size = sizeof(cd);
+    cd.kind = EG_COND_IF;
+    cd.cell = pl;
+    cd.cell_index = 2;
+    cd.baseline = pb;
+    ok = ok && eg_record_cond_begin(ctx, &cd) == EG_OK && eg_copy(ctx, p[0], p[2]) == EG_OK && eg_record_cond_end(ctx) == EG_OK &&
+         eg_record_end(ctx, NULL, &g) == EG_OK && eg_graph_describe(ctx, g, &d) == EG_OK;
+    ok = ok && d.n_nodes == 6 && d.nodes[0].kind == EG_GNODE_COND && d.nodes[0].cond_flags == EG_COND_NEGATE && d.nodes[0].max_iters == 3 &&
+         d.nodes[0].has_baseline == 0 && d.nodes[0].cell_index == 0 && d.nodes[3].kind == EG_GNODE_COND && d.nodes[3].cond_flags == 0 &&
+         d.nodes[3].max_iters == 0 && d.nodes[3].has_baseline == 1 && d.nodes[3].cell_index == 2 && d.nodes[3].n_planes == 2 &&
+         d.nodes[3].planes[0] == pl && d.nodes[3].planes[1] == pb;
+    check(ok && eg_graph_free(ctx, g) == EG_OK, "COND nodes report their flags, cap, cell index and baseline: a negated WHILE capped at 3, an IF on lane 2 against a baseline");
+    eg_plane_free(ctx, pl);
+    eg_plane_free(ctx, pb);
     for (int i = 0; i < 5; ++i) eg_plane_free(ctx, p[i]);
     eg_plane_free(ctx, pc);
 }
@@ -1540,6 +1565,12 @@ static void check_fork_launches(eg_ctx* ctx, eg_unit* axpb) {
          eg_record_fork_branch(ctx) == EG_OK && eg_launch(ctx, pl2, NULL) == EG_OK && eg_record_fork_end(ctx) == EG_OK &&
          eg_record_end(ctx, NULL, &g) == EG_OK && eg_graph_launch(ctx, g) == EG_OK;
     check(ok && y1[0] == 3.0 && y2[0] == 5.0 && y1[K - 1] == 3.0 && y2[K - 1] == 5.0, "two launches of plans on disjoint planes in two branches both run once (a*y + b)");
+    struct eg_graph_description fd;
+    memset(&fd, 0, sizeof(fd));
+    fd.struct_size = sizeof(fd);
+    ok = eg_graph_describe(ctx, g, &fd) == EG_OK && fd.n_nodes == 6 && fd.nodes[2].kind == EG_GNODE_LAUNCH && fd.nodes[4].kind == EG_GNODE_LAUNCH &&
+         fd.nodes[2].launch == 0 && fd.nodes[4].launch == 1 && fd.nodes[0].launch == -1 && fd.nodes[5].launch == -1;
+    check(ok, "the LAUNCH nodes of two branches carry their launch ordinals 0 and 1 (nodes 2 and 4); other nodes -1");
     eg_graph* none = NULL;
     ok = eg_record_begin(ctx) == EG_OK && eg_record_fork_begin(ctx) == EG_OK && eg_launch(ctx, pl1, NULL) == EG_OK &&
          eg_record_fork_branch(ctx) == EG_OK && eg_launch(ctx, pl1, NULL) == EG_OK;
@@ -1614,6 +1645,12 @@ static void check_recorded_list(eg_ctx* ctx, eg_unit* axpb, eg_unit* count1) {
     ok = ok && memcmp(y_rec, y_dir, sizeof(y_rec)) == 0 && s_rec == 0.0 && t_rec == 0.0 && k[1] == 0.0 &&
          limit[1] == (double)(1 + 37 % 50);
     check(ok, "while recording, eg_launch, eg_reduce, eg_copy and eg_run run nothing");
+    struct eg_graph_description rund;
+    memset(&rund, 0, sizeof(rund));
+    rund.struct_size = sizeof(rund);
+    check(ok && eg_graph_describe(ctx, g, &rund) == EG_OK && rund.n_nodes == 4 && rund.nodes[3].kind == EG_GNODE_RUN && rund.nodes[3].n_plans == 1 &&
+              rund.nodes[3].unit != NULL && rund.nodes[0].launch == 0 && rund.nodes[0].n_plans == 0,
+          "a RUN node reports its plan count and the first plan's unit name");
     /* the caller's references go: the graph keeps plan, runner and planes */
     ok = ok && eg_plan_free(ctx, plr) == EG_OK && eg_plan_free(ctx, cp) == EG_OK && eg_runner_free(ctx, rn) == EG_OK &&
          eg_plane_free(ctx, pyr) == EG_OK && ty_r.deleted == 0;

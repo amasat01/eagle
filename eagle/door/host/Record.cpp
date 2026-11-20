@@ -143,6 +143,26 @@ std::vector<PlaneUse> uses_of(const Node& n) {
     return uses;
 }
 
+/** @brief The unit a launch runs, or a run's first plan's; empty for the other calls. */
+std::string unit_name(const Node& n) {
+    if (n.plan != nullptr) return n.plan->unit->name;
+    return n.runner != nullptr && !n.runner->plans.empty() ? n.runner->plans.front()->unit->name : std::string();
+}
+
+/** @brief What a conditional's test and a run report beyond their planes. */
+NodeFacts facts_of(const Node& n) {
+    NodeFacts f;
+    if (n.kind == Node::Cond) {
+        f.cond_flags = n.negate ? EG_COND_NEGATE : 0;
+        f.has_baseline = n.baseline != nullptr;
+        f.max_iters = n.max_iters;
+        f.cell_index = n.cell_index;
+    } else if (n.kind == Node::Run) {
+        f.n_plans = static_cast<std::int32_t>(n.runner->plans.size());
+    }
+    return f;
+}
+
 /** @brief The description kind of a recorded node. */
 eg_gnode_kind gnode_kind(const Node& n) {
     switch (n.kind) {
@@ -204,7 +224,7 @@ bool record(eg_ctx& ctx, Node&& node) {
     std::vector<Node>& list = ctx.rec->current();
     list.push_back(std::move(node));
     retain(list.back());
-    ctx.rec->shape.add(gnode_kind(list.back()), describe(list.back()), list.back().plan != nullptr ? list.back().plan->unit->name : std::string(), uses_of(list.back()));
+    ctx.rec->shape.add(gnode_kind(list.back()), describe(list.back()), unit_name(list.back()), uses_of(list.back()), facts_of(list.back()));
     return true;
 }
 

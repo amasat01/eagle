@@ -70,8 +70,12 @@ bool GraphShape::apart(int a, int b, eg_gnode_kind through) const {
     return false;
 }
 
-int GraphShape::add(eg_gnode_kind kind, std::string label, std::string unit, std::vector<PlaneUse> uses) {
-    return push(kind, container(), -1, std::move(label), std::move(uses), std::move(unit));
+int GraphShape::add(eg_gnode_kind kind, std::string label, std::string unit, std::vector<PlaneUse> uses, NodeFacts facts) {
+    const int ordinal = push(kind, container(), -1, std::move(label), std::move(uses), std::move(unit));
+    Node& n = nodes_[static_cast<std::size_t>(ordinal)];
+    n.facts = facts;
+    if (kind == EG_GNODE_LAUNCH) n.launch = launches_++;
+    return ordinal;
 }
 
 GraphShape::Frame& GraphShape::innermost(bool fork, const char* call) {
@@ -239,7 +243,13 @@ void GraphShape::describe(DescribeStore& store, std::uint32_t flags, eg_graph_de
         g.level = level[at(i)];
         g.arm = nd.kind == EG_GNODE_ARM ? nd.arm : nd.kind == EG_GNODE_COND ? nd.arm : -1;
         g.n_planes = static_cast<std::int32_t>(nd.uses.size());
-        g.unit = nd.kind == EG_GNODE_LAUNCH ? nd.unit.c_str() : nullptr;
+        g.unit = nd.unit.empty() ? nullptr : nd.unit.c_str();
+        g.cond_flags = nd.facts.cond_flags;
+        g.has_baseline = nd.facts.has_baseline;
+        g.max_iters = nd.facts.max_iters;
+        g.cell_index = nd.facts.cell_index;
+        g.n_plans = nd.facts.n_plans;
+        g.launch = nd.launch;
         g.planes = store.planes[at(i)].data();
         g.access = store.access[at(i)].data();
         g.slot = store.slot[at(i)].data();
