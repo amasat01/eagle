@@ -10,6 +10,7 @@
 #include "pair_util.h"
 
 #include <math.h>
+#include <stdlib.h>
 
 #define N 7
 
@@ -19,6 +20,7 @@ struct rig {
     eg_ctx* ctx;
     const char* lib;
     int device;
+    int64_t n_samples;       /* 0: N */
     int n_planes;
     eg_plane* handle[16];    /* the plane given to the door */
     eg_plane* host[16];      /* DEVICE: the wrapper of the host array, else NULL */
@@ -125,7 +127,7 @@ static eg_plan* plan_with(struct rig* r, eg_unit* unit, int32_t n_slots, eg_plan
     d.unit = unit;
     d.structure = r->device ? EG_STRUCTURE_DEVICE : EG_STRUCTURE_HOST_SERIAL;
     d.policy = EG_REDUCE_COMPENSATED;
-    d.n_samples = N;
+    d.n_samples = r->n_samples != 0 ? r->n_samples : N;
     eg_plan* plan = NULL;
     if (eg_plan_new(r->ctx, &d, &plan) != EG_OK) return NULL;
     int32_t slots[4];
@@ -1003,6 +1005,53 @@ static void option_rows(struct rig* r, const struct units* u) {
     scatter_row(r, u, u->scale_vjp, 0);
     scatter_if_row(r, u);
     int_input_row(r, u);
+/* ---- the policy row: the reduced gradient of a shared parameter is the same bits on the host and on the device, run to run ---------- */
+
+enum { M = 100000 };
+
+/* dJ/dw of y = w x over M samples with a seed of ones: the reduced GRAD of w. Returns the sum, or NaN when a call failed. */
+static double reduced_grad(struct rig* r, const struct units* u, const double* x0) {
+    eg_ctx* ctx = r->ctx;
+    double *x = malloc(M * sizeof(double)), *y = malloc(M * sizeof(double)), *one = malloc(M * sizeof(double)), *gx = malloc(M * sizeof(double));
+    double w[1] = { 1.3 }, gw[1] = { 0.0 };
+    struct tensor tx, ty, t1, tgx, tw, tgw;
+    for (int i = 0; i < M; ++i) {
+        x[i] = x0[i];
+        one[i] = 1.0;
+    }
+    r->n_samples = M;
+    eg_plane *px = mk(r, &tx, M, x), *py = mk(r, &ty, M, y), *p1 = mk(r, &t1, M, one), *pgx = mk(r, &tgx, M, gx), *pw = mk(r, &tw, 1, w), *pgw = mk(r, &tgw, 1, gw);
+    eg_plane* a1[] = { px, pw, py };
+    eg_plan* f = plan_with(r, u->scale, 3, a1, NULL);
+    const struct eg_node_vjp vjps[] = { { 0, u->scale_vjp } };
+    eg_graph* g = NULL;
+    eg_plane* in[] = { px, pw };
+    eg_plane* gr[] = { pgx, pgw };
+    up(r);
+    int ok = f && eg_record_begin(ctx) == EG_OK && eg_launch(ctx, f, NULL) == EG_OK && end_diff(ctx, 1, vjps, &g) == EG_OK && eg_graph_launch(ctx, g) == EG_OK &&
+             reverse(ctx, g, py, p1, 2, in, gr) == EG_OK;
+    down(r);
+    eg_graph_free(ctx, g);
+    eg_plan_free(ctx, f);
+    release(r);
+    r->n_samples = 0;
+    free(x), free(y), free(one), free(gx);
+    return ok ? gw[0] : NAN;
+}
+
+static void policy_row(struct rig* host, const struct units* uh, struct rig* dev, const struct units* ud) {
+    double* x = malloc(M * sizeof(double));
+    uint64_t s = 88172645463325252ull;    /* varied magnitudes and signs: an order of summation that differs shows in the bits */
+    for (int i = 0; i < M; ++i) {
+        s ^= s << 13, s ^= s >> 7, s ^= s << 17;
+        x[i] = ((double)(s >> 11) / 9007199254740992.0 - 0.5) * pow(10.0, (double)(int)(s % 7) - 3.0);
+    }
+    const double h = reduced_grad(host, uh, x), d0 = reduced_grad(dev, ud, x), d1 = reduced_grad(dev, ud, x), d2 = reduced_grad(dev, ud, x);
+    const int same_host = memcmp(&h, &d0, sizeof(h)) == 0, same_runs = memcmp(&d0, &d1, sizeof(h)) == 0 && memcmp(&d0, &d2, sizeof(h)) == 0;
+    if (!same_host || !same_runs) printf("      host %.17g, device %.17g %.17g %.17g\n", h, d0, d1, d2);
+    verdict(dev, same_host, "a reduced GRAD over 100000 samples: the host and the device give the same bits");
+    verdict(dev, same_runs, "the same reduced GRAD on the device, 3 runs: the same bits");
+    free(x);
 }
 
 static struct units load_units(struct rig* r) {
@@ -1056,6 +1105,7 @@ int main(int argc, char** argv) {
         gradient_rows(&dev, &du);
         device_refusal_rows(&dev, &du);
         conditional_rows(&dev, &du);
+        policy_row(&host, &u, &dev, &du);
         eg_ctx_free(dctx);
     }
     eg_ctx_free(ctx);
