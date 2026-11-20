@@ -516,7 +516,10 @@ static eg_plane* mk_i32(struct rig* r, struct tensor* t, int64_t n, int32_t* dat
     tensor_fill(t, n, data, kDLInt, 32);
     t->managed.dl_tensor.device.device_type = kDLCPU;
     eg_plane* p = NULL;
-    return eg_plane_wrap(r->ctx, &t->managed, &p) == EG_OK ? p : NULL;
+    if (eg_plane_wrap(r->ctx, &t->managed, &p) != EG_OK) return NULL;
+    r->handle[r->n_planes] = p;                 /* released with the row, before its tensor goes out of scope */
+    r->host[r->n_planes++] = NULL;
+    return p;
 }
 
 static eg_status cond_open(eg_ctx* ctx, eg_cond_kind kind, uint32_t flags, eg_plane* cell, int64_t index, int64_t max_iters) {
@@ -765,6 +768,7 @@ int main(int argc, char** argv) {
         fprintf(stderr, "usage: %s <fixture_graph lib>\n", argv[0]);
         return 2;
     }
+    setvbuf(stdout, NULL, _IOLBF, 0);    /* a crash shows the last row that ran */
     (void)parse_digest;    /* shared helper this test does not need */
     struct eg_ctx_settings st;
     memset(&st, 0, sizeof(st));
