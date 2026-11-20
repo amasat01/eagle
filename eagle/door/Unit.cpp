@@ -504,11 +504,17 @@ void read_body(const eg_unit_meta& m, void* library, bool device_only, eg_unit_s
                std::to_string(launch.n_lane_axes) + " without lane_extents");
     for (int i = 0; i < launch.n_lane_axes; ++i)
         unit.lane_extents.push_back(launch.lane_extents[i]);
-    for (const SlotFacts& f : unit.slots)
-        if (f.gathered && !f.keep.empty() && static_cast<std::int32_t>(f.keep.size()) != launch.n_lane_axes)
+    for (std::size_t k = 0; k < unit.slots.size(); ++k) {
+        const SlotFacts& f = unit.slots[k];
+        if (!f.gathered || launch.n_lane_axes == 0) continue;
+        if (f.keep.empty())
+            refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' slot " + std::to_string(k) + " ('" + f.name +
+                   "') is gathered without its lane mask: state which of the launch's " + std::to_string(launch.n_lane_axes) + " lane axes it varies along");
+        if (static_cast<std::int32_t>(f.keep.size()) != launch.n_lane_axes)
             refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' slot '" + f.name +
                    "' has a gather pattern of " + std::to_string(f.keep.size()) + " axes, the launch has " +
                    std::to_string(launch.n_lane_axes));
+    }
     if (launch.n_plane_axes < 0 || (launch.n_plane_axes > 0 && launch.plane_axes == nullptr))
         refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' n_plane_axes " +
                std::to_string(launch.n_plane_axes) + " without plane_axes");

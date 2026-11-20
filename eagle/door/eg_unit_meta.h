@@ -174,10 +174,10 @@ struct eg_unit_slot {
     eg_wire_dtype dtype;      /**< read by eg_bind (dtype check; a uniform's value width) and eg_launch (Real vs Int handles) */
     int32_t rank;             /**< 0 scalar, 1 vector, 2 matrix: the per-sample component; eg_bind and eg_launch */
     int32_t like_slot;        /**< an adjoint plane sized like this LOOKUP slot (eg_bind shape: the planes bound to the two slots have the same ndim and extents), -1: none */
-    int32_t n_gather;         /**< entries of ``gather``: 0, or the launch's n_lane_axes */
+    int32_t n_gather;         /**< entries of ``gather``: the launch's n_lane_axes for a GATHER slot of a launch with lane axes, else 0 */
     int32_t reserved0;
     const int64_t* shape;     /**< ``rank`` extents, NULL when rank is 0; the plane is (*shape, lanes) unless the role has a runtime length */
-    const uint8_t* gather;    /**< with EG_SLOT_GATHER: 1 for each lane axis the compact matrix varies along (eg_bind's column count); NULL: unchecked */
+    const uint8_t* gather;    /**< with EG_SLOT_GATHER: 1 for each lane axis the compact matrix varies along (eg_bind's column count); required, with ``n_gather`` equal to ``n_lane_axes``, on a unit whose launch has lane axes */
     const char* name;         /**< the declared name: hawk resolves names to slots; eagle's reasons quote it; joins a stage slot */
 };
 

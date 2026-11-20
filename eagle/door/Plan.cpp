@@ -154,9 +154,9 @@ void check_plane(const eg_plan_s& plan, int slot, const eg_plane_s& plane) {
         for (std::int64_t e : plan.unit->lane_extents) fixed *= e > 0 ? e : 1;
         for (std::size_t i = 0; i < s.keep.size(); ++i)
             if (s.keep[i]) want *= plan.unit->lane_extents[i] > 0 ? plan.unit->lane_extents[i] : plan.n_samples / fixed;
-        if (t.ndim != 3 || t.shape[0] != s.shape[0] || t.shape[1] != s.shape[1] || m < 1 || (!s.keep.empty() && m != want))
+        if (t.ndim != 3 || t.shape[0] != s.shape[0] || t.shape[1] != s.shape[1] || m != want)
             refuse(EG_BAD_REQUEST, what + ": a plane of shape (" + std::to_string(s.shape[0]) + ", " + std::to_string(s.shape[1]) +
-                   ", " + (s.keep.empty() ? std::string("m") : std::to_string(want)) + ") is expected (m: the columns of the lane axes it varies along)");
+                   ", " + std::to_string(want) + ") is expected (m: the columns of the lane axes it varies along)");
     } else if (s.keys_of >= 0) {                // a block sum's output: width entries per key, the keys' count along the last axis
         const KeyedFacts& k = plan.unit->keyed[static_cast<std::size_t>(s.keys_of)];
         const std::int64_t want = k.width * key_count(*plan.unit, k, plan.n_samples);

@@ -948,6 +948,20 @@ static const struct eg_unit_launch launch_two_axes = {
 GATH_UNIT(unit_gathb, "gathb", 0x61, gb_body);
 GATH_UNIT(unit_gatha, "gatha", 0x62, ga_body);
 GATH_UNIT(unit_gathn, "gathn", 0x63, gn_body);
+/* both lane axes kept: static extents 3 and 6, so 18 columns */
+static const uint8_t keep_both[2] = { 1, 1 };
+static const int64_t gath_extents_18[2] = { 3, 6 };
+GATH_SLOT(slot_g18, EG_SLOT_GATHER, 2, keep_both);
+static const struct eg_unit_slot* const g18_slots[] = { &slot_y, &slot_g18 };
+GATH_BODY(g18_body, g18_slots);
+static const struct eg_unit_launch launch_18 = {
+    .struct_size = sizeof(struct eg_unit_launch), .n_lane_axes = 2, .block = 0, .active_map_slot = -1,
+    .active_count_slot = -1, .index_map_slot = -1, .index_count_slot = -1, .n_plane_axes = 0, .group = 1,
+    .lane_extents = gath_extents_18 };
+static const struct eg_unit_meta unit_gath18 = {
+    .struct_size = sizeof(struct eg_unit_meta), .name = "gath18", .digest = DIGEST(0xEA), .pattern = EG_PATTERN_PURE,
+    .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "gath_host", .device_image_format = EG_IMAGE_NONE,
+    .body = &g18_body, .launch = &launch_18 };
 
 /* a thread box and a shared parameter */
 static const struct eg_unit_box box_4_3 = { .struct_size = sizeof(struct eg_unit_box), .axis = 0, .t = 4, .stride = 3 };
@@ -1253,7 +1267,7 @@ static const struct eg_unit_meta unit_actrow = {
 static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &unit_tick, &unit_spans, &unit_prefixsum, &unit_widesum, &unit_mix2, &unit_split, &unit_count1,
                                                     &unit_count3, &unit_count1a, &unit_count3a, &unit_countA, &unit_countAa, &unit_vecs, &unit_count1i,
                                                     &unit_count1ia, &unit_count1e, &unit_lanes, &unit_prefix, &unit_count1g, &unit_widemul,
-                                                    &unit_gathb, &unit_gatha, &unit_gathn, &unit_boxed, &unit_boxbad, &unit_shr, &unit_cells, &unit_keyed,
+                                                    &unit_gathb, &unit_gatha, &unit_gathn, &unit_gath18, &unit_boxed, &unit_boxbad, &unit_shr, &unit_cells, &unit_keyed,
                                                     &unit_keyedbad, &unit_cellsum, &unit_axpb_cards, &unit_axpb_badflag,
                                                     &unit_sg_cls, &unit_sg_k0, &unit_sg_k1, &unit_sgf, &unit_dg_k0, &unit_dg_k1, &unit_dg_sweep, &unit_dgf,
                                                     &unit_sga_cls, &unit_sga_k0, &unit_sga_k1, &unit_sga_rare, &unit_sga_even, &unit_sga_scalar, &unit_sga_heavy,
@@ -1264,7 +1278,7 @@ static const struct eg_library_meta library = {
     .struct_size = sizeof(struct eg_library_meta),
     .schema_major = EG_META_SCHEMA_MAJOR,
     .schema_minor = 0,
-    .n_units = 60,
+    .n_units = 61,
     .units = units,
 };
 

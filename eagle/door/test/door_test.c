@@ -3462,9 +3462,12 @@ static void check_wide_flat(eg_ctx* ctx) {
 static void check_gather(eg_ctx* ctx) {
     enum { N = 40, MAXM = 12 };
     static double y[N], m[4 * MAXM], want[N];
-    static const struct { const char* name; uint8_t byte; int64_t cols; } units[3] = {
-        { "gathb", 0x61, 4 }, { "gatha", 0x62, 10 }, { "gathn", 0x63, 7 } };   /* m: b (4), a (n / 4), any */
-    for (int ui = 0; ui < 3; ++ui) {
+    static const struct { const char* name; uint8_t byte; int64_t cols; } units[2] = {
+        { "gathb", 0x61, 4 }, { "gatha", 0x62, 10 } };   /* m: b (4), a (n / 4) */
+    eg_unit* unmasked = NULL;
+    check(load(ctx, "gathn", 0x63, &unmasked) == EG_BAD_REQUEST && reason_has(ctx, "gathered without its lane mask") && reason_has(ctx, "slot 1 ('M')"),
+          "gather: a GATHER slot of a launch with lane axes that states no mask is refused at load, naming the unit and the slot");
+    for (int ui = 0; ui < 2; ++ui) {
         eg_unit* unit = NULL;
         const int64_t cols = units[ui].cols;
         struct tensor ty, tm, tbad;
@@ -3489,8 +3492,8 @@ static void check_gather(eg_ctx* ctx) {
                  plan(ctx, unit, EG_STRUCTURE_HOST_TEAM, N, 0, NULL, NULL, &p) == EG_OK && eg_bind(ctx, p, &bd) == EG_OK &&
                  eg_launch(ctx, p, NULL) == EG_OK && memcmp(y, want, sizeof(y)) == 0;
         check(ok, "gather: a compact (2, 2, m) matrix is read at column lane % m, m the columns of the lane axes it varies along "
-                  "(static axis, runtime axis, or any m without a pattern), equal the plain loop (bitwise)");
-        if (ui < 2) {   /* a column count other than the pattern's */
+                  "(static axis or runtime axis), equal the plain loop (bitwise)");
+        {   /* a column count other than the pattern's */
             eg_plane* pbad = wrap_nd(ctx, &tbad, m, kDLFloat, 64, 3, 2, 2, cols + 1);
             const int32_t one[1] = { 1 };
             eg_plane* bad[1] = { pbad };
@@ -3506,6 +3509,41 @@ static void check_gather(eg_ctx* ctx) {
         eg_plane_free(ctx, pm);
         eg_unit_free(ctx, unit);
     }
+}
+
+/* A gathered slot that varies along both axes (3 x 6) needs 18 columns: a 6-column plane is refused at bind and at the rebind of a bound plan. */
+static void check_gather_columns(eg_ctx* ctx) {
+    enum { N = 36 };
+    static double y[N], m18[4 * 18], m6[4 * 6];
+    struct tensor ty, t18, t6;
+    eg_unit* unit = NULL;
+    eg_plan* p = NULL;
+    eg_plane *py = wrap(ctx, &ty, y, N, kDLFloat, 64), *p18 = wrap_nd(ctx, &t18, m18, kDLFloat, 64, 3, 2, 2, 18), *p6 = wrap_nd(ctx, &t6, m6, kDLFloat, 64, 3, 2, 2, 6);
+    const int32_t both[2] = { 0, 1 }, one[1] = { 1 };
+    eg_plane* good[2] = { py, p18 };
+    eg_plane* bad[1] = { p6 };
+    struct eg_bind_desc bd;
+    memset(&bd, 0, sizeof(bd));
+    bd.struct_size = sizeof(bd);
+    bd.n_planes = 1;
+    bd.plane_slots = one;
+    bd.planes = bad;
+    int ok = py && p18 && p6 && load(ctx, "gath18", 0xEA, &unit) == EG_OK && plan(ctx, unit, EG_STRUCTURE_HOST_TEAM, N, 0, NULL, NULL, &p) == EG_OK &&
+             eg_bind(ctx, p, &bd) == EG_BAD_REQUEST && reason_has(ctx, "(2, 2, 18) is expected");
+    bd.n_planes = 2;
+    bd.plane_slots = both;
+    bd.planes = good;
+    ok = ok && eg_bind(ctx, p, &bd) == EG_OK;
+    bd.n_planes = 1;
+    bd.plane_slots = one;
+    bd.planes = bad;
+    check(ok && eg_bind(ctx, p, &bd) == EG_BAD_REQUEST && reason_has(ctx, "(2, 2, 18) is expected"),
+          "gather: a 6-column plane for a slot that varies along both axes (18 columns) is refused at bind and at the rebind of a bound plan, naming the shape");
+    eg_plan_free(ctx, p);
+    eg_plane_free(ctx, py);
+    eg_plane_free(ctx, p18);
+    eg_plane_free(ctx, p6);
+    eg_unit_free(ctx, unit);
 }
 
 static void check_shared(eg_ctx* ctx) {
@@ -5442,6 +5480,7 @@ int main(int argc, char** argv) {
     check_wide(ctx);
     check_wide_flat(ctx);
     check_gather(ctx);
+    check_gather_columns(ctx);
     check_shared(ctx);
     check_box(ctx);
     check_even_split(ctx);
