@@ -15,6 +15,7 @@
 #include "eagle/door/host/Shape.h"
 
 #include <cstring>
+#include <functional>
 #include <memory>
 
 namespace eagle {
@@ -74,8 +75,14 @@ namespace door {
 
 namespace {
 
-void replay(eg_ctx& ctx, const std::vector<Node>& nodes);
-void run_node(eg_ctx& ctx, const Node& n);
+/** @brief What a replay of an EG_RECORD_DIFF graph keeps for the reverse: the copies before each leaf and what each test saw. */
+struct Tape {
+    GraphDiff* diff;
+    std::vector<int> iters;                     ///< the iteration of each enclosing WHILE, outermost first
+};
+
+void replay(eg_ctx& ctx, const std::vector<Node>& nodes, Tape* tape = nullptr);
+void run_node(eg_ctx& ctx, const Node& n, Tape* tape);
 
 /** @brief One host step of a device graph: the recorded node, what it is called in a failure, and its context. */
 struct HostStep {
@@ -225,7 +232,7 @@ bool record(eg_ctx& ctx, Node&& node) {
     std::vector<Node>& list = ctx.rec->current();
     list.push_back(std::move(node));
     retain(list.back());
-    ctx.rec->shape.add(gnode_kind(list.back()), describe(list.back()), unit_name(list.back()), uses_of(list.back()), facts_of(list.back()));
+    list.back().ordinal = ctx.rec->shape.add(gnode_kind(list.back()), describe(list.back()), unit_name(list.back()), uses_of(list.back()), facts_of(list.back()));
     return true;
 }
 
@@ -239,14 +246,30 @@ std::int32_t element(const eg_plane_s& p, std::int64_t index) {
 }
 
 /** @brief Run @p nodes in order; each conditional reads its cell now. */
-void replay(eg_ctx& ctx, const std::vector<Node>& nodes) {
-    for (const Node& n : nodes) run_node(ctx, n);
+void replay(eg_ctx& ctx, const std::vector<Node>& nodes, Tape* tape) {
+    for (const Node& n : nodes) run_node(ctx, n, tape);
+}
+
+/** @brief The key of node @p n under the loops @p tape is in, then @p extra (a WHILE's own iteration) when given. */
+std::vector<int> tape_key(const Tape& tape, const Node& n, int extra = -1) {
+    std::vector<int> key{ n.ordinal };
+    key.insert(key.end(), tape.iters.begin(), tape.iters.end());
+    if (extra >= 0) key.push_back(extra);
+    return key;
 }
 
 /** @brief Run one recorded node. */
-void run_node(eg_ctx& ctx, const Node& n) {
+void run_node(eg_ctx& ctx, const Node& n, Tape* tape) {
     switch (n.kind) {
         case Node::Launch:
+            if (tape != nullptr) {                  // copy the planes this leaf overwrites, as they are before it
+                const int leaf = tape->diff->plan.leaf_of.at(tape_key(*tape, n));
+                for (Snapshot& s : tape->diff->snapshots)
+                    if (s.node == static_cast<std::size_t>(leaf)) {
+                        const DLTensor& t = tape->diff->planes[static_cast<std::size_t>(s.plane)]->tensor->dl_tensor;
+                        std::memcpy(s.bytes.data(), static_cast<const char*>(t.data) + t.byte_offset, s.size);
+                    }
+            }
             check_bound(*n.plan);
             n.plan->finished = 0;    // a replayed launch counts from zero, as eg_launch does
             host::run_plan(*n.plan, host::team_threads(ctx));
@@ -258,19 +281,32 @@ void run_node(eg_ctx& ctx, const Node& n) {
         case Node::Gemm: host::gemm_exec(*n.gemm, *n.src, *n.rhs, *n.dst); break;
         case Node::Cond: {
             // int32 or uint32: equal or not, or an arm index, reads the same bits
-            const auto truth = [&] {
-                const std::int32_t base = n.baseline != nullptr ? element(*n.baseline, n.baseline_index) : 0;
-                return (element(*n.cell, n.cell_index) != base) != n.negate;
+            const auto cell = [&] { return element(*n.cell, n.cell_index); };
+            const auto base = [&] { return n.baseline != nullptr ? element(*n.baseline, n.baseline_index) : 0; };
+            const auto truth = [&] { return (cell() != base()) != n.negate; };
+            const auto save = [&](int extra) {      // what the test sees, for the reverse
+                if (tape == nullptr) return;
+                TestSave& t = tape->diff->saved[static_cast<std::size_t>(tape->diff->plan.test_of.at(tape_key(*tape, n, extra)))];
+                t = { true, cell(), base() };
             };
             if (n.cond == EG_COND_IF) {
-                if (truth()) replay(ctx, n.arms[0]);
+                save(-1);
+                if (truth()) replay(ctx, n.arms[0], tape);
             } else if (n.cond == EG_COND_IF_ELSE) {
-                replay(ctx, n.arms[truth() ? 0 : 1]);
+                save(-1);
+                replay(ctx, n.arms[truth() ? 0 : 1], tape);
             } else if (n.cond == EG_COND_WHILE) {
-                for (std::int64_t i = 0; (n.max_iters == 0 || i < n.max_iters) && truth(); ++i) replay(ctx, n.arms[0]);
+                for (std::int64_t i = 0; n.max_iters == 0 || i < n.max_iters; ++i) {
+                    save(static_cast<int>(i));
+                    if (!truth()) break;
+                    if (tape != nullptr) tape->iters.push_back(static_cast<int>(i));
+                    replay(ctx, n.arms[0], tape);
+                    if (tape != nullptr) tape->iters.pop_back();
+                }
             } else {
-                const std::int32_t arm = element(*n.cell, n.cell_index);
-                if (arm >= 0 && static_cast<std::size_t>(arm) < n.want) replay(ctx, n.arms[static_cast<std::size_t>(arm)]);
+                save(-1);
+                const std::int32_t arm = cell();
+                if (arm >= 0 && static_cast<std::size_t>(arm) < n.want) replay(ctx, n.arms[static_cast<std::size_t>(arm)], tape);
             }
             break;
         }
@@ -446,13 +482,15 @@ void record_end(eg_ctx& ctx, const eg_record_end_desc* desc, eg_graph** out) {
         const eg_record_end_desc d = read_input(desc, "eg_record_end_desc");
         if ((d.flags & ~EG_RECORD_DIFF) != 0) refuse(EG_BAD_REQUEST, "eg_record_end_desc.flags: unknown bits " + std::to_string(d.flags & ~EG_RECORD_DIFF));
         if ((d.flags & EG_RECORD_DIFF) != 0) {      // a refusal leaves the recording open
-            std::vector<eg_plan_s*> launches;
-            for (std::size_t i = 0; i < rec.top.size(); ++i) {
-                if (rec.top[i].kind != Node::Launch)
-                    refuse(EG_NOT_WRITTEN, "eg_record_end: recorded node " + std::to_string(i) + " is not an eg_launch; EG_RECORD_DIFF records plain launches only");
-                launches.push_back(rec.top[i].plan);
-            }
-            diff = diff_plan(ctx, launches, d);
+            std::vector<eg_plan_s*> launches;       // by launch ordinal: the tree's launches in recording order
+            const std::function<void(const std::vector<Node>&)> collect = [&](const std::vector<Node>& nodes) {
+                for (const Node& n : nodes) {
+                    if (n.kind == Node::Launch) launches.push_back(n.plan);
+                    for (const std::vector<Node>& arm : n.arms) collect(arm);
+                }
+            };
+            collect(rec.top);
+            diff = diff_plan(ctx, launches, rec.shape.reverse_plan(), d);
         }
         else if (d.n_vjps != 0) refuse(EG_BAD_REQUEST, "eg_record_end_desc.n_vjps: vjps without EG_RECORD_DIFF");
     }
@@ -475,14 +513,9 @@ void graph_launch(eg_ctx& ctx, eg_graph_s* graph) {
     GraphDiff& diff = *graph->diff;
     diff_check_launch(diff);
     diff.launched = false;
-    for (std::size_t i = 0; i < graph->nodes.size(); ++i) {
-        for (Snapshot& s : diff.snapshots)      // the planes node i overwrites, as the nodes before it left them
-            if (s.node == i) {
-                const DLTensor& t = diff.planes[static_cast<std::size_t>(s.plane)]->tensor->dl_tensor;
-                std::memcpy(s.bytes.data(), static_cast<const char*>(t.data) + t.byte_offset, s.size);
-            }
-        run_node(ctx, graph->nodes[i]);
-    }
+    for (TestSave& t : diff.saved) t = TestSave();
+    Tape tape{ &diff, {} };
+    replay(ctx, graph->nodes, &tape);
     diff_launched(diff);
 }
 

@@ -4,6 +4,7 @@
 #include "eagle/door/host/Shape.h"
 
 #include <algorithm>
+#include <functional>
 
 namespace eagle {
 namespace door {
@@ -182,6 +183,60 @@ void GraphShape::cond_end() {
     if (f.branches.size() != f.want)
         refuse(EG_BAD_REQUEST, "eg_record_cond_end: the conditional has " + std::to_string(f.branches.size()) + " arm(s) of the " + std::to_string(f.want) + " it takes");
     frames_.pop_back();
+}
+
+ReversePlan GraphShape::reverse_plan() const {
+    ReversePlan plan;
+    std::vector<std::vector<int>> kids(nodes_.size() + 1);      // the nodes of each container, by parent + 1
+    for (std::size_t i = 0; i < nodes_.size(); ++i) kids[static_cast<std::size_t>(nodes_[i].parent + 1)].push_back(static_cast<int>(i));
+    const auto keyed = [](int node, const std::vector<int>& iters) {
+        std::vector<int> key{ node };
+        key.insert(key.end(), iters.begin(), iters.end());
+        return key;
+    };
+    const auto add_test = [&](int cond, std::vector<int> key) {
+        const Node& n = nodes_[static_cast<std::size_t>(cond)];
+        plan.tests.push_back({ n.arm, (n.facts.cond_flags & EG_COND_NEGATE) != 0, key });
+        plan.test_of[std::move(key)] = static_cast<int>(plan.tests.size()) - 1;
+        return static_cast<int>(plan.tests.size()) - 1;
+    };
+    std::function<void(int, const std::vector<int>&, const std::vector<RGate>&)> walk =
+        [&](int container, const std::vector<int>& iters, const std::vector<RGate>& gates) {
+            for (int c : kids[static_cast<std::size_t>(container + 1)]) {
+                const Node& n = nodes_[static_cast<std::size_t>(c)];
+                if (n.kind == EG_GNODE_LAUNCH) {
+                    plan.leaves.push_back({ n.launch, gates, keyed(c, iters) });
+                    plan.leaf_of[plan.leaves.back().key] = static_cast<int>(plan.leaves.size()) - 1;
+                } else if (n.kind == EG_GNODE_FORK) {
+                    for (int b : kids[static_cast<std::size_t>(c + 1)]) walk(b, iters, gates);
+                } else if (n.kind == EG_GNODE_COND) {
+                    const std::vector<int>& arms = kids[static_cast<std::size_t>(c + 1)];
+                    if (n.arm != EG_COND_WHILE) {
+                        const int t = add_test(c, keyed(c, iters));
+                        for (std::size_t a = 0; a < arms.size(); ++a) {
+                            std::vector<RGate> inner = gates;
+                            inner.push_back({ t, static_cast<int>(a) });
+                            walk(arms[a], iters, inner);
+                        }
+                        continue;
+                    }
+                    if (n.facts.max_iters < 1)
+                        refuse(EG_BAD_REQUEST, "eg_record_end: the WHILE of node " + std::to_string(c) + " has max_iters 0; EG_RECORD_DIFF needs a cap, which bounds the tape");
+                    for (int k = 0; k < n.facts.max_iters; ++k) {
+                        std::vector<int> inner_iters = iters;
+                        inner_iters.push_back(k);
+                        std::vector<RGate> inner = gates;
+                        inner.push_back({ add_test(c, keyed(c, inner_iters)), 0 });
+                        walk(arms[0], inner_iters, inner);
+                    }
+                } else if (n.kind != EG_GNODE_JOIN && n.kind != EG_GNODE_WAIT) {
+                    refuse(EG_NOT_WRITTEN, "eg_record_end: recorded node " + std::to_string(c) + " (" + n.label + ") is not an eg_launch; EG_RECORD_DIFF records launches, "
+                           "and conditionals and forks around them, only");
+                }
+            }
+        };
+    walk(-1, {}, {});
+    return plan;
 }
 
 void GraphShape::describe(DescribeStore& store, std::uint32_t flags, eg_graph_description& out) const {

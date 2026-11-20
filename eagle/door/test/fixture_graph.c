@@ -9,6 +9,7 @@
  *   6 uscale  y = k * x        (k a by-value uniform)                                7 uscale_vjp (reduced GRAD of the uniform)
  *  10 fan     v[c] = (c + 1) x  (a width-3 vector plane out)                         11 fan_vjp
  *  12 norm2   o = sum_c v[c]^2  (the vector plane in)                                13 norm2_vjp
+ *  14 tick    c[i] -= 1          (an int32 per-sample counter plane in place; a loop's stop, no gradient)
  *   8 scale_tape_vjp   scale's vjp reading a tape row (a link a graph vjp does not take)
  *   9 scale_open_vjp   scale's vjp with a slot no link names
  *
@@ -52,6 +53,7 @@ EXPORT void fan_host(void* const* params, int64_t base, int64_t count, int64_t n
 EXPORT void fan_vjp_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EXPORT void norm2_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EXPORT void norm2_vjp_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EXPORT void tick_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EXPORT const struct eg_library_meta* eg_unit_library_meta(void);
 
 /* slots: x, w, y */
@@ -135,6 +137,13 @@ void norm2_vjp_host(void* const* params, int64_t base, int64_t count, int64_t n)
         for (int c = 0; c < WIDTH; ++c) V(2, c, i) = 2.0 * V(0, c, i) * H(1)[i];
 }
 
+/* slots: c (int32) */
+void tick_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    (void)n;
+    int32_t* c = (int32_t*)((const struct handle*)params[0])->data;
+    for (int64_t i = base; i < base + count; ++i) c[i] -= 1;
+}
+
 EXPORT extern const char eagle_abi_tag[];
 EXPORT extern const uint64_t eagle_layout_sizes[5];
 const char eagle_abi_tag[] = "aether-abi/2";
@@ -159,6 +168,8 @@ SLOT(s_bar_a, EG_ROLE_OUT, "bar_a");
 SLOT(s_bar_b, EG_ROLE_OUT, "bar_b");
 SLOT(s_bar_w, EG_ROLE_OUT, "bar_w");
 SLOT(s_bar_k, EG_ROLE_OUT, "bar_k");
+static const struct eg_unit_slot s_c = { .struct_size = sizeof(struct eg_unit_slot), .flags = 0, .role = EG_ROLE_MUTABLE, .dtype = EG_DTYPE_INT32,
+                                         .rank = 0, .like_slot = -1, .n_gather = 0, .shape = NULL, .gather = NULL, .name = "c" };
 static const int64_t width_shape[] = { 3 };
 #define SLOT_V(var, role_, name_)                                                                                 \
     static const struct eg_unit_slot var = { .struct_size = sizeof(struct eg_unit_slot), .flags = 0,             \
@@ -182,6 +193,7 @@ static const struct eg_unit_slot* const fan_slots[] = { &s_x, &s_v_out };
 static const struct eg_unit_slot* const fan_vjp_slots[] = { &s_bar_v_in, &s_bar_x };
 static const struct eg_unit_slot* const norm2_slots[] = { &s_v_in, &s_o };
 static const struct eg_unit_slot* const norm2_vjp_slots[] = { &s_v_in, &s_bar_o, &s_bar_v_out };
+static const struct eg_unit_slot* const tick_slots[] = { &s_c };
 
 #define BODY(var, slots_, n_) \
     static const struct eg_unit_body var = { .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = n_, .slots = slots_ }
@@ -198,6 +210,7 @@ BODY(fan_body, fan_slots, 2);
 BODY(fan_vjp_body, fan_vjp_slots, 2);
 BODY(norm2_body, norm2_slots, 2);
 BODY(norm2_vjp_body, norm2_vjp_slots, 3);
+BODY(tick_body, tick_slots, 1);
 
 static const struct eg_unit_launch launch = { .struct_size = sizeof(struct eg_unit_launch), .n_lane_axes = 0, .block = 0,
                                               .active_map_slot = -1, .active_count_slot = -1, .index_map_slot = -1,
@@ -284,9 +297,10 @@ UNIT(u_fan, "fan", 0x1a, "fan_host", fan_body, NULL, IMAGE("fan"));
 UNIT(u_fan_vjp, "fan_vjp", 0x1b, "fan_vjp_host", fan_vjp_body, &d_fan_vjp, IMAGE("fan_vjp"));
 UNIT(u_norm2, "norm2", 0x1c, "norm2_host", norm2_body, NULL, IMAGE("norm2"));
 UNIT(u_norm2_vjp, "norm2_vjp", 0x1d, "norm2_vjp_host", norm2_vjp_body, &d_norm2_vjp, IMAGE("norm2_vjp"));
+UNIT(u_tick, "tick", 0x1e, "tick_host", tick_body, NULL, NO_IMAGE);
 
 static const struct eg_unit_meta* const units[] = { &u_scale, &u_scale_vjp, &u_square, &u_square_vjp, &u_mul2, &u_mul2_vjp,
-                                                    &u_uscale, &u_uscale_vjp, &u_scale_tape_vjp, &u_scale_open_vjp, &u_fan, &u_fan_vjp, &u_norm2, &u_norm2_vjp };
+                                                    &u_uscale, &u_uscale_vjp, &u_scale_tape_vjp, &u_scale_open_vjp, &u_fan, &u_fan_vjp, &u_norm2, &u_norm2_vjp, &u_tick };
 static const struct eg_library_meta library = { .struct_size = sizeof(struct eg_library_meta), .schema_major = EG_META_SCHEMA_MAJOR,
-                                                .schema_minor = 0, .n_units = 14, .units = units };
+                                                .schema_minor = 0, .n_units = 15, .units = units };
 const struct eg_library_meta* eg_unit_library_meta(void) { return &library; }

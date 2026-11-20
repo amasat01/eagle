@@ -1158,10 +1158,16 @@ struct eg_record_end_desc {
     const struct eg_node_vjp* vjps;
 };
 
-/** End recording; ``*out`` replays it. ``desc`` NULL: a plain graph. With EG_RECORD_DIFF every recorded node must be an
- *  ``eg_launch`` (a run, reduce, copy, fft, gemm or conditional is refused by name), on a host plan with no split,
- *  SEGMENTED or companion unit; the planes the later nodes overwrite are copied at each ``eg_graph_launch`` just before the
- *  overwriting node, so the reverse reads what each node read. Status: OK; BAD_REQUEST (not recording, a conditional or fork open,
+/** End recording; ``*out`` replays it. ``desc`` NULL: a plain graph. With EG_RECORD_DIFF every recorded call must be an
+ *  ``eg_launch`` (a run, reduce, copy, fft or gemm is refused by name), on a host plan with no split, SEGMENTED or companion
+ *  unit, or a fork, an IF, IF_ELSE, SWITCH or WHILE around launches. The reverse runs over the launches (the leaves) in reverse
+ *  recording order; fork, branch, join and wait are structure only. Each replay saves what every conditional's test saw
+ *  (``cell[cell_index]`` and the baseline element) and a leaf under an arm takes part in the reverse only if that arm ran, decided
+ *  from the saved values with NEGATE applied, never from the live cells. A WHILE needs ``max_iters`` of 1 or more (0 is refused:
+ *  the cap bounds the tape); the tape plans its body unrolled ``max_iters`` times, each copy running only if its iteration did.
+ *  The planes the later leaves overwrite are copied at each ``eg_graph_launch`` just before the overwriting leaf, per iteration,
+ *  so the reverse reads what each leaf read; that memory is allocated here (FAULT by name when it cannot be). One
+ *  ``eg_node_vjp`` per ``eg_launch`` ordinal serves every unrolled copy of it. Status: OK; BAD_REQUEST (not recording, a conditional or fork open,
  *  a vjp whose links the launch cannot satisfy, two names of one plane in a node, overlapping planes); NOT_WRITTEN (a
  *  node or unit the reverse does not cover; a device context); FAULT (capture failed; a snapshot buffer not allocated). */
 eg_status eg_record_end(eg_ctx* ctx, const struct eg_record_end_desc* desc, eg_graph** out);
@@ -1185,8 +1191,10 @@ struct eg_graph_reverse_desc {
     eg_plane* const* grads;            /**< dJ/d(inputs[i]) is written into grads[i]; an input not listed gets nothing */
 };
 
-/** Reverse the graph's LAST ``eg_graph_launch``, eagerly on the host. Nodes run in reverse order; a plane read by several
- *  nodes gets its adjoints summed in node order, the seed first. The caller's promise: no plane the record reads live was
+/** Reverse the graph's LAST ``eg_graph_launch``, eagerly on the host. Leaves run in reverse order (see ``eg_record_end``); a
+ *  leaf that did not run, an arm not taken or a WHILE iteration that did not happen, is the identity: what it would write keeps
+ *  its adjoint for the earlier writer or the input plane, and it adds nothing to what it only reads. A plane read by several
+ *  leaves gets its adjoints summed in leaf order, the seed first. The caller's promise: no plane the record reads live was
  *  changed since that launch, except through the graph's own plans (which the door checks: see below). Status: OK;
  *  BAD_REQUEST (graph not ended with EG_RECORD_DIFF, never launched, a call while recording, a plan of the graph rebound
  *  (eg_bind, eg_clear) or launched outside the graph since its last launch, a launch with a gradient flowing through it and

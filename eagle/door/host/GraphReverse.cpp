@@ -2,7 +2,9 @@
 
 // The reverse of a recorded graph of plain launches (EG_RECORD_DIFF, eg_graph_reverse) on the host. At eg_record_end the
 // door keeps, per launch, the planes it reads and writes and the links of its vjp, and plans the copies the reverse needs
-// (eagle::diff::snapshots: a plane a later node overwrites is copied just before it, at each eg_graph_launch, host/Record.cpp).
+// (a plane a later leaf overwrites is copied just before it, at each eg_graph_launch, host/Record.cpp). The leaves are the recording's
+// launches in forward order with WHILE bodies unrolled (host/Shape.h ReversePlan); a leaf under a conditional runs in the reverse only
+// if the tests the replay saved say so.
 // eg_graph_reverse then runs the vjps in reverse node order over the planes each node read, summing the adjoints of a plane
 // read by several nodes in node order, the seed first (the order of eagle::diff::transpose).
 #include "eagle/door/Context.h"
@@ -147,9 +149,23 @@ Bytes sum_over_samples(eg_ctx* dev, const Bytes& x, std::int64_t count, std::siz
 }  // namespace
 
 std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<eg_plan_s*>& launches, const eg_record_end_desc& desc) {
+    ReversePlan flat;                           // a recording of launches in a row: every launch is a leaf that always runs
+    for (std::size_t i = 0; i < launches.size(); ++i) flat.leaves.push_back({ static_cast<int>(i), {}, {} });
+    return diff_plan(ctx, launches, flat, desc);
+}
+
+bool leaf_ran(const GraphDiff& diff, std::size_t leaf) {
+    for (const RGate& g : diff.plan.leaves[leaf].gates)
+        if (!took(diff.plan.tests[static_cast<std::size_t>(g.test)], diff.saved[static_cast<std::size_t>(g.test)], g.arm)) return false;
+    return true;
+}
+
+std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<eg_plan_s*>& launches, const ReversePlan& plan, const eg_record_end_desc& desc) {
     if (desc.n_vjps < 0 || (desc.n_vjps > 0 && desc.vjps == nullptr)) refuse(EG_BAD_REQUEST, "eg_record_end_desc.n_vjps without vjps");
     auto diff = std::make_unique<GraphDiff>();
     diff->nodes.resize(launches.size());
+    diff->plan = plan;
+    diff->saved.resize(plan.tests.size());
     const bool device = !launches.empty() && launches.front()->structure == EG_STRUCTURE_DEVICE;
     if (device) diff->dev = &ctx;
     try {
@@ -195,26 +211,31 @@ std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<eg_plan_s*>&
             node.vjp = v.vjp;
             ++v.vjp->refs;
         }
-        std::vector<diff::NodeVjp> rows;
-        for (std::size_t i = 0; i < diff->nodes.size(); ++i) {
-            diff::NodeVjp row;
-            row.node = static_cast<decltype(row.node)>(i);
-            for (int p : diff->nodes[i].reads) row.reads.push_back(std::to_string(p));
-            for (int p : diff->nodes[i].writes) row.writes.push_back(std::to_string(p));
-            rows.push_back(std::move(row));
-        }
-        for (const diff::Snapshot& s : diff::snapshots(rows)) {
-            Snapshot snap;
-            snap.node = static_cast<std::size_t>(s.node);
-            snap.plane = std::stoi(s.plane);
-            snap.size = byte_count(*diff->planes[static_cast<std::size_t>(snap.plane)]);
-            try {
-                snap.bytes = Bytes(snap.size, diff->dev);
-            } catch (const std::exception&) {
-                refuse(EG_FAULT, "eg_record_end: no memory for the copy of a plane before launch " + std::to_string(snap.node));
-            }
-            diff->snapshots.push_back(std::move(snap));
-        }
+        // The copies the reverse needs: for each plane a leaf reads, the first leaf at or after it that writes the plane, and
+        // the next ones while that writer may not run (it sits under a conditional).
+        const auto writes = [&](const RLeaf& l, int p) {
+            const std::vector<int>& w = diff->nodes[static_cast<std::size_t>(l.launch)].writes;
+            return std::find(w.begin(), w.end(), p) != w.end();
+        };
+        for (std::size_t i = 0; i < plan.leaves.size(); ++i)
+            for (int p : diff->nodes[static_cast<std::size_t>(plan.leaves[i].launch)].reads)
+                for (std::size_t m = i; m < plan.leaves.size(); ++m) {
+                    if (!writes(plan.leaves[m], p)) continue;
+                    const auto same = [&](const Snapshot& s) { return s.node == m && s.plane == p; };
+                    if (std::none_of(diff->snapshots.begin(), diff->snapshots.end(), same)) {
+                        Snapshot snap;
+                        snap.node = m;
+                        snap.plane = p;
+                        snap.size = byte_count(*diff->planes[static_cast<std::size_t>(p)]);
+                        try {
+                            snap.bytes = Bytes(snap.size, diff->dev);
+                        } catch (const std::exception&) {
+                            refuse(EG_FAULT, "eg_record_end: no memory for the copy of a plane before leaf " + std::to_string(m) + " of the tape");
+                        }
+                        diff->snapshots.push_back(std::move(snap));
+                    }
+                    if (plan.leaves[m].gates.empty()) break;
+                }
         for (eg_plan_s* plan : launches) {
             const auto same = [&](const GraphDiff::PlanMark& m) { return m.plan == plan; };
             if (std::none_of(diff->marks.begin(), diff->marks.end(), same)) diff->marks.push_back({ plan, plan->binds, plan->launches });
@@ -271,7 +292,7 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
         r.n_grads < 0 || (r.n_grads > 0 && (r.inputs == nullptr || r.grads == nullptr)))
         refuse(EG_BAD_REQUEST, "eg_graph_reverse_desc: a count without its arrays");
 
-    const std::size_t n_nodes = d.nodes.size();
+    const std::size_t n_leaves = d.plan.leaves.size();
     const auto checked = [&](eg_plane_s* given, int k, const char* what, bool write) {
         const std::string at = std::string("eg_graph_reverse_desc.") + what + "[" + std::to_string(k) + "]";
         check_handle(ctx.planes, given, at.c_str());
@@ -332,9 +353,10 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
         return ordered_sum(D, src, static_cast<std::size_t>(elements(tensor(plane))), element_bytes(plane));
     };
     const int threads = host::team_threads(ctx);
-    for (std::size_t back = 0; back < n_nodes; ++back) {
-        const std::size_t i = n_nodes - 1 - back;
-        const DiffNode& node = d.nodes[i];
+    for (std::size_t back = 0; back < n_leaves; ++back) {
+        const std::size_t i = n_leaves - 1 - back;
+        if (!leaf_ran(d, i)) continue;         // a leaf that did not run is the identity: what it would write keeps its adjoint
+        const DiffNode& node = d.nodes[static_cast<std::size_t>(d.plan.leaves[i].launch)];
         const eg_plan_s& primal = *node.plan;
         std::vector<Bytes> adjoint;
         bool flows = false;
@@ -344,7 +366,7 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
             flows = flows || any;
         }
         if (node.vjp == nullptr) {
-            if (flows) refuse(EG_BAD_REQUEST, "eg_graph_reverse: a gradient flows through launch " + std::to_string(i) + " (unit '" + primal.unit->name + "'), which has no vjp");
+            if (flows) refuse(EG_BAD_REQUEST, "eg_graph_reverse: a gradient flows through launch " + std::to_string(d.plan.leaves[i].launch) + " (unit '" + primal.unit->name + "'), which has no vjp");
             continue;
         }
         const std::size_t n = static_cast<std::size_t>(primal.n_samples);
@@ -361,9 +383,9 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
                 char* data = nullptr;
                 if (l.kind == VjpLink::VALUE_PLANE) {
                     data = live(plane);
-                    for (std::size_t m = i; m < n_nodes && data == live(plane); ++m) {     // the first node at or after this one that overwrites it
-                        const std::vector<int>& w = d.nodes[m].writes;
-                        if (std::find(w.begin(), w.end(), l.plane) == w.end()) continue;
+                    for (std::size_t m = i; m < n_leaves && data == live(plane); ++m) {    // the first leaf at or after this one that ran and overwrites it
+                        const std::vector<int>& w = d.nodes[static_cast<std::size_t>(d.plan.leaves[m].launch)].writes;
+                        if (std::find(w.begin(), w.end(), l.plane) == w.end() || !leaf_ran(d, m)) continue;
                         for (Snapshot& s : d.snapshots)
                             if (s.node == m && s.plane == l.plane) data = reinterpret_cast<char*>(s.bytes.data());
                         break;

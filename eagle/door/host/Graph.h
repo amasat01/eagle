@@ -35,6 +35,7 @@ struct Node {
     eg_plane_s* rhs = nullptr;                  ///< a product's B (its A is ``src``, its C ``dst``)
     eg_plane_s* src = nullptr;                  ///< a copy's source, a transform's input
     eg_plane_s* dst = nullptr;                  ///< a copy's target, a transform's output
+    int ordinal = -1;                           ///< the node's ordinal in the recording's shape
     eg_cond_kind cond = EG_COND_IF;
     eg_plane_s* cell = nullptr;
     std::int64_t cell_index = 0;                ///< the element of ``cell`` the test reads
@@ -90,8 +91,10 @@ struct Snapshot {
 struct GraphDiff {
     std::vector<eg_plane_s*> planes;            ///< every plane a launch binds, once
     eg_ctx* dev = nullptr;                      ///< the context of a DEVICE graph (its buffers and vjps live on the device), else null
-    std::vector<DiffNode> nodes;                ///< per top-level node, which are all launches
-    std::vector<Snapshot> snapshots;
+    std::vector<DiffNode> nodes;                ///< per launch, by the ordinal among the eg_launch calls
+    ReversePlan plan;                           ///< the launches in the order the forward runs them, WHILE bodies unrolled
+    std::vector<TestSave> saved;                ///< per ``plan.tests``: what the last replay's test saw
+    std::vector<Snapshot> snapshots;            ///< ``node`` is the index in ``plan.leaves``
     bool launched = false;
     /** @brief A plan the graph runs: its bind count at eg_record_end (a launch of the graph refuses a rebound plan) and its
      *  launch count just after the graph's last launch (the reverse refuses a plan launched outside the graph since). */
@@ -105,6 +108,10 @@ struct GraphDiff {
 
 /** @brief The tape of a graph ended with EG_RECORD_DIFF over @p nodes (host/GraphReverse.cpp); refuses what the reverse does not cover. */
 std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<eg_plan_s*>& launches, const eg_record_end_desc& desc);
+/** @brief The same over a recording with conditionals, forks and WHILE loops: @p plan from GraphShape::reverse_plan, @p launches by launch ordinal. */
+std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<eg_plan_s*>& launches, const ReversePlan& plan, const eg_record_end_desc& desc);
+/** @brief Whether leaf @p leaf ran at the last replay, from the tests the replay saved. */
+bool leaf_ran(const GraphDiff& diff, std::size_t leaf);
 void diff_free(eg_ctx& ctx, GraphDiff& diff);
 /** @brief Refuse a launch of the graph when a plan of @p diff was rebound since eg_record_end; after a launch, @p diff_launched marks it. */
 void diff_check_launch(const GraphDiff& diff);

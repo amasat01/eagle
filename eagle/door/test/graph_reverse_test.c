@@ -173,6 +173,7 @@ static void drop(eg_ctx* ctx, int n, eg_plane* const* p) {
 struct units {
     eg_unit *scale, *scale_vjp, *square, *square_vjp, *mul2, *mul2_vjp, *uscale, *uscale_vjp, *tape_vjp, *open_vjp;
     eg_unit *fan, *fan_vjp, *norm2, *norm2_vjp;
+    eg_unit* tick;
 };
 
 static eg_status end_diff(eg_ctx* ctx, int32_t n, const struct eg_node_vjp* v, eg_graph** g) {
@@ -509,14 +510,245 @@ static void device_refusal_rows(struct rig* r, const struct units* u) {
     release(r);
 }
 
+/* ---- slice 2: forks, conditionals and loops (host) ---------------------------------------------------------------------- */
+
+static eg_plane* mk_i32(struct rig* r, struct tensor* t, int64_t n, int32_t* data) {
+    tensor_fill(t, n, data, kDLInt, 32);
+    t->managed.dl_tensor.device.device_type = kDLCPU;
+    eg_plane* p = NULL;
+    return eg_plane_wrap(r->ctx, &t->managed, &p) == EG_OK ? p : NULL;
+}
+
+static eg_status cond_open(eg_ctx* ctx, eg_cond_kind kind, uint32_t flags, eg_plane* cell, int64_t index, int64_t max_iters) {
+    struct eg_cond_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.kind = kind;
+    d.flags = flags;
+    d.cell = cell;
+    d.cell_index = index;
+    d.max_iters = max_iters;
+    return eg_record_cond_begin(ctx, &d);
+}
+
+/* y1 = w1 x and y2 = w2 x in two branches, z = y1 y2: dJ/dx = 2 w1 w2 x from both paths. */
+static void fork_reverse_row(struct rig* r, const struct units* u) {
+    eg_ctx* ctx = r->ctx;
+    double x[N], y1[N], y2[N], z[N], w1[1] = { 1.7 }, w2[1] = { -0.6 }, one[N], gx[N], want[N];
+    struct tensor tx, t1, t2, tz, tw1, tw2, tone, tgx;
+    fill(x, w1, 0.5);
+    for (int i = 0; i < N; ++i) one[i] = 1.0;
+    eg_plane *px = mk(r, &tx, N, x), *py1 = mk(r, &t1, N, y1), *py2 = mk(r, &t2, N, y2), *pz = mk(r, &tz, N, z);
+    eg_plane *pw1 = mk(r, &tw1, 1, w1), *pw2 = mk(r, &tw2, 1, w2), *p1 = mk(r, &tone, N, one), *pgx = mk(r, &tgx, N, gx);
+    eg_plane *a1[] = { px, pw1, py1 }, *a2[] = { px, pw2, py2 }, *b[] = { py1, py2, pz };
+    eg_plan *f1 = plan_with(r, u->scale, 3, a1, NULL), *f2 = plan_with(r, u->scale, 3, a2, NULL), *m = plan_with(r, u->mul2, 3, b, NULL);
+    const struct eg_node_vjp vjps[] = { { 0, u->scale_vjp }, { 1, u->scale_vjp }, { 2, u->mul2_vjp } };
+    eg_graph* g = NULL;
+    up(r);
+    int ok = f1 && f2 && m && eg_record_begin(ctx) == EG_OK && eg_record_fork_begin(ctx) == EG_OK && eg_launch(ctx, f1, NULL) == EG_OK &&
+             eg_record_fork_branch(ctx) == EG_OK && eg_launch(ctx, f2, NULL) == EG_OK && eg_record_fork_end(ctx) == EG_OK &&
+             eg_launch(ctx, m, NULL) == EG_OK && end_diff(ctx, 3, vjps, &g) == EG_OK && eg_graph_launch(ctx, g) == EG_OK;
+    eg_plane* in[] = { px };
+    eg_plane* gr[] = { pgx };
+    ok = ok && reverse(ctx, g, pz, p1, 1, in, gr) == EG_OK;
+    down(r);
+    for (int i = 0; i < N; ++i) want[i] = 2.0 * w1[0] * w2[0] * x[i];
+    verdict(r, ok && close_to(gx, want, N), "a fork of two branches y1 = w1 x, y2 = w2 x then z = y1 y2: dJ/dx = 2 w1 w2 x, the sum of both paths");
+    eg_graph_free(ctx, g);
+    eg_plan_free(ctx, f1);
+    eg_plan_free(ctx, f2);
+    eg_plan_free(ctx, m);
+    release(r);
+}
+
+/* y = w1 x always, then under a test on lane 2 of a flag array y = w2 x2 (IF), or either one (IF_ELSE): the gradient follows the arm
+ * that ran, whatever the flag is when the reverse starts. */
+static void if_row(struct rig* r, const struct units* u, eg_cond_kind kind, int negate, int rewrite_before_reverse) {
+    eg_ctx* ctx = r->ctx;
+    double x[N], x2[N], y[N], w1[1] = { 1.7 }, w2[1] = { -0.6 }, one[N], gx[N], gx2[N], want[N], want2[N];
+    int32_t flags[4] = { 7, 7, 0, 7 };
+    struct tensor tx, tx2, ty, tw1, tw2, tone, tgx, tgx2, tf;
+    fill(x, w1, 0.5);
+    fill(x2, w1, -1.5);
+    for (int i = 0; i < N; ++i) one[i] = 1.0;
+    eg_plane *px = mk(r, &tx, N, x), *px2 = mk(r, &tx2, N, x2), *py = mk(r, &ty, N, y), *pw1 = mk(r, &tw1, 1, w1), *pw2 = mk(r, &tw2, 1, w2);
+    eg_plane *p1 = mk(r, &tone, N, one), *pgx = mk(r, &tgx, N, gx), *pgx2 = mk(r, &tgx2, N, gx2), *pf = mk_i32(r, &tf, 4, flags);
+    eg_plane *a1[] = { px, pw1, py }, *a2[] = { px2, pw2, py };
+    eg_plan *f1 = plan_with(r, u->scale, 3, a1, NULL), *f2 = plan_with(r, u->scale, 3, a2, NULL);
+    const struct eg_node_vjp vjps[] = { { 0, u->scale_vjp }, { 1, u->scale_vjp } };
+    const uint32_t flag = negate ? EG_COND_NEGATE : 0;
+    eg_graph* g = NULL;
+    up(r);
+    int ok = f1 && f2 && pf && eg_record_begin(ctx) == EG_OK;
+    if (kind == EG_COND_IF) {
+        ok = ok && eg_launch(ctx, f1, NULL) == EG_OK && cond_open(ctx, kind, flag, pf, 2, 0) == EG_OK && eg_launch(ctx, f2, NULL) == EG_OK;
+    } else {
+        ok = ok && cond_open(ctx, kind, flag, pf, 2, 0) == EG_OK && eg_launch(ctx, f1, NULL) == EG_OK && eg_record_cond_arm(ctx) == EG_OK &&
+             eg_launch(ctx, f2, NULL) == EG_OK;
+    }
+    ok = ok && eg_record_cond_end(ctx) == EG_OK && end_diff(ctx, 2, vjps, &g) == EG_OK;
+    eg_plane* in[] = { px, px2 };
+    eg_plane* gr[] = { pgx, pgx2 };
+    for (int lane = 1; ok && lane >= 0; --lane) {
+        flags[2] = lane;
+        ok = eg_graph_launch(ctx, g) == EG_OK;
+        if (rewrite_before_reverse) flags[2] = lane ? 0 : 1;
+        ok = ok && reverse(ctx, g, py, p1, 2, in, gr) == EG_OK;
+        down(r);
+        const int truth = (lane != 0) != (negate != 0);
+        const int second = kind == EG_COND_IF ? truth : !truth;     /* the arm of f2 ran */
+        const int first = kind == EG_COND_IF ? 1 : !second;          /* f1 ran: always for IF, else the other arm */
+        const int overwritten = kind == EG_COND_IF && second;        /* f2 replaced what f1 wrote */
+        for (int i = 0; i < N; ++i) {
+            want[i] = first && !overwritten ? w1[0] : 0.0;
+            want2[i] = second ? w2[0] : 0.0;
+        }
+        ok = ok && close_to(gx, want, N) && close_to(gx2, want2, N);
+    }
+    char what[200];
+    snprintf(what, sizeof(what), "%s%s, flag lane 2 %s: the gradient follows the arm that ran, lane 1 and 0",
+             kind == EG_COND_IF ? "an IF" : "an IF_ELSE", negate ? " negated" : "", rewrite_before_reverse ? "rewritten after the replay" : "set for the replay");
+    verdict(r, ok, what);
+    eg_graph_free(ctx, g);
+    eg_plan_free(ctx, f1);
+    eg_plan_free(ctx, f2);
+    release(r);
+}
+
+/* x <- a x per pass (t = a x, x = 1 t), a counter plane ticking down: the loop stops at zero or at its cap. With @p guarded the two
+ * launches sit in an IF on lane 2 of a flag array, inside the loop. */
+static void while_row(struct rig* r, const struct units* u, int32_t start, int guarded, int lane) {
+    eg_ctx* ctx = r->ctx;
+    double x[N], x0[N], t[N], a[1] = { 0.9 }, one1[1] = { 1.0 }, seed[N], gx[N], ga[1], want[N], want_a = 0.0;
+    int32_t c[N], flags[4] = { 7, 7, 7, 7 };
+    struct tensor tx, tt, ta, to, ts, tgx, tga, tc, tf;
+    fill(x, a, 0.5);
+    for (int i = 0; i < N; ++i) {
+        x0[i] = x[i];
+        seed[i] = 1.0;
+    }
+    a[0] = 0.9;
+    eg_plane *px = mk(r, &tx, N, x), *pt = mk(r, &tt, N, t), *pa = mk(r, &ta, 1, a), *po = mk(r, &to, 1, one1), *ps = mk(r, &ts, N, seed);
+    eg_plane *pgx = mk(r, &tgx, N, gx), *pga = mk(r, &tga, 1, ga), *pc = mk_i32(r, &tc, N, c), *pf = mk_i32(r, &tf, 4, flags);
+    eg_plane *a1[] = { px, pa, pt }, *a2[] = { pt, po, px }, *a3[] = { pc };
+    eg_plan *f1 = plan_with(r, u->scale, 3, a1, NULL), *f2 = plan_with(r, u->scale, 3, a2, NULL), *tk = plan_with(r, u->tick, 1, a3, NULL);
+    const struct eg_node_vjp vjps[] = { { 0, u->scale_vjp }, { 1, u->scale_vjp } };
+    eg_graph* g = NULL;
+    up(r);
+    int ok = f1 && f2 && tk && pf && eg_record_begin(ctx) == EG_OK && cond_open(ctx, EG_COND_WHILE, 0, pc, 0, 4) == EG_OK;
+    if (guarded) ok = ok && cond_open(ctx, EG_COND_IF, 0, pf, 2, 0) == EG_OK;
+    ok = ok && eg_launch(ctx, f1, NULL) == EG_OK && eg_launch(ctx, f2, NULL) == EG_OK;
+    if (guarded) ok = ok && eg_record_cond_end(ctx) == EG_OK;
+    ok = ok && eg_launch(ctx, tk, NULL) == EG_OK && eg_record_cond_end(ctx) == EG_OK && end_diff(ctx, 2, vjps, &g) == EG_OK;
+    for (int i = 0; i < N; ++i) c[i] = start;
+    flags[2] = lane;
+    ok = ok && eg_graph_launch(ctx, g) == EG_OK;
+    const int passes = start > 4 ? 4 : start;              /* the cap is 4 */
+    const int ran = guarded && lane == 0 ? 0 : passes;     /* passes that multiplied */
+    eg_plane* in[] = { px, pa };
+    eg_plane* gr[] = { pgx, pga };
+    ok = ok && reverse(ctx, g, px, ps, 2, in, gr) == EG_OK;
+    down(r);
+    for (int i = 0; i < N; ++i) {
+        want[i] = pow(a[0], ran);
+        want_a += ran * pow(a[0], ran - 1) * x0[i];
+    }
+    ok = ok && fabs(x[0] - pow(a[0], ran) * x0[0]) < 1e-12 && close_to(gx, want, N) && close_to(ga, &want_a, 1);
+    char what[200];
+    snprintf(what, sizeof(what), "a WHILE with cap 4 whose counter starts at %d%s%s: %d pass(es), dJ/dx0 = a^%d, dJ/da the closed form", (int)start,
+             guarded ? ", an IF around the body, lane " : "", guarded ? (lane ? "set" : "clear") : "", ran, ran);
+    verdict(r, ok, what);
+    eg_graph_free(ctx, g);
+    eg_plan_free(ctx, f1);
+    eg_plan_free(ctx, f2);
+    eg_plan_free(ctx, tk);
+    release(r);
+}
+
+/* Under a test on lane 2, a fork of y1 = w1 x and y2 = w2 x, then z = y1 y2 (y1, y2 preset): the fork's gradient flows when the arm ran. */
+static void fork_in_arm_row(struct rig* r, const struct units* u) {
+    eg_ctx* ctx = r->ctx;
+    double x[N], y1[N], y2[N], z[N], w1[1] = { 1.7 }, w2[1] = { -0.6 }, one[N], gx[N], want[N];
+    int32_t flags[4] = { 7, 7, 0, 7 };
+    struct tensor tx, t1, t2, tz, tw1, tw2, tone, tgx, tf;
+    fill(x, w1, 0.5);
+    for (int i = 0; i < N; ++i) {
+        one[i] = 1.0;
+        y1[i] = 2.0;
+        y2[i] = 3.0;
+    }
+    eg_plane *px = mk(r, &tx, N, x), *py1 = mk(r, &t1, N, y1), *py2 = mk(r, &t2, N, y2), *pz = mk(r, &tz, N, z), *pw1 = mk(r, &tw1, 1, w1);
+    eg_plane *pw2 = mk(r, &tw2, 1, w2), *p1 = mk(r, &tone, N, one), *pgx = mk(r, &tgx, N, gx), *pf = mk_i32(r, &tf, 4, flags);
+    eg_plane *a1[] = { px, pw1, py1 }, *a2[] = { px, pw2, py2 }, *b[] = { py1, py2, pz };
+    eg_plan *f1 = plan_with(r, u->scale, 3, a1, NULL), *f2 = plan_with(r, u->scale, 3, a2, NULL), *m = plan_with(r, u->mul2, 3, b, NULL);
+    const struct eg_node_vjp vjps[] = { { 0, u->scale_vjp }, { 1, u->scale_vjp }, { 2, u->mul2_vjp } };
+    eg_graph* g = NULL;
+    up(r);
+    int ok = f1 && f2 && m && pf && eg_record_begin(ctx) == EG_OK && cond_open(ctx, EG_COND_IF, 0, pf, 2, 0) == EG_OK &&
+             eg_record_fork_begin(ctx) == EG_OK && eg_launch(ctx, f1, NULL) == EG_OK && eg_record_fork_branch(ctx) == EG_OK &&
+             eg_launch(ctx, f2, NULL) == EG_OK && eg_record_fork_end(ctx) == EG_OK && eg_record_cond_end(ctx) == EG_OK &&
+             eg_launch(ctx, m, NULL) == EG_OK && end_diff(ctx, 3, vjps, &g) == EG_OK;
+    eg_plane* in[] = { px };
+    eg_plane* gr[] = { pgx };
+    for (int lane = 1; ok && lane >= 0; --lane) {
+        flags[2] = lane;
+        ok = eg_graph_launch(ctx, g) == EG_OK && reverse(ctx, g, pz, p1, 1, in, gr) == EG_OK;
+        down(r);
+        for (int i = 0; i < N; ++i) want[i] = lane ? 2.0 * w1[0] * w2[0] * x[i] : 0.0;
+        ok = ok && close_to(gx, want, N);
+    }
+    verdict(r, ok, "a fork inside an IF arm: dJ/dx = 2 w1 w2 x when the arm ran, 0 when it did not (y1, y2 keep their preset values)");
+    eg_graph_free(ctx, g);
+    eg_plan_free(ctx, f1);
+    eg_plan_free(ctx, f2);
+    eg_plan_free(ctx, m);
+    release(r);
+}
+
+/* A WHILE with no cap has no bound for the tape. */
+static void while_refusal_row(struct rig* r, const struct units* u) {
+    eg_ctx* ctx = r->ctx;
+    double x[N], t[N], a[1] = { 0.9 };
+    int32_t c[N];
+    struct tensor tx, tt, ta, tc;
+    fill(x, a, 0.5);
+    for (int i = 0; i < N; ++i) c[i] = 1;
+    eg_plane *px = mk(r, &tx, N, x), *pt = mk(r, &tt, N, t), *pa = mk(r, &ta, 1, a), *pc = mk_i32(r, &tc, N, c);
+    eg_plane* a1[] = { px, pa, pt };
+    eg_plan* f1 = plan_with(r, u->scale, 3, a1, NULL);
+    const struct eg_node_vjp vjps[] = { { 0, u->scale_vjp } };
+    eg_graph *g = NULL, *plain = NULL;
+    int ok = f1 && pc && eg_record_begin(ctx) == EG_OK && cond_open(ctx, EG_COND_WHILE, 0, pc, 0, 0) == EG_OK && eg_launch(ctx, f1, NULL) == EG_OK &&
+             eg_record_cond_end(ctx) == EG_OK;
+    ok = ok && refused(end_diff(ctx, 1, vjps, &g), EG_BAD_REQUEST, ctx, "max_iters 0") && g == NULL && eg_record_end(ctx, NULL, &plain) == EG_OK;
+    verdict(r, ok, "EG_RECORD_DIFF over a WHILE with max_iters 0 is refused by name; the recording stays open and ends plain");
+    eg_graph_free(ctx, plain);
+    eg_plan_free(ctx, f1);
+    release(r);
+}
+
+static void conditional_rows(struct rig* r, const struct units* u) {
+    fork_reverse_row(r, u);
+    if_row(r, u, EG_COND_IF, 0, 0);
+    if_row(r, u, EG_COND_IF, 1, 0);
+    if_row(r, u, EG_COND_IF_ELSE, 0, 0);
+    if_row(r, u, EG_COND_IF, 0, 1);
+    while_row(r, u, 3, 0, 1);
+    while_row(r, u, 100, 0, 1);
+    while_row(r, u, 3, 1, 1);
+    while_row(r, u, 3, 1, 0);
+    fork_in_arm_row(r, u);
+    while_refusal_row(r, u);
+}
+
 static struct units load_units(struct rig* r) {
     const struct units u = { load(r, "scale", 0x10), load(r, "scale_vjp", 0x11), load(r, "square", 0x12), load(r, "square_vjp", 0x13),
                              load(r, "mul2", 0x14), load(r, "mul2_vjp", 0x15), load(r, "uscale", 0x16), load(r, "uscale_vjp", 0x17),
                              load(r, "scale_tape_vjp", 0x18), load(r, "scale_open_vjp", 0x19),
-                             load(r, "fan", 0x1a), load(r, "fan_vjp", 0x1b), load(r, "norm2", 0x1c), load(r, "norm2_vjp", 0x1d) };
+                             load(r, "fan", 0x1a), load(r, "fan_vjp", 0x1b), load(r, "norm2", 0x1c), load(r, "norm2_vjp", 0x1d), load(r, "tick", 0x1e) };
     verdict(r, u.scale && u.scale_vjp && u.square && u.square_vjp && u.mul2 && u.mul2_vjp && u.uscale && u.uscale_vjp && u.tape_vjp &&
-                   u.open_vjp && u.fan && u.fan_vjp && u.norm2 && u.norm2_vjp,
-            "the graph fixture's fourteen units load");
+                   u.open_vjp && u.fan && u.fan_vjp && u.norm2 && u.norm2_vjp && u.tick,
+            "the graph fixture's fifteen units load");
     return u;
 }
 
@@ -544,6 +776,7 @@ int main(int argc, char** argv) {
     const struct units u = load_units(&host);
     gradient_rows(&host, &u);
     refusal_rows(&host, &u);
+    conditional_rows(&host, &u);
 
     int32_t devices = 0;
     if (eg_device_count(ctx, &devices) != EG_OK || devices < 1) {

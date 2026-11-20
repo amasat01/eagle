@@ -10,6 +10,7 @@
 #include "eagle/graph/Edges.h"
 
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -41,6 +42,46 @@ struct NodeFacts {
     std::int64_t max_iters = 0, cell_index = 0;
 };
 
+/** @brief A conditional's test as the reverse needs it: which kind, and whether it is negated. One per test the forward can evaluate. */
+struct RTest {
+    int kind = EG_COND_IF;
+    bool negate = false;
+    std::vector<int> key;                       ///< the COND node's ordinal, then the iteration of each enclosing WHILE; a WHILE's own test adds its iteration
+};
+
+/** @brief The condition a leaf's run hangs on: test ``test`` took arm ``arm`` (a WHILE: its iteration ran). */
+struct RGate {
+    int test = 0, arm = 0;
+};
+
+/** @brief A launch as the reverse sees it: one copy per unrolled WHILE iteration, with the gates of every conditional around it. */
+struct RLeaf {
+    int launch = 0;                             ///< the ordinal among the eg_launch calls of the recording
+    std::vector<RGate> gates;                   ///< empty: it always runs
+    std::vector<int> key;                       ///< the launch node's ordinal, then the iteration of each enclosing WHILE
+};
+
+/** @brief The leaves of a recording in the order the forward runs them, its WHILE bodies unrolled ``max_iters`` times. */
+struct ReversePlan {
+    std::vector<RLeaf> leaves;
+    std::vector<RTest> tests;
+    std::map<std::vector<int>, int> leaf_of, test_of;   ///< by key
+};
+
+/** @brief What a conditional test saw at its last replay (the cell and baseline values), or that it was not evaluated. */
+struct TestSave {
+    bool evaluated = false;
+    std::int32_t cell = 0, base = 0;
+};
+
+/** @brief Whether leaf's gate @p g was taken by the saved test @p s of @p t. */
+inline bool took(const RTest& t, const TestSave& s, int arm) {
+    if (!s.evaluated) return false;
+    if (t.kind == EG_COND_SWITCH) return s.cell == arm;
+    const bool truth = (s.cell != s.base) != t.negate;
+    return t.kind == EG_COND_IF_ELSE ? arm == (truth ? 0 : 1) : (arm == 0 && truth);
+}
+
 class GraphShape {
 public:
     /** @brief A call recorded (a launch, run, reduce, copy, fft, gemm or conditional test) into the current container; returns its ordinal. */
@@ -56,6 +97,9 @@ public:
     void cond_arm();
     void cond_end();
     bool open() const { return !frames_.empty(); }
+    /** @brief The leaves of the recording for EG_RECORD_DIFF. Refuses a call that is not a launch or a conditional or fork around
+     *  launches (NOT_WRITTEN), and a WHILE without max_iters (BAD_REQUEST). */
+    ReversePlan reverse_plan() const;
     /** @brief Fill @p store from the nodes and return its count of levels; the description points into @p store. */
     void describe(DescribeStore& store, std::uint32_t flags, eg_graph_description& out) const;
 
