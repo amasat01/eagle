@@ -178,6 +178,7 @@ struct units {
     eg_unit *scale, *scale_vjp, *square, *square_vjp, *mul2, *mul2_vjp, *uscale, *uscale_vjp, *tape_vjp, *open_vjp;
     eg_unit *fan, *fan_vjp, *norm2, *norm2_vjp;
     eg_unit *tick, *scatter_vjp;
+    eg_unit *iscale, *iscale_vjp;
 };
 
 static eg_status end_diff(eg_ctx* ctx, int32_t n, const struct eg_node_vjp* v, eg_graph** g) {
@@ -1455,6 +1456,51 @@ static void leaf_rows(struct rig* r, const struct units* u) {
 }
 
 
+/* ---- an int plane a vjp reads by a VALUE link: kept as a primal, never given an adjoint ----------------------------------------------- */
+
+/* y = n x with n an int32 per-sample plane the kernel and its vjp's Value link read: dJ/dx = n, the closed form. With @p overwritten an eg_copy after the
+ * launch puts other values in n: the reverse still reads the n the launch read (the graph copied it before the overwrite). An int plane in inputs is refused. */
+static void int_read_row(struct rig* r, const struct units* u, int overwritten) {
+    eg_ctx* ctx = r->ctx;
+    double x[N], y[N], seed[N], gx[N], want[N];
+    int32_t n[N], later[N];
+    struct tensor tx, ty, ts, tg, tn, tl;
+    for (int i = 0; i < N; ++i) {
+        x[i] = 0.5 + 0.25 * i;
+        seed[i] = 1.0;
+        n[i] = 2 + i % 5;
+        later[i] = 100 + i;
+        want[i] = (double)n[i];
+        gx[i] = y[i] = 0.0;
+    }
+    eg_plane *px = mk(r, &tx, N, x), *py = mk(r, &ty, N, y), *ps = mk(r, &ts, N, seed), *pg = mk(r, &tg, N, gx);
+    eg_plane *pn = mk_typed(r, &tn, N, n, kDLInt, 32), *pl = mk_typed(r, &tl, N, later, kDLInt, 32);
+    eg_plane* a[] = { px, pn, py };
+    eg_plan* f = plan_with(r, u->iscale, 3, a, NULL);
+    const struct eg_node_vjp vjps[] = { { 0, u->iscale_vjp } };
+    eg_graph *g = NULL, *none = NULL;
+    up(r);
+    int ok = f && eg_record_begin(ctx) == EG_OK && eg_launch(ctx, f, NULL) == EG_OK && (!overwritten || eg_copy(ctx, pl, pn) == EG_OK) && end_diff(ctx, 1, vjps, &g) == EG_OK;
+    eg_plane *in[] = { px }, *gr[] = { pg }, *int_in[] = { pn };
+    ok = ok && eg_graph_launch(ctx, g) == EG_OK && reverse(ctx, g, py, ps, 1, in, gr) == EG_OK;
+    down(r);
+    verdict(r, ok && close_to(gx, want, N) && (!overwritten || n[N - 1] == later[N - 1]),
+            overwritten ? "eg_graph_reverse of y = n x with n overwritten by a later eg_copy: dJ/dx = the n the launch read (the copy kept before the overwrite)"
+                        : "eg_graph_reverse of y = n x with n an int32 plane read by the kernel and by its vjp's Value link: dJ/dx = n");
+    if (!overwritten)
+        verdict(r, ok && refused(reverse(ctx, g, py, ps, 1, int_in, gr), EG_BAD_REQUEST, ctx, "not a float plane"),
+                "an int32 plane listed in inputs is still refused BAD_REQUEST by name");
+    (void)none;
+    if (g) eg_graph_free(ctx, g);
+    if (f) eg_plan_free(ctx, f);
+    release(r);
+}
+
+static void int_read_rows(struct rig* r, const struct units* u) {
+    int_read_row(r, u, 0);
+    int_read_row(r, u, 1);
+}
+
 /* ---- slice 3c: runs of recorded runners in a recording --------------------------------------------------------------------- */
 
 #define LN 37
@@ -1968,10 +2014,11 @@ static struct units load_units(struct rig* r) {
     const struct units u = { load(r, "scale", 0x10), load(r, "scale_vjp", 0x11), load(r, "square", 0x12), load(r, "square_vjp", 0x13),
                              load(r, "mul2", 0x14), load(r, "mul2_vjp", 0x15), load(r, "uscale", 0x16), load(r, "uscale_vjp", 0x17),
                              load(r, "scale_tape_vjp", 0x18), load(r, "scale_open_vjp", 0x19),
-                             load(r, "fan", 0x1a), load(r, "fan_vjp", 0x1b), load(r, "norm2", 0x1c), load(r, "norm2_vjp", 0x1d), load(r, "tick", 0x1e), load(r, "scale_scatter_vjp", 0x1f) };
+                             load(r, "fan", 0x1a), load(r, "fan_vjp", 0x1b), load(r, "norm2", 0x1c), load(r, "norm2_vjp", 0x1d), load(r, "tick", 0x1e), load(r, "scale_scatter_vjp", 0x1f),
+                             load(r, "iscale", 0x20), load(r, "iscale_vjp", 0x21) };
     verdict(r, u.scale && u.scale_vjp && u.square && u.square_vjp && u.mul2 && u.mul2_vjp && u.uscale && u.uscale_vjp && u.tape_vjp &&
-                   u.open_vjp && u.fan && u.fan_vjp && u.norm2 && u.norm2_vjp && u.tick && u.scatter_vjp,
-            "the graph fixture's sixteen units load");
+                   u.open_vjp && u.fan && u.fan_vjp && u.norm2 && u.norm2_vjp && u.tick && u.scatter_vjp && u.iscale && u.iscale_vjp,
+            "the graph fixture's eighteen units load");
     return u;
 }
 
@@ -2003,6 +2050,7 @@ int main(int argc, char** argv) {
     conditional_rows(&host, &u);
     option_rows(&host, &u);
     leaf_rows(&host, &u);
+    int_read_rows(&host, &u);
     run_rows(&host, &u);
 
     int32_t devices = 0;
@@ -2019,6 +2067,7 @@ int main(int argc, char** argv) {
         conditional_rows(&dev, &du);
         option_rows(&dev, &du);
         leaf_rows(&dev, &du);
+        int_read_rows(&dev, &du);
         run_rows(&dev, &du);
         policy_row(&host, &u, &dev, &du);
         eg_ctx_free(dctx);

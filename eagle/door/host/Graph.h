@@ -78,6 +78,7 @@ struct DiffNode {
     Node::Kind kind = Node::Launch;
     eg_plan_s* plan = nullptr;                  ///< a launch
     std::vector<int> reads, writes;             ///< indices in GraphDiff::planes
+    std::vector<int> kept_reads, overwrites;    ///< planes with no adjoint a vjp reads the value of, and kept ones the leaf overwrites (indices in GraphDiff::planes)
     std::vector<int> valued;                    ///< the reads whose values the reverse needs: a launch's reads, a product's A and B
     eg_unit_s* vjp = nullptr;                   ///< a launch: a reference is held; null: no gradient flows through the node
     std::vector<VjpLink> links;

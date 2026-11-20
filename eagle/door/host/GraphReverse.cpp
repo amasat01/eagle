@@ -19,6 +19,7 @@
 #include <functional>
 #include <map>
 #include <new>
+#include <set>
 #include <string>
 #include <tuple>
 
@@ -82,7 +83,7 @@ std::vector<VjpLink> link_vjp(const GraphDiff& d, const DiffNode& node, const eg
         } else {
             const eg_plane_s* bound = plan.bindings[static_cast<std::size_t>(l.of_slot)].plane;
             k.plane = bound == nullptr ? -1 : find_plane(d, bound);
-            if (k.plane < 0) refuse(EG_BAD_REQUEST, where + ": '" + ps.name + "' of '" + pu.name + "' is no plane the graph tracks (a real read or written plane)");
+            if (k.plane < 0) refuse(EG_BAD_REQUEST, where + ": '" + ps.name + "' of '" + pu.name + "' is no plane the graph tracks (a plane no leaf reads or writes)");
             if (l.form == EG_FORM_VALUE) {
                 k.kind = VjpLink::VALUE_PLANE;
             } else if (l.form == EG_FORM_ADJOINT_IN) {
@@ -184,7 +185,7 @@ std::string leaf_name(const Node& n, std::size_t ordinal) {
 
 /** @brief What the non-launch leaf @p n reads and writes, and what reverses it, into @p dn. @p ordinal is its place among those leaves.
  *  Only a float plane has an adjoint: a call with none is left with no accesses; a reduce that is not a 1-D sum has no gradient to pull back. */
-void other_leaf(eg_ctx& ctx, const Node& n, DiffNode& dn, std::size_t ordinal, const Track& track) {
+void other_leaf(eg_ctx& ctx, const Node& n, DiffNode& dn, std::size_t ordinal, const Track& track, const std::set<const eg_plane_s*>& kept) {
     const std::string at = leaf_name(n, ordinal);
     const auto floats = [](const eg_plane_s* p) { return tensor(*p).dtype.code == kDLFloat; };
     const auto read = [&](eg_plane_s* p, const char* name) { dn.reads.push_back(track(p, false, at + " " + name, at + " " + name)); };
@@ -208,12 +209,18 @@ void other_leaf(eg_ctx& ctx, const Node& n, DiffNode& dn, std::size_t ordinal, c
             return;
         }
         case Node::Copy:
-            if (!floats(n.src)) return;
+            if (!floats(n.src)) {    // no adjoint; but a kept plane it overwrites is copied before it, for the vjp that read it
+                if (kept.count(n.dst) != 0) dn.overwrites.push_back(track(n.dst, true, at + " dst", at + " dst"));
+                return;
+            }
             read(n.src, "src");
             write(n.dst, "dst");
             return;
         case Node::Reduce:
-            if (!floats(n.reduce.in)) return;
+            if (!floats(n.reduce.in)) {
+                if (kept.count(n.reduce.out) != 0) dn.overwrites.push_back(track(n.reduce.out, true, at + " out", at + " out"));
+                return;
+            }
             dn.reduce = n.reduce;
             read(n.reduce.in, "in");
             write(n.reduce.out, "out");
@@ -285,6 +292,20 @@ std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<eg_plan_s*>&
             }
             return idx;
         };
+        // The planes with no adjoint whose values a vjp reads (a VALUE link on a plane that is not a real slot of its launch): the graph keeps
+        // them like any primal, so a leaf that overwrites one later is preceded by a copy of it.
+        std::set<const eg_plane_s*> kept;
+        for (std::int32_t k = 0; k < desc.n_vjps; ++k) {
+            const eg_node_vjp v = desc.vjps[k];
+            if (v.launch < 0 || static_cast<std::size_t>(v.launch) >= launches.size() || v.vjp == nullptr) continue;    // refused below, by name
+            const eg_plan_s& lp = *launches[static_cast<std::size_t>(v.launch)];
+            for (const DerivedFacts::Link& l : v.vjp->derived.links) {
+                if (l.form != EG_FORM_VALUE || l.what != EG_WHAT_PRIMAL_SLOT || l.of_slot < 0 || l.of_slot >= static_cast<std::int32_t>(lp.bindings.size())) continue;
+                const SlotFacts& sf = lp.unit->slots[static_cast<std::size_t>(l.of_slot)];
+                if (sf.dtype != EG_DTYPE_REAL && sf.role != EG_ROLE_UNIFORM && lp.bindings[static_cast<std::size_t>(l.of_slot)].plane != nullptr)
+                    kept.insert(lp.bindings[static_cast<std::size_t>(l.of_slot)].plane);
+            }
+        }
         for (std::size_t i = 0; i < launches.size(); ++i) {
             const eg_plan_s& plan = *launches[i];
             const std::string at = "eg_record_end: launch " + std::to_string(i);
@@ -297,6 +318,12 @@ std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<eg_plan_s*>&
                 const SlotFacts& sf = plan.unit->slots[s];
                 eg_plane_s* p = plan.bindings[s].plane;
                 const bool reads = reads_role(sf.role), writes = writes_role(sf.role);
+                if (p != nullptr && !sf.made && sf.dtype != EG_DTYPE_REAL && kept.count(p) != 0) {    // no adjoint: its value is kept, a write of it is noted
+                    const int kept_idx = track(p, writes, "launch " + std::to_string(i) + " slot '" + sf.name + "'", at + " slot '" + sf.name + "'");
+                    if (reads) diff->nodes[i].kept_reads.push_back(kept_idx);
+                    if (writes) diff->nodes[i].overwrites.push_back(kept_idx);
+                    continue;
+                }
                 if (p == nullptr || sf.made || sf.dtype != EG_DTYPE_REAL || (!reads && !writes)) continue;
                 const int idx = track(p, writes, "launch " + std::to_string(i) + " slot '" + sf.name + "'", at + " slot '" + sf.name + "'");
                 if (!named.emplace(idx, sf.name).second)
@@ -304,8 +331,9 @@ std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<eg_plan_s*>&
                 (writes ? diff->nodes[i].writes : diff->nodes[i].reads).push_back(idx);
             }
             diff->nodes[i].valued = diff->nodes[i].reads;
+            diff->nodes[i].valued.insert(diff->nodes[i].valued.end(), diff->nodes[i].kept_reads.begin(), diff->nodes[i].kept_reads.end());
         }
-        for (std::size_t j = 0; j < others.size(); ++j) other_leaf(ctx, *others[j], diff->nodes[launches.size() + j], j, track);
+        for (std::size_t j = 0; j < others.size(); ++j) other_leaf(ctx, *others[j], diff->nodes[launches.size() + j], j, track, kept);
         for (std::size_t a = 0; a < diff->planes.size(); ++a)
             for (std::size_t b = a + 1; b < diff->planes.size(); ++b)
                 if (host::overlaps(tensor(*diff->planes[a]), tensor(*diff->planes[b])))
@@ -366,8 +394,8 @@ std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<eg_plan_s*>&
         // buffer of its body leaf in iteration (k mod w), which the reverse refills window by window; a reader outside the loop
         // reads the loop's start-of-loop checkpoint instead.
         const auto writes = [&](const RLeaf& l, int p) {
-            const std::vector<int>& w = diff->nodes[static_cast<std::size_t>(l.node)].writes;
-            return std::find(w.begin(), w.end(), p) != w.end();
+            const DiffNode& n = diff->nodes[static_cast<std::size_t>(l.node)];
+            return std::find(n.writes.begin(), n.writes.end(), p) != n.writes.end() || std::find(n.overwrites.begin(), n.overwrites.end(), p) != n.overwrites.end();
         };
         const std::function<int(std::size_t, int)> snapshot_of = [&](std::size_t m, int p) {
             for (std::size_t k = 0; k < diff->snapshots.size(); ++k)
@@ -534,8 +562,10 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
         const eg_plane_s& p = *d.planes[static_cast<std::size_t>(plane)];
         char* data = live(p);
         for (std::size_t m = i; m < n_leaves; ++m) {
-            const std::vector<int>& w = d.nodes[static_cast<std::size_t>(d.plan.leaves[m].node)].writes;
-            if (std::find(w.begin(), w.end(), plane) == w.end() || !leaf_ran(d, m)) continue;
+            const DiffNode& wn = d.nodes[static_cast<std::size_t>(d.plan.leaves[m].node)];
+            if ((std::find(wn.writes.begin(), wn.writes.end(), plane) == wn.writes.end() && std::find(wn.overwrites.begin(), wn.overwrites.end(), plane) == wn.overwrites.end()) ||
+                !leaf_ran(d, m))
+                continue;
             const RLeaf &lm = d.plan.leaves[m], &li = d.plan.leaves[i];
             if (lm.loop >= 0 && !(li.loop == lm.loop && li.iter / d.plan.loops[static_cast<std::size_t>(lm.loop)].w == lm.iter / d.plan.loops[static_cast<std::size_t>(lm.loop)].w)) {
                 // the writer is in a window the reader is not in: the plane is as the checkpoint after the reader's window (or at loop entry) kept it

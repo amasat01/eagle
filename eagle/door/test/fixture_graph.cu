@@ -33,6 +33,16 @@ __global__ void scale_vjp(ScalarHandle x, ScalarHandle w, ScalarHandle bar_y, Sc
     at(bar_x)[i] = at(w)[0] * at(bar_y)[i];
     at(bar_w)[i] = at(x)[i] * at(bar_y)[i];
 }
+// slots: x, n (int32), y
+__global__ void iscale(ScalarHandle x, ScalarHandle n, ScalarHandle y, TRIPLE) {
+    SAMPLE(i);
+    at(y)[i] = static_cast<double>(static_cast<int*>(n.data)[i]) * at(x)[i];
+}
+// slots: n (int32), bar_y, bar_x
+__global__ void iscale_vjp(ScalarHandle n, ScalarHandle bar_y, ScalarHandle bar_x, TRIPLE) {
+    SAMPLE(i);
+    at(bar_x)[i] = static_cast<double>(static_cast<int*>(n.data)[i]) * at(bar_y)[i];
+}
 __global__ void square(ScalarHandle a, ScalarHandle o, TRIPLE) {
     SAMPLE(i);
     at(o)[i] = at(a)[i] * at(a)[i];
