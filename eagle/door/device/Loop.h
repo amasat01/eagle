@@ -194,6 +194,30 @@ void pool_free(DevicePool* pool) noexcept;
 /** @brief Whether @p pool still has @p streams streams and @p events events to hand out. */
 bool pool_has(const DevicePool* pool, unsigned streams, unsigned events);
 
+/** @brief Zeroed device memory of @p bytes for the recording @p pool belongs to, made while its capture is open: allocated and settled on a stream
+ *  of its own that is not being captured, so it is ready for the captured work on return. Free it with scratch_free. */
+void* scratch_alloc(DevicePool* pool, std::size_t bytes);
+
+/** @brief Queue on @p stream the free of scratch_alloc memory, after the work queued there. */
+void scratch_free(std::uint64_t stream, void* data) noexcept;
+
+/** @brief Queue on @p stream (inside a capture) the save of one conditional test: entry ``min(*iter, capacity - 1)`` of @p dst (two words: the
+ *  cell and the baseline, 0 for none) takes ``*cell`` and ``*baseline``. A null @p iter is entry 0. */
+void save_test_step(std::uint64_t stream, const unsigned* cell, const unsigned* baseline, const unsigned* iter, unsigned* dst, unsigned capacity);
+
+/** @brief Queue on @p stream (inside a capture) the copy of @p bytes at @p src into slot ``min(*iter, capacity - 1)`` of @p buffer (slots of @p bytes each). */
+void loop_copy_step(std::uint64_t stream, const void* src, void* buffer, std::size_t bytes, const unsigned* iter, unsigned capacity);
+
+/** @brief One device-to-host read of read_many. */
+struct ReadItem {
+    void* host;
+    const void* device;
+    std::size_t bytes;
+};
+
+/** @brief Queue every read of @p items on @p stream and wait once. */
+void read_many(std::uint64_t stream, const std::vector<ReadItem>& items);
+
 struct DeviceWeave;  ///< a conditional woven into the capture in progress: its arm streams and its nodes
 struct DeviceFork;   ///< parallel branches of the capture in progress: one stream each, joined back at the end
 

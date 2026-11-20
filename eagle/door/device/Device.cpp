@@ -97,6 +97,10 @@ void device_record_fork_branch(eg_ctx&) {}
 void device_record_fork_end(eg_ctx&) {}
 void device_record_wait(eg_ctx&, std::int32_t, eg_plane_s* const*) {}
 bool device_cond_arms_supported() { return false; }
+void* device_record_scratch(eg_ctx&, std::size_t) { return nullptr; }
+std::int32_t device_record_save_test(eg_ctx&, eg_plane_s*, std::int64_t, eg_plane_s*, std::int64_t) { return -1; }
+void device_record_loop_copy(eg_ctx&, const void*, void*, std::size_t) {}
+void device_saved_read(eg_ctx&, const eg_graph*, DeviceSaved&) {}
 GraphShape& device_shape(eg_ctx&) { refuse(EG_NOT_WRITTEN, "the device group is not built"); }
 void device_graph_describe(eg_ctx&, const eg_graph*, eg_graph_description*) {}
 GraphDiff* device_graph_diff(eg_ctx&, eg_graph*) { return nullptr; }
@@ -261,6 +265,8 @@ struct Frame {
     DeviceWeave* weave = nullptr;
     DeviceFork* fork = nullptr;
     unsigned arm = 0, arms = 0;                         ///< a conditional's open arm and arm count; a fork's branch count is ``arms``
+    const unsigned* iteration = nullptr;                ///< a WHILE: its iteration counter word; its cap
+    unsigned cap = 0;
     std::uint64_t outer = 0;
 };
 
@@ -277,6 +283,12 @@ struct DeviceRecording {
     void* loop_cells = nullptr;                         ///< kRecordedLoops pairs of device words
     DevicePool* pool = nullptr;                         ///< the arm and branch streams and the events of its forks
     unsigned loops = 0;                                 ///< the pairs used
+    std::vector<void*> scratch;                         ///< device memory the recording owns (device_record_scratch, the save slots)
+    struct Save {
+        void* buffer;
+        unsigned capacity;
+    };
+    std::vector<Save> saves;                            ///< the save slots of device_record_save_test
     std::vector<std::vector<std::uint64_t>> kernels;    ///< per recorded launch (as ``plans``): the kernel nodes of its partitions
     bool launches_only = true;                          ///< no copy, reduce, transform, product or host node was captured: what EG_RECORD_DIFF needs
     std::vector<std::unique_ptr<HostHook>> hooks;       ///< the host nodes captured so far
@@ -291,6 +303,9 @@ struct DeviceRecording {
 
 /** @brief A recorded device graph: the instantiated capture and the plans whose bindings it holds by value. */
 struct DeviceGraph {
+    std::vector<void*> scratch;                         ///< device memory the graph owns, freed with it
+    std::vector<DeviceRecording::Save> saves;           ///< its save slots
+    unsigned loops = 0;                                 ///< its WHILE conditionals
     GraphShape shape;                                   ///< what eg_graph_describe returns
     mutable DescribeStore described;                    ///< the arrays of the last description
     void* loop_cells = nullptr;                         ///< the loop states of its WHILE conditionals, freed with it
@@ -1769,6 +1784,7 @@ void abort_recording(eg_ctx& ctx) noexcept {
         pool_free(rec->pool);
         run_later(ctx, *rec);
         device_free(ctx, rec->loop_cells);
+        for (void* p : rec->scratch) scratch_free(ctx.dev.stream, p);
     } catch (...) {
     }
     release_hooks(ctx, rec->hooks);
@@ -1829,7 +1845,11 @@ void device_record_cond_begin(eg_ctx& ctx, const eg_cond_desc* desc) {
     frame.arms = arms;
     frame.outer = ctx.dev.stream;
     frame.weave = cond_begin(rec.pool, ctx.dev.stream, static_cast<int>(d.kind), cell, baseline, negate, arms, static_cast<unsigned>(d.max_iters), loop);
-    if (loop != nullptr) ++rec.loops;
+    if (loop != nullptr) {
+        frame.iteration = loop + 1;
+        frame.cap = static_cast<unsigned>(d.max_iters);
+        ++rec.loops;
+    }
     ctx.dev.stream = cond_stream(frame.weave, 0);
     rec.frames.push_back(std::move(frame));
 }
@@ -1917,6 +1937,78 @@ void device_record_wait(eg_ctx& ctx, std::int32_t n_planes, eg_plane_s* const* p
     for (unsigned j = 0; j < self; ++j) fork_wait(f.fork, self, j);
 }
 
+/** @brief The innermost open WHILE of @p rec (null: none) and whether another encloses it. */
+const Frame* innermost_while(const DeviceRecording& rec, bool& nested) {
+    const Frame* found = nullptr;
+    nested = false;
+    for (std::size_t i = rec.frames.size(); i-- > 0;)
+        if (rec.frames[i].iteration != nullptr) {
+            nested = nested || found != nullptr;
+            found = found != nullptr ? found : &rec.frames[i];
+        }
+    return found;
+}
+
+void* device_record_scratch(eg_ctx& ctx, std::size_t bytes) {
+    DeviceRecording& rec = recording_of(ctx);
+    Current current(ctx.dev);
+    void* data = scratch_alloc(rec.pool, bytes);
+    rec.scratch.push_back(data);
+    return data;
+}
+
+std::int32_t device_record_save_test(eg_ctx& ctx, eg_plane_s* cell, std::int64_t cell_index, eg_plane_s* baseline, std::int64_t baseline_index) {
+    DeviceRecording& rec = recording_of(ctx);
+    bool nested = false;
+    const Frame* loop = innermost_while(rec, nested);
+    if (nested) refuse(EG_NOT_WRITTEN, "a saved test inside two nested WHILE bodies is not written");
+    const unsigned* c = test_word(ctx, cell, cell_index, "saved test cell");
+    const unsigned* b = baseline != nullptr ? test_word(ctx, baseline, baseline_index, "saved test baseline") : nullptr;
+    const unsigned capacity = loop != nullptr ? loop->cap : 1u;
+    void* buffer = device_record_scratch(ctx, static_cast<std::size_t>(capacity) * 2 * sizeof(unsigned));
+    rec.launches_only = false;
+    Current current(ctx.dev);
+    save_test_step(ctx.dev.stream, c, b, loop != nullptr ? loop->iteration : nullptr, static_cast<unsigned*>(buffer), capacity);
+    rec.saves.push_back({ buffer, capacity });
+    return static_cast<std::int32_t>(rec.saves.size()) - 1;
+}
+
+void device_record_loop_copy(eg_ctx& ctx, const void* src, void* buffer, std::size_t bytes) {
+    DeviceRecording& rec = recording_of(ctx);
+    bool nested = false;
+    const Frame* loop = innermost_while(rec, nested);
+    if (loop == nullptr) refuse(EG_NOT_WRITTEN, "a loop copy outside a WHILE body is not written");
+    if (nested) refuse(EG_NOT_WRITTEN, "a loop copy inside two nested WHILE bodies is not written");
+    rec.launches_only = false;
+    Current current(ctx.dev);
+    loop_copy_step(ctx.dev.stream, src, buffer, bytes, loop->iteration, loop->cap);
+}
+
+void device_saved_read(eg_ctx& ctx, const eg_graph* handle, DeviceSaved& out) {
+    const auto* graph = reinterpret_cast<const DeviceGraph*>(handle);
+    out = DeviceSaved();
+    std::vector<std::vector<std::uint32_t>> raw(graph->saves.size());
+    std::vector<ReadItem> items;
+    for (std::size_t s = 0; s < graph->saves.size(); ++s) {
+        raw[s].assign(static_cast<std::size_t>(graph->saves[s].capacity) * 2, 0u);
+        items.push_back({ raw[s].data(), graph->saves[s].buffer, raw[s].size() * sizeof(std::uint32_t) });
+    }
+    out.iterations.assign(graph->loops, 0u);
+    std::vector<std::uint32_t> states(static_cast<std::size_t>(graph->loops) * 2, 0u);
+    if (graph->loops != 0) items.push_back({ states.data(), graph->loop_cells, states.size() * sizeof(std::uint32_t) });
+    Current current(ctx.dev);
+    read_many(ctx.dev.stream, items);
+    for (std::size_t s = 0; s < raw.size(); ++s) {
+        out.cell.emplace_back();
+        out.baseline.emplace_back();
+        for (std::size_t k = 0; k < raw[s].size() / 2; ++k) {
+            out.cell.back().push_back(raw[s][2 * k]);
+            out.baseline.back().push_back(raw[s][2 * k + 1]);
+        }
+    }
+    for (unsigned i = 0; i < graph->loops; ++i) out.iterations[i] = states[2 * i + 1];
+}
+
 /** @brief Whether this context's driver has conditional arms (IF_ELSE, SWITCH): the capability bits' truth on a device context. */
 bool device_cond_arms_supported() { return cond_arms_supported(); }
 
@@ -1983,6 +2075,7 @@ void device_record_end(eg_ctx& ctx, const eg_record_end_desc* desc, eg_graph** o
         for (eg_plan_s* p : rec->plans) plan_release(ctx, p);
         for (eg_fft_s* f : rec->ffts) fft_release(ctx, f);
         device_free(ctx, rec->loop_cells);
+        for (void* p : rec->scratch) scratch_free(ctx.dev.stream, p);
         refuse(EG_FAULT, "eg_record_end: the device capture failed: " + failed);
     }
     auto graph = std::make_unique<DeviceGraph>();
@@ -2016,6 +2109,9 @@ void device_record_end(eg_ctx& ctx, const eg_record_end_desc* desc, eg_graph** o
     graph->loop = loop;
     graph->shape = std::move(rec->shape);
     graph->kernels = std::move(rec->kernels);
+    graph->scratch = std::move(rec->scratch);
+    graph->saves = std::move(rec->saves);
+    graph->loops = rec->loops;
     if (rec->loops != 0) graph->loop_cells = rec->loop_cells;
     else device_free(ctx, rec->loop_cells);
     graph->plans = std::move(rec->plans);
@@ -2110,6 +2206,7 @@ void device_graph_free(eg_ctx& ctx, eg_graph* handle) {
         loop_free(loop);
     });
     device_free(ctx, graph->loop_cells);
+    for (void* p : graph->scratch) scratch_free(ctx.dev.stream, p);
 }
 
 /** @brief At context free: end a capture in progress (dropping it) and free every device graph, without releasing

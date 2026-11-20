@@ -49,6 +49,27 @@ bool device_cond_arms_supported();
 GraphShape& device_shape(eg_ctx& ctx);
 /** @brief eg_graph_describe of device graph @p graph: the description built at record time. */
 void device_graph_describe(eg_ctx& ctx, const eg_graph* graph, eg_graph_description* out);
+/** @brief The forward pieces of a reverse through conditionals and loops, on a device recording (device/Device.cpp). Each is called while
+ *  recording, on the stream in scope, so what it queues is captured where it is called: a test's save before its conditional opens, a loop
+ *  copy inside the WHILE body. */
+/** @brief Zeroed device memory owned by the recording, then by its graph, freed with it (``eg_graph_free``) or with an abandoned recording. */
+void* device_record_scratch(eg_ctx& ctx, std::size_t bytes);
+/** @brief Save the test cells ``cell[cell_index]`` and (when @p baseline is set) ``baseline[baseline_index]`` as they are when the replay reaches
+ *  this point: a captured copy into a save slot of the recording. Inside a WHILE body the slot holds one entry per iteration (the entry
+ *  ``*iteration counter``, at most ``max_iters`` of them); elsewhere one entry. Returns the slot, in call order from 0. Refused: not recording,
+ *  not a device plane of one-dimensional 32-bit elements, and a call inside two nested WHILE bodies (NOT_WRITTEN). */
+std::int32_t device_record_save_test(eg_ctx& ctx, eg_plane_s* cell, std::int64_t cell_index, eg_plane_s* baseline, std::int64_t baseline_index);
+/** @brief Inside the innermost open WHILE body: copy @p bytes at @p src into slot k of @p buffer (slots of @p bytes each, at least ``max_iters`` of
+ *  them, from device_record_scratch) where k is the loop's iteration counter when the copy runs. NOT_WRITTEN with no WHILE open or inside two. */
+void device_record_loop_copy(eg_ctx& ctx, const void* src, void* buffer, std::size_t bytes);
+/** @brief The saved tests and iteration counts of the last replay of @p graph, read in one sync. ``cell[s]`` and ``baseline[s]`` hold the entries of
+ *  save slot s (one, or ``max_iters`` inside a WHILE: entry k is iteration k's); ``iterations[i]`` is the iteration count of the i-th WHILE of the
+ *  recording (in ``eg_record_cond_begin`` order). A WHILE that did not run reports 0; entries of iterations that did not run hold 0. */
+struct DeviceSaved {
+    std::vector<std::vector<std::uint32_t>> cell, baseline;
+    std::vector<std::uint32_t> iterations;
+};
+void device_saved_read(eg_ctx& ctx, const eg_graph* graph, DeviceSaved& out);
 /** @brief The tape of device graph @p graph (null: it is a plain graph). */
 GraphDiff* device_graph_diff(eg_ctx& ctx, eg_graph* graph);
 /** @brief Record a HOST node on the capture in scope: when the graph replays, the driver's host-function launch calls

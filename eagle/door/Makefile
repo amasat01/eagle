@@ -657,6 +657,13 @@ $(DEVICE_TEST): test/door_device_test.c $(LIB) | check-cuda
 
 device: check-cuda symbols $(FIXTURE) $(FIXTURE_BAD) $(FIXTURE_ALT) $(TEST) $(DEVICE_FIXTURE) $(DEVICE_TEST) $(GEMM_FIXTURE) $(GEMM_DEVICE_TEST) $(GEMM_ROUTE_TEST) $(NO_CUBLAS) $(GRAPH_FIXTURE) $(GRAPH_TEST)
 
+# The device forward pieces of a reverse through conditionals and loops: a seam the shared library does not export, so this binary links the door's
+# objects, and it reuses the fixture helpers of door_device_test.c.
+DEVICE_FORWARD_TEST := $(OUT)/device_forward_test
+$(DEVICE_FORWARD_TEST): test/device_forward_test.c test/door_device_test.c $(OBJ) $(OUT)/test/device_forward_seam.o | check-cuda
+	$(CC) $(DEPFLAGS) $(CFLAGS_C) -DEG_TEST_DIR='"$(CURDIR)/test"' -isystem $(CUDA)/include -Itest/c_shim -c $< -o $@.o
+	$(CXX) -o $@ $@.o $(OBJ) $(OUT)/test/device_forward_seam.o $(CUDART) -ldl -lm -pthread
+
 PAIR_DEVICE_TEST := $(OUT)/pair_device_test
 RUNNER_PAIR_TEST := $(OUT)/runner_pair_test
 ACTIVE_PAIR_TEST := $(OUT)/active_pair_test
