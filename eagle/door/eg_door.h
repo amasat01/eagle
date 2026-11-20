@@ -1111,18 +1111,20 @@ eg_status eg_gemm_free(eg_ctx* ctx, eg_gemm* gemm);
 
 /**
  * The caller's function of a host node. ``planes`` holds ``n`` borrowed views, in the order the planes were declared at
- * ``eg_host_call``: each entry is a ``const DLTensor*`` of dlpack.h (typed ``void`` here: this header includes no DLPack header),
- * kDLCPU, or kDLCUDA for a device plane. A view is valid only during the call. The function reads the planes
+ * ``eg_host_call``: each entry is a BORROWED ``DLManagedTensorVersioned`` (dlpack.h) with kDLCPU, or kDLCUDA for a device plane,
+ * its version filled, a NULL deleter, and DLPACK_FLAG_BITMASK_READ_ONLY set on a plane declared EG_ACCESS_READ only (not on one declared
+ * WRITE or READ|WRITE). The callee never calls the deleter and must not keep a view past the call. The function reads the planes
  * declared EG_ACCESS_READ and writes the ones declared EG_ACCESS_WRITE; a write to any other plane is the caller's fault, which the
  * door neither detects nor repairs. It must not call the door on this context: the context is busy, and such a call is refused
  * BAD_REQUEST naming the host node. It runs on the thread that called ``eg_host_call``, ``eg_graph_launch``, ``eg_run`` or
  * ``eg_graph_reverse``, never on a driver thread. Nonzero return = failure.
  */
-typedef int32_t (*eg_host_fn)(void* user, int32_t n, const void* const* planes);
+typedef int32_t (*eg_host_fn)(void* user, int32_t n, struct DLManagedTensorVersioned* const* planes);
 
 /**
  * The reverse of a host node's function, called by ``eg_graph_reverse`` for a graph ended with EG_RECORD_DIFF. All four arrays
- * hold ``n`` entries, one per declared plane, each a ``DLTensor*`` as in ``eg_host_fn``, and a view is valid only during the call. ``primals[i]`` is the plane declared with
+ * hold ``n`` entries, one per declared plane, each a borrowed view as in ``eg_host_fn`` (READ_ONLY on ``primals`` and ``adjoints_in``, not on
+ * ``adjoints_out``), and a view is valid only during the call. ``primals[i]`` is the plane declared with
  * EG_ACCESS_READ as the node read it (the door keeps a copy when a later node overwrites it), else NULL. ``adjoints_in[i]`` is
  * the adjoint of a float plane declared with EG_ACCESS_WRITE, else NULL. ``adjoints_out[i]`` is a fresh zeroed view for a float
  * plane declared with EG_ACCESS_READ, else NULL: the function writes into it the adjoint it pulls back to that plane, and the door
@@ -1130,8 +1132,8 @@ typedef int32_t (*eg_host_fn)(void* user, int32_t n, const void* const* planes);
  * overwrote the plane). A plane that is not float has no adjoint: its ``adjoints_in`` and ``adjoints_out`` entries are NULL. The
  * restrictions of ``eg_host_fn`` apply. Nonzero return = failure.
  */
-typedef int32_t (*eg_host_vjp_fn)(void* user, int32_t n, const void* const* primals,
-                                  const void* const* adjoints_in, void* const* adjoints_out);
+typedef int32_t (*eg_host_vjp_fn)(void* user, int32_t n, struct DLManagedTensorVersioned* const* primals,
+                                  struct DLManagedTensorVersioned* const* adjoints_in, struct DLManagedTensorVersioned* const* adjoints_out);
 
 /** Called once with ``user`` when the last reference to the host node drops (see ``eg_host_node_free``), on the thread that drops
  *  it, or at ``eg_ctx_free`` for a node still alive then. It must not call the door on this context. */

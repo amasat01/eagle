@@ -71,13 +71,20 @@ std::vector<PlaneUse> host_node_uses(const Node& n) {
 
 void host_node_run(eg_ctx& ctx, const Node& n) {
     if (ctx.dev.ordinal >= 0) device_sync(ctx);    // every device plane is ready, and what the callback enqueues on the stream is ordered before the next segment
-    std::vector<const void*> views;
-    for (const eg_plane_s* p : n.hplanes) views.push_back(&p->tensor->dl_tensor);
+    std::vector<DLManagedTensorVersioned> views(n.hplanes.size());     // borrowed copies: no deleter, read-only unless declared written
+    std::vector<DLManagedTensorVersioned*> pointers;
+    for (std::size_t i = 0; i < views.size(); ++i) {
+        views[i] = *n.hplanes[i]->tensor;
+        views[i].manager_ctx = nullptr;
+        views[i].deleter = nullptr;
+        views[i].flags = (n.haccess[i] & EG_ACCESS_WRITE) != 0 ? views[i].flags & ~DLPACK_FLAG_BITMASK_READ_ONLY : views[i].flags | DLPACK_FLAG_BITMASK_READ_ONLY;
+        pointers.push_back(&views[i]);
+    }
     const Busy busy(ctx, n.host->name);
-    check_returned(*n.host, "", n.host->fn(n.host->user, static_cast<std::int32_t>(views.size()), views.data()));
+    check_returned(*n.host, "", n.host->fn(n.host->user, static_cast<std::int32_t>(views.size()), pointers.data()));
 }
 
-void host_vjp_run(eg_ctx& ctx, const eg_host_node_s& node, std::int32_t n, const void* const* primals, const void* const* adjoints_in, void* const* adjoints_out) {
+void host_vjp_run(eg_ctx& ctx, const eg_host_node_s& node, std::int32_t n, DLManagedTensorVersioned* const* primals, DLManagedTensorVersioned* const* adjoints_in, DLManagedTensorVersioned* const* adjoints_out) {
     const Busy busy(ctx, node.name);
     check_returned(node, " vjp", node.vjp(node.user, n, primals, adjoints_in, adjoints_out));
 }

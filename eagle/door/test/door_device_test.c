@@ -578,9 +578,9 @@ struct node_log {
 };
 
 /* y *= 3 in place over HN device doubles, through the CUDA runtime: the view is device memory the door made ready by synchronizing the stream. */
-static int32_t node_triple(void* user, int32_t n, const void* const* planes) {
+static int32_t node_triple(void* user, int32_t n, struct DLManagedTensorVersioned* const* planes) {
     struct node_log* log = (struct node_log*)user;
-    const DLTensor* t = (const DLTensor*)planes[0];
+    const DLTensor* t = (const DLTensor*)&planes[0]->dl_tensor;
     double y[64];
     ++log->calls;
     if (n != 1) return 1;

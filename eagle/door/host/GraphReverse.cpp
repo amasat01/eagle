@@ -169,6 +169,13 @@ public:
     View(const View&) = delete;
     View& operator=(const View&) = delete;
     eg_plane_s* get() { return &plane_; }
+    /** @brief The view as a borrowed managed tensor: no deleter, READ_ONLY set or cleared. */
+    DLManagedTensorVersioned* borrowed(bool read_only) {
+        managed_.manager_ctx = nullptr;
+        managed_.deleter = nullptr;
+        managed_.flags = read_only ? managed_.flags | DLPACK_FLAG_BITMASK_READ_ONLY : managed_.flags & ~DLPACK_FLAG_BITMASK_READ_ONLY;
+        return &managed_;
+    }
 
 private:
     DLManagedTensorVersioned managed_;
@@ -726,26 +733,25 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
             const eg_host_node_s& host = *node.host;
             if (host.vjp == nullptr) refuse(EG_BAD_REQUEST, "eg_graph_reverse: a gradient flows through host node '" + host.name + "' (leaf " + std::to_string(d.plan.leaves[i].node) + "), which has no vjp");
             const std::size_t n = node.args.size();
-            std::vector<const void*> primals(n, nullptr), adjoints_in(n, nullptr);
-            std::vector<void*> adjoints_out(n, nullptr);
+            std::vector<DLManagedTensorVersioned*> primals(n, nullptr), adjoints_in(n, nullptr), adjoints_out(n, nullptr);
             std::vector<std::unique_ptr<View>> views;
             std::vector<Bytes> grads(n);
-            const auto view = [&](int plane, void* data) -> void* {
+            const auto view = [&](int plane, void* data, bool read_only) {
                 views.push_back(std::make_unique<View>(plane_of(plane), data));
-                return &views.back()->get()->tensor->dl_tensor;
+                return views.back()->borrowed(read_only);
             };
             for (std::size_t j = 0; j < n; ++j) {
                 const HostArg& a = node.args[j];
                 if (a.plane < 0) continue;
-                if ((a.access & EG_ACCESS_READ) != 0) primals[j] = view(a.plane, value_of(a.plane, i));
+                if ((a.access & EG_ACCESS_READ) != 0) primals[j] = view(a.plane, value_of(a.plane, i), true);
                 if (!a.real) continue;
                 if ((a.access & EG_ACCESS_WRITE) != 0) {
                     const std::size_t at = static_cast<std::size_t>(std::find(node.writes.begin(), node.writes.end(), a.plane) - node.writes.begin());
-                    adjoints_in[j] = view(a.plane, adjoint[at].data());
+                    adjoints_in[j] = view(a.plane, adjoint[at].data(), true);
                 }
                 if ((a.access & EG_ACCESS_READ) != 0) {
                     grads[j] = Bytes(byte_count(plane_of(a.plane)), D);
-                    adjoints_out[j] = view(a.plane, grads[j].data());
+                    adjoints_out[j] = view(a.plane, grads[j].data(), false);
                 }
             }
             if (D != nullptr) device_sync(*D);  // the primals and adjoints are ready before the caller's code reads them

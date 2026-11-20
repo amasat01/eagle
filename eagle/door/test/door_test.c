@@ -1862,21 +1862,21 @@ struct host_log {
 };
 
 /* y *= factor over the first plane (read then written in place). */
-static int32_t host_scale(void* user, int32_t n, const void* const* planes) {
+static int32_t host_scale(void* user, int32_t n, struct DLManagedTensorVersioned* const* planes) {
     struct host_log* log = (struct host_log*)user;
     ++log->calls;
     if (n < 1) return 1;
-    const DLTensor* t = (const DLTensor*)planes[0];
+    const DLTensor* t = (const DLTensor*)&planes[0]->dl_tensor;
     double* y = (double*)((char*)t->data + t->byte_offset);
     for (int64_t i = 0; i < t->shape[0]; ++i) y[i] *= log->factor;
     return 0;
 }
 
 /* Reads planes[0] (float64, 1-D) and writes planes[1] = planes[0] + 1; records the shapes and values it saw. */
-static int32_t host_shift(void* user, int32_t n, const void* const* planes) {
+static int32_t host_shift(void* user, int32_t n, struct DLManagedTensorVersioned* const* planes) {
     struct host_log* log = (struct host_log*)user;
     ++log->calls;
-    const DLTensor *in = (const DLTensor*)planes[0], *out = (const DLTensor*)planes[1];
+    const DLTensor *in = (const DLTensor*)&planes[0]->dl_tensor, *out = (const DLTensor*)&planes[1]->dl_tensor;
     log->shape_ok = n == 2 && in->ndim == 1 && out->ndim == 1 && in->shape[0] == 4 && out->shape[0] == 4 && in->dtype.code == kDLFloat && in->device.device_type == kDLCPU;
     const double* x = (const double*)((const char*)in->data + in->byte_offset);
     double* y = (double*)((char*)out->data + out->byte_offset);
@@ -1884,17 +1884,28 @@ static int32_t host_shift(void* user, int32_t n, const void* const* planes) {
     return 0;
 }
 
+/* Records which of three views carry DLPACK_FLAG_BITMASK_READ_ONLY (bit i for planes[i]) and whether every deleter is NULL (calls counts the non-NULL ones). */
+static int32_t host_flags(void* user, int32_t n, struct DLManagedTensorVersioned* const* planes) {
+    struct host_log* log = (struct host_log*)user;
+    log->shape_ok = 0;
+    for (int32_t i = 0; i < n; ++i) {
+        log->shape_ok |= (planes[i]->flags & DLPACK_FLAG_BITMASK_READ_ONLY) != 0 ? 1 << i : 0;
+        log->calls += planes[i]->deleter != NULL;
+    }
+    return 0;
+}
+
 /* Counts the int32 cell planes[0] down by one. */
-static int32_t host_countdown(void* user, int32_t n, const void* const* planes) {
+static int32_t host_countdown(void* user, int32_t n, struct DLManagedTensorVersioned* const* planes) {
     (void)n;
     ++((struct host_log*)user)->calls;
-    const DLTensor* t = (const DLTensor*)planes[0];
+    const DLTensor* t = (const DLTensor*)&planes[0]->dl_tensor;
     int32_t* cell = (int32_t*)((char*)t->data + t->byte_offset);
     --*cell;
     return 0;
 }
 
-static int32_t host_fail(void* user, int32_t n, const void* const* planes) {
+static int32_t host_fail(void* user, int32_t n, struct DLManagedTensorVersioned* const* planes) {
     (void)n;
     (void)planes;
     ++((struct host_log*)user)->calls;
@@ -1902,7 +1913,7 @@ static int32_t host_fail(void* user, int32_t n, const void* const* planes) {
 }
 
 /* Calls the door on its own context from inside the callback: refused BAD_REQUEST naming this node. */
-static int32_t host_reenter(void* user, int32_t n, const void* const* planes) {
+static int32_t host_reenter(void* user, int32_t n, struct DLManagedTensorVersioned* const* planes) {
     struct host_log* log = (struct host_log*)user;
     (void)n;
     (void)planes;
@@ -1955,6 +1966,20 @@ static void check_host_node_eager(eg_ctx* ctx) {
     check(host_call1(ctx, nr, px, EG_ACCESS_READ) == EG_OK && again.calls == 1 && again.reentry_status == EG_BAD_REQUEST &&
               strstr(again.reentry_reason, "host node 'reenter'") != NULL,
           "a door call on the same context from inside the callback is refused BAD_REQUEST naming the host node; the outer call is OK");
+    struct host_log flags = { 0 };
+    eg_host_node* nfl = host_node_make(ctx, "flags", host_flags, &flags);
+    eg_plane* three[3] = { px, py, px };
+    eg_plane* distinct[3];
+    double extra[4] = { 0, 0, 0, 0 };
+    struct tensor te;
+    eg_plane* pe = wrap(ctx, &te, extra, 4, kDLFloat, 64);
+    distinct[0] = px, distinct[1] = py, distinct[2] = pe;
+    (void)three;
+    const uint32_t flag_access[3] = { EG_ACCESS_READ, EG_ACCESS_WRITE, EG_ACCESS_READ | EG_ACCESS_WRITE };
+    check(nfl && pe && eg_host_call(ctx, nfl, 3, distinct, flag_access) == EG_OK && flags.shape_ok == 1 && flags.calls == 0,
+          "the views a callback gets are borrowed (NULL deleter) and carry READ_ONLY exactly on the plane declared READ only, not on WRITE or READ|WRITE");
+    eg_host_node_free(ctx, nfl);
+    eg_plane_free(ctx, pe);
     check(host_call1(ctx, ns, px, 0) == EG_BAD_REQUEST && reason_has(ctx, "access 0") && host_call1(ctx, ns, px, 4) == EG_BAD_REQUEST && reason_has(ctx, "access 4"),
           "eg_host_call: an access other than READ, WRITE or both is refused by name");
     eg_plane* dup[2] = { px, px };

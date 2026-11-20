@@ -2112,7 +2112,7 @@ static void policy_row(struct rig* host, const struct units* uh, struct rig* dev
 
 /* Read or write @p n doubles (or int32) of a view the door hands a callback: host memory, or a device plane through the CUDA runtime. */
 static void view_copy(const void* view, void* host, size_t bytes, int to_view) {
-    const DLTensor* t = (const DLTensor*)view;
+    const DLTensor* t = &((const struct DLManagedTensorVersioned*)view)->dl_tensor;
     char* data = (char*)t->data + t->byte_offset;
 #ifdef EG_TEST_CUDA
     if (t->device.device_type == kDLCUDA) {
@@ -2136,7 +2136,7 @@ struct host_state {
 };
 
 /* z = y^2 over planes {y READ, z WRITE}. */
-static int32_t hn_square(void* user, int32_t n, const void* const* planes) {
+static int32_t hn_square(void* user, int32_t n, struct DLManagedTensorVersioned* const* planes) {
     struct host_state* st = (struct host_state*)user;
     double y[N], z[N];
     ++st->calls;
@@ -2147,7 +2147,7 @@ static int32_t hn_square(void* user, int32_t n, const void* const* planes) {
     return st->fail_code;
 }
 /* The vjp of hn_square: dy = 2 y dz, written into the zeroed adjoints_out[0]. */
-static int32_t hn_square_vjp(void* user, int32_t n, const void* const* primals, const void* const* adjoints_in, void* const* adjoints_out) {
+static int32_t hn_square_vjp(void* user, int32_t n, struct DLManagedTensorVersioned* const* primals, struct DLManagedTensorVersioned* const* adjoints_in, struct DLManagedTensorVersioned* const* adjoints_out) {
     struct host_state* st = (struct host_state*)user;
     double y[N], dz[N], dy[N], zero[N];
     ++st->vjp_calls;
@@ -2165,7 +2165,7 @@ static int32_t hn_square_vjp(void* user, int32_t n, const void* const* primals, 
 }
 
 /* y = y^2 in place over {y READ|WRITE}. */
-static int32_t hn_square_in_place(void* user, int32_t n, const void* const* planes) {
+static int32_t hn_square_in_place(void* user, int32_t n, struct DLManagedTensorVersioned* const* planes) {
     struct host_state* st = (struct host_state*)user;
     double y[N];
     ++st->calls;
@@ -2176,7 +2176,7 @@ static int32_t hn_square_in_place(void* user, int32_t n, const void* const* plan
     return 0;
 }
 /* Its vjp: the primal is the y the node read (before it overwrote it), dy = 2 y dy_out; adjoints_in and adjoints_out both name the one plane. */
-static int32_t hn_square_in_place_vjp(void* user, int32_t n, const void* const* primals, const void* const* adjoints_in, void* const* adjoints_out) {
+static int32_t hn_square_in_place_vjp(void* user, int32_t n, struct DLManagedTensorVersioned* const* primals, struct DLManagedTensorVersioned* const* adjoints_in, struct DLManagedTensorVersioned* const* adjoints_out) {
     struct host_state* st = (struct host_state*)user;
     double y[N], dy[N];
     ++st->vjp_calls;
@@ -2190,7 +2190,7 @@ static int32_t hn_square_in_place_vjp(void* user, int32_t n, const void* const* 
 }
 
 /* y = n x over {x READ, n READ (int32), y WRITE}, and its vjp dx = n dy: the int plane has no adjoint view. */
-static int32_t hn_int_scale(void* user, int32_t n, const void* const* planes) {
+static int32_t hn_int_scale(void* user, int32_t n, struct DLManagedTensorVersioned* const* planes) {
     struct host_state* st = (struct host_state*)user;
     double x[N], y[N];
     int32_t k[N];
@@ -2202,7 +2202,7 @@ static int32_t hn_int_scale(void* user, int32_t n, const void* const* planes) {
     view_put(planes[2], y);
     return 0;
 }
-static int32_t hn_int_scale_vjp(void* user, int32_t n, const void* const* primals, const void* const* adjoints_in, void* const* adjoints_out) {
+static int32_t hn_int_scale_vjp(void* user, int32_t n, struct DLManagedTensorVersioned* const* primals, struct DLManagedTensorVersioned* const* adjoints_in, struct DLManagedTensorVersioned* const* adjoints_out) {
     struct host_state* st = (struct host_state*)user;
     double dy[N], dx[N];
     int32_t k[N];
@@ -2217,7 +2217,7 @@ static int32_t hn_int_scale_vjp(void* user, int32_t n, const void* const* primal
 }
 
 /* s = 3 y over {y READ, s WRITE}, with no vjp. */
-static int32_t hn_triple(void* user, int32_t n, const void* const* planes) {
+static int32_t hn_triple(void* user, int32_t n, struct DLManagedTensorVersioned* const* planes) {
     struct host_state* st = (struct host_state*)user;
     double y[N], s[N];
     ++st->calls;
@@ -2229,7 +2229,7 @@ static int32_t hn_triple(void* user, int32_t n, const void* const* planes) {
 }
 
 /* y *= 3 in place over {y READ|WRITE}. */
-static int32_t hn_triple_in_place(void* user, int32_t n, const void* const* planes) {
+static int32_t hn_triple_in_place(void* user, int32_t n, struct DLManagedTensorVersioned* const* planes) {
     struct host_state* st = (struct host_state*)user;
     double y[N];
     ++st->calls;

@@ -148,7 +148,7 @@ Node host_node_check(eg_ctx& ctx, eg_host_node_s* node, std::int32_t n_planes, e
  *  A nonzero return is EG_FAULT "host node '<name>' failed (<code>)". */
 void host_node_run(eg_ctx& ctx, const Node& n);
 /** @brief Call the vjp of host node @p node with the four arrays (host/HostNode.cpp), under the same rules; a failure is EG_FAULT naming the node. */
-void host_vjp_run(eg_ctx& ctx, const eg_host_node_s& node, std::int32_t n, const void* const* primals, const void* const* adjoints_in, void* const* adjoints_out);
+void host_vjp_run(eg_ctx& ctx, const eg_host_node_s& node, std::int32_t n, DLManagedTensorVersioned* const* primals, DLManagedTensorVersioned* const* adjoints_in, DLManagedTensorVersioned* const* adjoints_out);
 /** @brief Take / drop the references a recorded node holds (its plans, runner, transform, product, planes and host node). */
 void node_hold(const Node& n);
 void node_drop(eg_ctx& ctx, const Node& n);
