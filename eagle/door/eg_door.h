@@ -1316,8 +1316,7 @@ struct eg_graph_description {
  * description is kept for a host and a device graph: the door builds it at record time, it is not read back from a driver.
  * Read-only and callback-free; the arrays are the door's and stay valid until ``eg_graph_free`` of the graph or the next
  * ``eg_graph_describe`` of it, so a caller copies what it keeps. Node indices are the ordinals a race refusal names. A node or edge struct grows by appended members, so step the arrays by ``node_size`` and ``edge_size``. A host graph replays in recording order, which respects every
- * level. Status: OK; BAD_REQUEST (a NULL, freed or foreign graph; ``out`` NULL or with a ``struct_size`` below the door's ``sizeof(struct eg_graph_description)``); NOT_WRITTEN (a device graph, where the
- * recording does not keep the description yet).
+ * level. Status: OK; BAD_REQUEST (a NULL, freed or foreign graph; ``out`` NULL or with a ``struct_size`` below the door's ``sizeof(struct eg_graph_description)``).
  */
 eg_status eg_graph_describe(eg_ctx* ctx, const eg_graph* graph, struct eg_graph_description* out);
 
