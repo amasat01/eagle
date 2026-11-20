@@ -231,6 +231,12 @@ static void chain_row(struct rig* r, const struct units* u) {
         ww[0] += 2.0 * w[0] * x[i] * x[i];
     }
     verdict(r, ok && close_to(gx, wx, N) && close_to(gw, ww, 1), "eg_graph_reverse of y = w x, z = y^2: dJ/dx per sample and dJ/dw (a shared parameter plane) match the closed form");
+    struct eg_graph_description desc;
+    memset(&desc, 0, sizeof(desc));
+    desc.struct_size = sizeof(desc);
+    verdict(r, eg_graph_describe(ctx, graph, &desc) == EG_OK && desc.flags == EG_RECORD_DIFF && desc.n_nodes == 2 &&
+                   desc.nodes[0].kind == EG_GNODE_LAUNCH && desc.n_levels == 2,
+            "eg_graph_describe of a graph ended with EG_RECORD_DIFF: the flag is set, two LAUNCH nodes on two levels");
     eg_graph_free(ctx, graph);
     eg_plan_free(ctx, f);
     eg_plan_free(ctx, g);

@@ -1250,12 +1250,12 @@ static void check_fork_join(eg_ctx* ctx) {
     /* a race: two branches write one plane with no wait */
     ok = eg_record_begin(ctx) == EG_OK && eg_record_fork_begin(ctx) == EG_OK && eg_copy(ctx, s1, dd) == EG_OK &&
          eg_record_fork_branch(ctx) == EG_OK && eg_copy(ctx, s2, dd) == EG_OK;
-    ok = ok && eg_record_fork_end(ctx) == EG_BAD_REQUEST && reason_has(ctx, "WAW race between node 0 (eg_copy) slot 'dst' and node 1 (eg_copy) slot 'dst'");
+    ok = ok && eg_record_fork_end(ctx) == EG_BAD_REQUEST && reason_has(ctx, "WAW race between node 2 (eg_copy) slot 'dst' and node 4 (eg_copy) slot 'dst'");
     check(ok && eg_record_end(ctx, NULL, &none) == EG_BAD_REQUEST && reason_has(ctx, "not recording"),
           "a race between sibling branches is refused at eg_record_fork_end naming both ordinals, both slots and the hazard; the recording ends");
     ok = eg_record_begin(ctx) == EG_OK && eg_record_fork_begin(ctx) == EG_OK && eg_copy(ctx, s1, d1) == EG_OK &&
          eg_record_fork_branch(ctx) == EG_OK && eg_copy(ctx, d1, d2) == EG_OK;
-    check(ok && eg_record_fork_end(ctx) == EG_BAD_REQUEST && reason_has(ctx, "RAW race between node 0 (eg_copy) slot 'dst' and node 1 (eg_copy) slot 'src'"),
+    check(ok && eg_record_fork_end(ctx) == EG_BAD_REQUEST && reason_has(ctx, "RAW race between node 2 (eg_copy) slot 'dst' and node 4 (eg_copy) slot 'src'"),
           "a branch that reads what a sibling branch writes is a RAW race");
 
     /* the same with a wait: accepted, and the reader sees the sibling's value */
@@ -1450,6 +1450,75 @@ static void check_fork_join(eg_ctx* ctx) {
     eg_plane_free(ctx, p2);
 }
 
+/* The kinds of the description's nodes in one string, the parents and levels as integers, an edge found by kind and ends. */
+static int edge_at(const struct eg_graph_description* d, eg_gedge_kind kind, int from, int to) {
+    for (int32_t i = 0; i < d->n_edges; ++i)
+        if (d->edges[i].kind == kind && d->edges[i].from == from && d->edges[i].to == to) return i;
+    return -1;
+}
+
+static int count_edges(const struct eg_graph_description* d, eg_gedge_kind kind) {
+    int n = 0;
+    for (int32_t i = 0; i < d->n_edges; ++i) n += d->edges[i].kind == kind;
+    return n;
+}
+
+/* eg_graph_describe. Oracle: the nodes, parents, levels and edges of each recording written out by hand from its calls. */
+static void check_graph_describe(eg_ctx* ctx) {
+    int32_t v[5] = { 11, 22, 0, 0, 0 }, cell = 1;
+    struct tensor t[5], tc;
+    eg_plane* p[5];
+    int ok = 1;
+    for (int i = 0; i < 5; ++i) ok = ok && (p[i] = cell_at(ctx, &t[i], &v[i]));
+    eg_plane* pc = cell_at(ctx, &tc, &cell);
+    if (!ok || !pc) {
+        check(0, "describe planes wrapped");
+        return;
+    }
+    struct eg_cond_desc cd;
+    memset(&cd, 0, sizeof(cd));
+    cd.struct_size = sizeof(cd);
+    cd.kind = EG_COND_IF_ELSE;
+    cd.cell = pc;
+    eg_graph* g = NULL;
+    struct eg_graph_description d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    ok = eg_record_begin(ctx) == EG_OK && eg_record_fork_begin(ctx) == EG_OK && eg_copy(ctx, p[0], p[2]) == EG_OK &&
+         eg_record_fork_branch(ctx) == EG_OK && eg_record_wait(ctx, 1, &p[2]) == EG_OK && eg_copy(ctx, p[2], p[3]) == EG_OK &&
+         eg_record_fork_end(ctx) == EG_OK && eg_record_cond_begin(ctx, &cd) == EG_OK && eg_copy(ctx, p[1], p[4]) == EG_OK &&
+         eg_record_cond_arm(ctx) == EG_OK && eg_copy(ctx, p[0], p[4]) == EG_OK && eg_record_cond_end(ctx) == EG_OK &&
+         eg_record_end(ctx, NULL, &g) == EG_OK && eg_graph_describe(ctx, g, &d) == EG_OK;
+    static const eg_gnode_kind kinds[12] = { EG_GNODE_FORK, EG_GNODE_BRANCH, EG_GNODE_COPY, EG_GNODE_BRANCH, EG_GNODE_WAIT, EG_GNODE_COPY,
+                                             EG_GNODE_JOIN, EG_GNODE_COND, EG_GNODE_ARM, EG_GNODE_COPY, EG_GNODE_ARM, EG_GNODE_COPY };
+    static const int parents[12] = { -1, 0, 1, 0, 3, 3, -1, -1, 7, 8, 7, 10 };
+    static const int levels[12] = { 0, 1, 2, 1, 3, 4, 5, 6, 7, 8, 7, 8 };
+    ok = ok && d.n_nodes == 12 && d.n_levels == 9 && d.flags == 0;
+    for (int i = 0; ok && i < 12; ++i) ok = d.nodes[i].kind == kinds[i] && d.nodes[i].parent == parents[i] && d.nodes[i].level == levels[i];
+    check(ok, "a fork of two branches with a wait, then an IF_ELSE: the node kinds, parents, levels and n_levels are the recording's");
+    ok = ok && d.nodes[7].arm == EG_COND_IF_ELSE && d.nodes[8].arm == 0 && d.nodes[10].arm == 1 && d.nodes[2].n_planes == 2 &&
+         d.nodes[2].access[0] == 1 && d.nodes[2].access[1] == 2 && d.nodes[2].planes[1] == p[2] && d.nodes[2].unit == NULL && d.nodes[7].n_planes == 1;
+    int w = edge_at(&d, EG_GEDGE_WAIT, 2, 4);
+    ok = ok && w >= 0 && d.edges[w].plane == p[2] && edge_at(&d, EG_GEDGE_JOIN, 2, 6) >= 0 && edge_at(&d, EG_GEDGE_JOIN, 5, 6) >= 0 &&
+         edge_at(&d, EG_GEDGE_ORDER, 6, 7) >= 0 && edge_at(&d, EG_GEDGE_ORDER, 4, 5) >= 0 && count_edges(&d, EG_GEDGE_WAIT) == 1 &&
+         count_edges(&d, EG_GEDGE_RAW) == 0 && count_edges(&d, EG_GEDGE_WAW) == 0;
+    check(ok, "the same description: the WAIT edge carries the plane, the joins and orders are there, the resolved race and the exclusive arms give no hazard edge");
+    check(ok && eg_graph_free(ctx, g) == EG_OK && eg_graph_describe(ctx, g, &d) == EG_BAD_REQUEST && reason_has(ctx, "graph") &&
+              eg_graph_describe(ctx, NULL, &d) == EG_BAD_REQUEST,
+          "eg_graph_describe of a freed graph or NULL is refused BAD_REQUEST by name");
+
+    /* a plain chain: levels 0..n-1 and a RAW edge per link */
+    ok = eg_record_begin(ctx) == EG_OK && eg_copy(ctx, p[0], p[2]) == EG_OK && eg_copy(ctx, p[2], p[3]) == EG_OK && eg_copy(ctx, p[3], p[4]) == EG_OK &&
+         eg_record_end(ctx, NULL, &g) == EG_OK && eg_graph_describe(ctx, g, &d) == EG_OK;
+    ok = ok && d.n_nodes == 3 && d.n_levels == 3 && d.nodes[0].level == 0 && d.nodes[1].level == 1 && d.nodes[2].level == 2 &&
+         edge_at(&d, EG_GEDGE_RAW, 0, 1) >= 0 && edge_at(&d, EG_GEDGE_RAW, 1, 2) >= 0 && d.edges[edge_at(&d, EG_GEDGE_RAW, 1, 2)].plane == p[3];
+    check(ok && eg_graph_free(ctx, g) == EG_OK, "a plain chain of copies: levels 0, 1, 2 and a RAW edge per link naming the plane");
+    ok = eg_record_begin(ctx) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK && eg_graph_describe(ctx, g, &d) == EG_OK && d.n_nodes == 0 && d.n_levels == 0;
+    check(ok && eg_graph_free(ctx, g) == EG_OK, "an empty graph describes with no nodes and no levels");
+    for (int i = 0; i < 5; ++i) eg_plane_free(ctx, p[i]);
+    eg_plane_free(ctx, pc);
+}
+
 /* Launches in branches: the slots' roles give the hazards; a plain graph reads a plan's new binding at its next replay. */
 static void check_fork_launches(eg_ctx* ctx, eg_unit* axpb) {
     enum { K = RN };
@@ -1474,8 +1543,21 @@ static void check_fork_launches(eg_ctx* ctx, eg_unit* axpb) {
     eg_graph* none = NULL;
     ok = eg_record_begin(ctx) == EG_OK && eg_record_fork_begin(ctx) == EG_OK && eg_launch(ctx, pl1, NULL) == EG_OK &&
          eg_record_fork_branch(ctx) == EG_OK && eg_launch(ctx, pl1, NULL) == EG_OK;
-    check(ok && eg_record_fork_end(ctx) == EG_BAD_REQUEST && reason_has(ctx, "race between node 0 (eg_launch of unit") && eg_record_end(ctx, NULL, &none) == EG_BAD_REQUEST,
+    check(ok && eg_record_fork_end(ctx) == EG_BAD_REQUEST && reason_has(ctx, "race between node 2 (eg_launch of unit") && eg_record_end(ctx, NULL, &none) == EG_BAD_REQUEST,
           "two launches of a plan writing one plane in two branches are a race, named by node and unit");
+
+    /* a launch node names its unit; the hazard edge between two launches of one plan carries the slots */
+    struct eg_graph_description ld;
+    memset(&ld, 0, sizeof(ld));
+    ld.struct_size = sizeof(ld);
+    eg_graph* gl = NULL;
+    ok = eg_record_begin(ctx) == EG_OK && eg_launch(ctx, pl1, NULL) == EG_OK && eg_launch(ctx, pl1, NULL) == EG_OK && eg_record_end(ctx, NULL, &gl) == EG_OK &&
+         eg_graph_describe(ctx, gl, &ld) == EG_OK && ld.n_nodes == 2 && ld.nodes[0].kind == EG_GNODE_LAUNCH && ld.nodes[0].unit != NULL &&
+         ld.nodes[0].n_planes >= 1 && ld.nodes[0].slot[0] >= 0 && ld.n_levels == 2;
+    int raw = -1;
+    for (int32_t i = 0; ok && i < ld.n_edges; ++i)
+        if (ld.edges[i].kind == EG_GEDGE_RAW && ld.edges[i].from_slot >= 0 && ld.edges[i].to_slot >= 0 && ld.edges[i].plane == p1) raw = i;
+    check(ok && raw >= 0 && eg_graph_free(ctx, gl) == EG_OK, "two launches of one plan: LAUNCH nodes name the unit and slots, a RAW edge carries both slots and the plane");
 
     /* a plain graph reads the plan's new binding at its next launch */
     ok = eg_record_begin(ctx) == EG_OK && eg_launch(ctx, pl1, NULL) == EG_OK;
@@ -4700,6 +4782,7 @@ int main(int argc, char** argv) {
     check_conditionals(ctx);
     check_recording_states(ctx);
     check_fork_join(ctx);
+    check_graph_describe(ctx);
     {
         eg_unit *c1 = NULL;
         check(load(ctx, "count1", 0xD1, &c1) == EG_OK, "eg_unit_load count1 for the recorded list");

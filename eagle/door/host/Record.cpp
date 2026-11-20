@@ -12,7 +12,7 @@
 #include "eagle/door/host/Ops.h"
 #include "eagle/door/device/Seam.h"
 #include "eagle/door/host/Team.h"
-#include "eagle/graph/Edges.h"
+#include "eagle/door/host/Shape.h"
 
 #include <cstring>
 #include <memory>
@@ -59,30 +59,14 @@ void release(eg_ctx& ctx, const std::vector<Node>& nodes) {
 }  // namespace door
 }  // namespace eagle
 
-/** @brief What a recording keeps besides the node tree: the open conditionals and forks, and the planes every node touches. */
+/** @brief What a recording keeps besides the node tree: the open conditionals (their arm lists take the next call) and the shape. */
 struct eg_recording_s {
-    /** @brief A wait: the nodes of branch ``branch`` from ordinal ``since`` run after node ``from``. */
-    struct Order {
-        int from, branch, since;
-    };
-    /** @brief An open conditional (``cond`` set) or fork. */
-    struct Frame {
-        eagle::door::Node* cond = nullptr;
-        std::vector<std::vector<eagle::graph::gidx>> branches;   ///< a fork's branches: the ordinals of their nodes, nested ones included
-        std::vector<Order> ordered;
-    };
     std::vector<eagle::door::Node> top;
-    std::vector<Frame> frames;                  ///< the open conditionals and forks, outermost first
-    std::vector<eagle::graph::PlaneRef> refs;   ///< every plane any node touches, by node ordinal
-    std::vector<std::string> names;             ///< per node ordinal: the call, for a race reason
-    int nodes() const { return static_cast<int>(names.size()); }
+    std::vector<eagle::door::Node*> conds;      ///< the open conditionals, outermost first
+    eagle::door::GraphShape shape;
 
     /** @brief The list the next call is recorded into. */
-    std::vector<eagle::door::Node>& current() {
-        for (auto it = frames.rbegin(); it != frames.rend(); ++it)
-            if (it->cond != nullptr) return it->cond->arms.back();
-        return top;
-    }
+    std::vector<eagle::door::Node>& current() { return conds.empty() ? top : conds.back()->arms.back(); }
 };
 
 namespace eagle {
@@ -121,34 +105,15 @@ int slot_access(std::int32_t role) {
     return writes_role(role) ? 1 : -1;
 }
 
-/** @brief @p p as a hazard reference of node @p ordinal: its memory (base, shape, byte strides) and how the node touches it. */
-eagle::graph::PlaneRef plane_ref(const eg_plane_s& p, const std::string& name, int ordinal, int access) {
-    const DLTensor& t = p.tensor->dl_tensor;
-    eagle::graph::PlaneRef r;
-    r.name = name;
-    r.node = ordinal;
-    r.base = reinterpret_cast<std::uintptr_t>(t.data) + t.byte_offset;
-    r.itemsize = static_cast<eagle::graph::gidx>(t.dtype.bits / 8) * t.dtype.lanes;
-    r.access = access;
-    eagle::graph::gidx stride = r.itemsize;     // a plane without strides is compact, row-major
-    r.shape.assign(t.shape, t.shape + t.ndim);
-    r.strides.assign(static_cast<std::size_t>(t.ndim), 0);
-    for (int k = t.ndim; k-- > 0;) {
-        r.strides[static_cast<std::size_t>(k)] = t.strides != nullptr ? t.strides[k] * r.itemsize : stride;
-        stride *= t.shape[k];
-    }
-    return r;
-}
-
-/** @brief The planes @p n touches as hazard references: one per bound plane of each launch, and the named planes of the other calls. */
-std::vector<eagle::graph::PlaneRef> plane_refs(const Node& n, int ordinal) {
-    std::vector<eagle::graph::PlaneRef> refs;
-    const auto add = [&](const eg_plane_s* p, const std::string& name, int access) {
-        if (p != nullptr && access >= 0) refs.push_back(plane_ref(*p, name, ordinal, access));
+/** @brief The planes @p n touches: one per bound plane of each launch, and the named planes of the other calls. */
+std::vector<PlaneUse> uses_of(const Node& n) {
+    std::vector<PlaneUse> uses;
+    const auto add = [&](eg_plane_s* p, const char* name, int access, int slot = -1) {
+        if (p != nullptr && access >= 0) uses.push_back({ p, access, slot, name });
     };
     const auto add_plan = [&](const eg_plan_s& plan) {
         for (std::size_t s = 0; s < plan.bindings.size(); ++s)
-            add(plan.bindings[s].plane, plan.unit->slots[s].name, slot_access(plan.unit->slots[s].role));
+            add(plan.bindings[s].plane, plan.unit->slots[s].name.c_str(), slot_access(plan.unit->slots[s].role), static_cast<int>(s));
     };
     switch (n.kind) {
         case Node::Launch: add_plan(*n.plan); break;
@@ -175,24 +140,21 @@ std::vector<eagle::graph::PlaneRef> plane_refs(const Node& n, int ordinal) {
             add(n.baseline, "baseline", 0);
             break;
     }
-    return refs;
+    return uses;
 }
 
-/** @brief The recording of @p n: its hazard references and its place in every open fork branch. */
-void note(eg_recording_s& rec, const Node& n) {
-    const int ordinal = rec.nodes();
-    rec.names.push_back(describe(n));
-    for (eagle::graph::PlaneRef& r : plane_refs(n, ordinal)) rec.refs.push_back(std::move(r));
-    for (eg_recording_s::Frame& f : rec.frames)
-        if (f.cond == nullptr) f.branches.back().push_back(ordinal);
-}
-
-/** @brief The branch of each node ordinal in the fork @p f (-1: not in it). */
-std::vector<int> branch_table(const eg_recording_s& rec, const eg_recording_s::Frame& f) {
-    std::vector<int> branch_of(static_cast<std::size_t>(rec.nodes()), -1);
-    for (std::size_t b = 0; b < f.branches.size(); ++b)
-        for (eagle::graph::gidx i : f.branches[b]) branch_of[static_cast<std::size_t>(i)] = static_cast<int>(b);
-    return branch_of;
+/** @brief The description kind of a recorded node. */
+eg_gnode_kind gnode_kind(const Node& n) {
+    switch (n.kind) {
+        case Node::Launch: return EG_GNODE_LAUNCH;
+        case Node::Run: return EG_GNODE_RUN;
+        case Node::Reduce: return EG_GNODE_REDUCE;
+        case Node::Copy: return EG_GNODE_COPY;
+        case Node::Fft: return EG_GNODE_FFT;
+        case Node::Gemm: return EG_GNODE_GEMM;
+        case Node::Cond: return EG_GNODE_COND;
+    }
+    return EG_GNODE_LAUNCH;
 }
 
 /** @brief What the driver's host node runs at each replay, on a driver thread: the recorded step on the context's host
@@ -242,7 +204,7 @@ bool record(eg_ctx& ctx, Node&& node) {
     std::vector<Node>& list = ctx.rec->current();
     list.push_back(std::move(node));
     retain(list.back());
-    note(*ctx.rec, list.back());
+    ctx.rec->shape.add(gnode_kind(list.back()), describe(list.back()), list.back().plan != nullptr ? list.back().plan->unit->name : std::string(), uses_of(list.back()));
     return true;
 }
 
@@ -297,20 +259,6 @@ void run_node(eg_ctx& ctx, const Node& n) {
 eg_recording_s& recording(eg_ctx& ctx) {
     if (ctx.rec == nullptr) refuse(EG_BAD_REQUEST, "not recording: call eg_record_begin first");
     return *ctx.rec;
-}
-
-/** @brief The conditional the call @p call acts on: the innermost open frame must be one. */
-Node* innermost_cond(eg_recording_s& rec, const char* call) {
-    if (rec.frames.empty()) refuse(EG_BAD_REQUEST, std::string(call) + ": no conditional is open");
-    if (rec.frames.back().cond == nullptr) refuse(EG_BAD_REQUEST, std::string(call) + ": a fork is still open inside the conditional's arm");
-    return rec.frames.back().cond;
-}
-
-/** @brief The fork the call @p call acts on: the innermost open frame must be one. */
-eg_recording_s::Frame& innermost_fork(eg_recording_s& rec, const char* call) {
-    if (rec.frames.empty()) refuse(EG_BAD_REQUEST, std::string(call) + ": no fork is open");
-    if (rec.frames.back().cond != nullptr) refuse(EG_BAD_REQUEST, std::string(call) + ": a conditional is still open inside the fork branch");
-    return rec.frames.back();
 }
 
 }  // namespace
@@ -429,95 +377,49 @@ void record_cond_begin(eg_ctx& ctx, const eg_cond_desc* desc) {
     n.max_iters = d.max_iters;
     n.arms.emplace_back();                      // the first arm is being recorded
     record(ctx, std::move(n));
-    eg_recording_s::Frame frame;
-    frame.cond = &rec.current().back();
-    rec.frames.push_back(std::move(frame));
+    Node* test = &rec.current().back();
+    rec.shape.cond_begin(d.kind, want);
+    rec.conds.push_back(test);
 }
 
 void record_cond_arm(eg_ctx& ctx) {
     eg_recording_s& rec = recording(ctx);
-    Node& n = *innermost_cond(rec, "eg_record_cond_arm");
-    if (n.arms.size() >= n.want)
-        refuse(EG_BAD_REQUEST, "eg_record_cond_arm: this conditional takes " + std::to_string(n.want) +
-               " arm(s) and all are open");
-    n.arms.emplace_back();
+    rec.shape.cond_arm();
+    rec.conds.back()->arms.emplace_back();
 }
 
 void record_cond_end(eg_ctx& ctx) {
     eg_recording_s& rec = recording(ctx);
-    const Node& n = *innermost_cond(rec, "eg_record_cond_end");
-    if (n.arms.size() != n.want)
-        refuse(EG_BAD_REQUEST, "eg_record_cond_end: the conditional has " + std::to_string(n.arms.size()) +
-               " arm(s) of the " + std::to_string(n.want) + " it takes");
-    rec.frames.pop_back();
+    rec.shape.cond_end();
+    rec.conds.pop_back();
 }
 
-void record_fork_begin(eg_ctx& ctx) {
-    eg_recording_s::Frame frame;
-    frame.branches.emplace_back();
-    recording(ctx).frames.push_back(std::move(frame));
-}
+void record_fork_begin(eg_ctx& ctx) { recording(ctx).shape.fork_begin(); }
 
-void record_fork_branch(eg_ctx& ctx) {
-    eg_recording_s::Frame& fork = innermost_fork(recording(ctx), "eg_record_fork_branch");
-    if (fork.branches.back().empty()) refuse(EG_BAD_REQUEST, "eg_record_fork_branch: the branch is empty");
-    fork.branches.emplace_back();
-}
+void record_fork_branch(eg_ctx& ctx) { recording(ctx).shape.fork_branch(); }
 
 void record_fork_end(eg_ctx& ctx) {
     eg_recording_s& rec = recording(ctx);
-    eg_recording_s::Frame& fork = innermost_fork(rec, "eg_record_fork_end");
-    if (fork.branches.back().empty()) refuse(EG_BAD_REQUEST, "eg_record_fork_end: the branch is empty");
-    eagle::graph::SiblingGroup group;
-    group.branches = fork.branches;
-    const std::vector<int> branch_of = branch_table(rec, fork);
-    for (const eagle::graph::Conflict& c : eagle::graph::siblingConflicts(rec.refs, std::vector<eagle::graph::SiblingGroup>{ group })) {
-        const auto after_wait = [&](const eg_recording_s::Order& o) {
-            return o.from == c.a && o.branch == branch_of[static_cast<std::size_t>(c.b)] && c.b >= o.since;
-        };
-        if (std::any_of(fork.ordered.begin(), fork.ordered.end(), after_wait)) continue;
-        const std::string reason = "eg_record_fork_end: a " + std::string(eagle::graph::kindName(c.kind)) + " race between node " +
-                                   std::to_string(c.a) + " (" + rec.names[static_cast<std::size_t>(c.a)] + ") slot '" + c.planeA +
-                                   "' and node " + std::to_string(c.b) + " (" + rec.names[static_cast<std::size_t>(c.b)] + ") slot '" +
-                                   c.planeB + "' of different branches: give the branches disjoint planes or order them with "
-                                   "eg_record_wait; the recording is ended";
-        release(ctx, rec.top);
-        delete ctx.rec;
-        ctx.rec = nullptr;
-        refuse(EG_BAD_REQUEST, reason);
-    }
-    rec.frames.pop_back();
+    const std::string race = rec.shape.fork_end();
+    if (race.empty()) return;
+    release(ctx, rec.top);                      // a race ends the recording: it cannot be repaired from here
+    delete ctx.rec;
+    ctx.rec = nullptr;
+    refuse(EG_BAD_REQUEST, race);
 }
 
 void record_wait(eg_ctx& ctx, std::int32_t n_planes, eg_plane_s* const* planes) {
     eg_recording_s& rec = recording(ctx);
-    eg_recording_s::Frame& fork = innermost_fork(rec, "eg_record_wait");
     if (n_planes < 1 || planes == nullptr) refuse(EG_BAD_REQUEST, "eg_record_wait: n_planes " + std::to_string(n_planes) + " without planes");
-    const std::vector<int> branch_of = branch_table(rec, fork);
-    const int mine = static_cast<int>(fork.branches.size()) - 1;
-    std::vector<int> writers;                   // the nodes of earlier sibling branches that write a named plane
-    for (std::int32_t k = 0; k < n_planes; ++k) {
-        const std::string at = "eg_record_wait: planes[" + std::to_string(k) + "]";
-        check_handle(ctx.planes, planes[k], at.c_str());
-        const eagle::graph::PlaneRef named = plane_ref(*planes[k], at, -1, 0);
-        bool found = false;
-        for (const eagle::graph::PlaneRef& r : rec.refs) {
-            const int branch = branch_of[static_cast<std::size_t>(r.node)];
-            if (branch < 0 || r.access == 0 || !eagle::graph::detail::overlap(named, r)) continue;
-            if (branch == mine) refuse(EG_BAD_REQUEST, at + " is written by this branch (node " + std::to_string(r.node) + " slot '" + r.name + "')");
-            writers.push_back(r.node);
-            found = true;
-        }
-        if (!found) refuse(EG_BAD_REQUEST, at + " is written by no earlier sibling branch");
-    }
-    for (int from : writers) fork.ordered.push_back({ from, mine, rec.nodes() });
+    for (std::int32_t k = 0; k < n_planes; ++k) check_handle(ctx.planes, planes[k], ("eg_record_wait: planes[" + std::to_string(k) + "]").c_str());
+    rec.shape.wait(std::vector<eg_plane_s*>(planes, planes + n_planes));
 }
 
 void record_end(eg_ctx& ctx, const eg_record_end_desc* desc, eg_graph** out) {
     if (out == nullptr) refuse(EG_BAD_REQUEST, "eg_record_end: out is NULL");
     *out = nullptr;
     eg_recording_s& rec = recording(ctx);
-    if (!rec.frames.empty()) refuse(EG_BAD_REQUEST, "eg_record_end: a conditional or fork is still open");
+    if (rec.shape.open()) refuse(EG_BAD_REQUEST, "eg_record_end: a conditional or fork is still open");
     std::unique_ptr<GraphDiff> diff;
     if (desc != nullptr) {
         const eg_record_end_desc d = read_input(desc, "eg_record_end_desc");
@@ -535,6 +437,7 @@ void record_end(eg_ctx& ctx, const eg_record_end_desc* desc, eg_graph** out) {
     }
     auto graph = std::make_unique<eg_graph_s>();
     graph->nodes = std::move(rec.top);
+    graph->shape = std::move(rec.shape);
     graph->diff = std::move(diff);
     ctx.graphs.insert(graph.get());
     delete ctx.rec;
@@ -562,8 +465,14 @@ void graph_launch(eg_ctx& ctx, eg_graph_s* graph) {
     diff_launched(diff);
 }
 
-void graph_describe(eg_ctx&, const eg_graph_s*, eg_graph_description*) {
-    refuse(EG_NOT_WRITTEN, "eg_graph_describe is not written in this build of the door");
+void graph_describe(eg_ctx& ctx, const eg_graph_s* graph, eg_graph_description* out) {
+    check_handle(ctx.graphs, const_cast<eg_graph_s*>(graph), "graph");
+    if (out == nullptr) refuse(EG_BAD_REQUEST, "eg_graph_describe: out is NULL");
+    if (out->struct_size < 2 * sizeof(std::uint32_t)) refuse(EG_BAD_REQUEST, "eg_graph_description: struct_size " + std::to_string(out->struct_size) + " is too small");
+    if (graph->described == nullptr) graph->described = std::make_unique<DescribeStore>();
+    eg_graph_description d;
+    graph->shape.describe(*graph->described, graph->diff != nullptr ? EG_RECORD_DIFF : 0, d);
+    write_output(out, d, "eg_graph_description");
 }
 
 void graph_free(eg_ctx& ctx, eg_graph_s* graph) {

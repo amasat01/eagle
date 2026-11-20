@@ -15,6 +15,7 @@ host/Ops.cpp
 host/Fft.cpp
 host/Gemm.cpp
 host/Record.cpp
+host/Shape.cpp
 host/GraphReverse.cpp
 device/Device.cpp
 device/Gemm.cpp

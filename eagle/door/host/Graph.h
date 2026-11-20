@@ -7,6 +7,7 @@
 #include "eagle/door/Context.h"
 #include "eagle/door/device/Seam.h"
 #include "eagle/door/host/Ops.h"
+#include "eagle/door/host/Shape.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -115,4 +116,6 @@ void diff_launched(GraphDiff& diff);
 struct eg_graph_s {
     std::vector<eagle::door::Node> nodes;
     std::unique_ptr<eagle::door::GraphDiff> diff;   ///< set when ended with EG_RECORD_DIFF
+    eagle::door::GraphShape shape;                  ///< what eg_graph_describe returns
+    mutable std::unique_ptr<eagle::door::DescribeStore> described;   ///< the arrays of the last description
 };
