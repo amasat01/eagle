@@ -7,13 +7,15 @@ Rows: the sidecar reader (a good block, an undeclared sidecar, each bad shape
 named by its key, ``launch.block``); a declared kernel takes its first-axis
 extent by label or from a lane-shaped plane (``(64, 8192)``, ``(W, 64, 8192)``),
 returns lane-shaped outputs, refuses ``n=``, a contradicting shape and an extent
-on an all-static space; and a launch that binds only Tables is refused whether
-or not the lane space is declared (a Table's length is never the lane count).
+on an all-static space; a launch that binds only Tables is refused whether
+or not the lane space is declared (a Table's length is never the lane count);
+and a plane bound broadcast keeps its compact shape on a rebind.
 The kernels are real hawk builds; the lane space is stamped on the plugin the
 way the sidecar reader hands it over.
 """
 
 import copy
+import re
 import types
 
 import numpy as np
@@ -501,3 +503,23 @@ def test_a_builder_binds_a_tables_only_grid_kernel_by_label_on_the_gpu(tmp_path)
     g = _first_in_a_builder(k, t, channel=7)
     assert g.backend == "gpu"
     np.testing.assert_array_equal(g().get().ravel(), k(t, channel=7).get().ravel())
+
+
+@hawk.kernel
+def affine(lane: Grid["a", "b":4, "c":6], x: Scalar) -> Scalar:
+    return 2.0 * x + 1.0
+
+
+def test_a_rebound_broadcast_plane_keeps_its_compact_shape():
+    """A twin reading ``x`` along ``[a, c]`` is bound with the compact buffer; a rebind swaps a buffer of that shape
+    (values against NumPy's broadcast) and refuses another shape by name: the shape carries the unit's pattern."""
+    rng = np.random.default_rng(3)
+    twin, _, kwargs = affine.broadcast_call((rng.random((3, 1, 6)),), {"a": 3})
+    out = np.zeros((3, 4, 6))
+    bound = eagle.deploy(twin).bind(x=kwargs["x"], out=out, a=3)
+    x2 = rng.random(kwargs["x"].shape)
+    bound.rebind(x=x2).launch()
+    np.testing.assert_array_equal(out, np.broadcast_to(2.0 * x2.reshape(3, 1, 6) + 1.0, (3, 4, 6)))
+    held = re.escape(str(tuple(kwargs["x"].shape)))
+    with pytest.raises(ValueError, match=rf"'x' was bound with shape {held}; it cannot be rebound with shape \(6,\)"):
+        bound.rebind(x=rng.random(6))

@@ -498,6 +498,7 @@ def test_to_names_the_framework_and_raises_with_an_install_hint_when_it_is_missi
     out = a.to("numpy")
     assert isinstance(out, np.ndarray) and out.tolist() == [1.0, 2.0, 3.0]
     monkeypatch.setitem(sys.modules, "torch", None)             # torch cannot be imported
+    monkeypatch.delitem(sys.modules, "eagle.frameworks.torch", raising=False)   # nor eagle's bridge to it, if loaded
     with pytest.raises(ImportError, match=r"torch.*pip install torch"):
         a.to("torch")
     with pytest.raises(ValueError, match="unknown framework"):

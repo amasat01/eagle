@@ -135,6 +135,7 @@ def test_returns_routes_plan_run_and_simulate_through_the_bridge(tmp_path):
     _bridge._WARNED.discard("torch")
     import sys
     saved = sys.modules.get("torch", 0)
+    bridge = sys.modules.pop("eagle.frameworks.torch", None)   # a loaded bridge holds torch: drop it too
     sys.modules["torch"] = None
     try:
         with warnings.catch_warnings(record=True) as seen:
@@ -146,4 +147,6 @@ def test_returns_routes_plan_run_and_simulate_through_the_bridge(tmp_path):
             del sys.modules["torch"]
         else:
             sys.modules["torch"] = saved
+        if bridge is not None:
+            sys.modules["eagle.frameworks.torch"] = bridge
     assert isinstance(again, eagle.Array) and len([w for w in seen if "pip install torch" in str(w.message)]) == 1

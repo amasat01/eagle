@@ -99,7 +99,7 @@ def linked(plugin, door: str):
 
 
 def _link(by_name: dict, arts: dict) -> None:
-    """:func:`link` from the bundle's sidecars, ``{name: sidecar}``."""
+    """Attach to each split plugin of ``by_name`` its stages, built from the bundle's sidecars ``arts`` (``{name: sidecar}``)."""
     cells = {}
     for side in arts.values():
         cells.update(side.get("cells", {}))
