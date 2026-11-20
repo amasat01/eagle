@@ -33,6 +33,27 @@ __global__ void scale_vjp(ScalarHandle x, ScalarHandle w, ScalarHandle bar_y, Sc
     at(bar_x)[i] = at(w)[0] * at(bar_y)[i];
     at(bar_w)[i] = at(x)[i] * at(bar_y)[i];
 }
+// slots: x, w, bar_y, bar_x, bar_w (the running sum), bar_w_c (its compensation). Thread 0 sums the partition's samples in order, as the host entry does.
+__global__ void scale_vjp_comp(ScalarHandle x, ScalarHandle w, ScalarHandle bar_y, ScalarHandle bar_x, ScalarHandle bar_w, ScalarHandle bar_w_c, TRIPLE) {
+    const long long flat = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (flat < count) at(bar_x)[base + flat] = at(w)[0] * at(bar_y)[base + flat];
+    if (flat != 0) return;
+    double sum = at(bar_w)[0], c = at(bar_w_c)[0];
+    for (long long i = base; i < base + count; ++i) {
+        const double term = at(x)[i] * at(bar_y)[i] - c, t = sum + term;
+        c = (t - sum) - term;
+        sum = t;
+    }
+    at(bar_w)[0] = sum;
+    at(bar_w_c)[0] = c;
+    (void)nSamples;
+}
+// the fold after the launch: the sum minus its compensation, over the elements of the target
+__global__ void scale_vjp_comp_fold(ScalarHandle x, ScalarHandle w, ScalarHandle bar_y, ScalarHandle bar_x, ScalarHandle bar_w, ScalarHandle bar_w_c, TRIPLE) {
+    SAMPLE(i);
+    (void)x, (void)w, (void)bar_y, (void)bar_x;
+    at(bar_w)[i] -= at(bar_w_c)[i];
+}
 // slots: x, n (int32), y
 __global__ void iscale(ScalarHandle x, ScalarHandle n, ScalarHandle y, TRIPLE) {
     SAMPLE(i);

@@ -1183,6 +1183,10 @@ void device_launch_prefix(eg_plan_s& plan, std::int64_t count, std::int64_t of) 
     Current current(d);
     exec::DeviceKernel::run(reinterpret_cast<CUfunction>(u.function), plan.params, exec::Partition{ 0, count, of },
                             reinterpret_cast<CUstream>(d.stream), u.block > 0 ? static_cast<unsigned>(u.block) : resolved_block(d, u, of));
+    for (const CompanionFacts& c : u.companions) {    // a plan with a companion folds it into its target after the launch, as eg_launch does
+        const std::int64_t size = elements(plan.bindings[c.target].plane->tensor->dl_tensor);
+        exec::DeviceKernel::run(reinterpret_cast<CUfunction>(c.device_fold), plan.params, exec::Partition{ 0, size, size }, reinterpret_cast<CUstream>(d.stream));
+    }
 }
 
 void device_mask_count(eg_ctx& ctx, const void* mask, std::int64_t n, unsigned width, std::uint64_t counter) {

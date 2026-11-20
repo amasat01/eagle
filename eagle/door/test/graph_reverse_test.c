@@ -178,7 +178,7 @@ struct units {
     eg_unit *scale, *scale_vjp, *square, *square_vjp, *mul2, *mul2_vjp, *uscale, *uscale_vjp, *tape_vjp, *open_vjp;
     eg_unit *fan, *fan_vjp, *norm2, *norm2_vjp;
     eg_unit *tick, *scatter_vjp;
-    eg_unit *iscale, *iscale_vjp;
+    eg_unit *iscale, *iscale_vjp, *scale_vjp_comp;
 };
 
 static eg_status end_diff(eg_ctx* ctx, int32_t n, const struct eg_node_vjp* v, eg_graph** g) {
@@ -1537,7 +1537,59 @@ static void int_read_row(struct rig* r, const struct units* u, int overwritten) 
     release(r);
 }
 
+/* y = w x with the vjp whose gradient of the shared parameter w is a Kahan sum over samples kept by a companion plane eagle makes (scale_vjp_comp). Through a recorded
+ * graph the gradient of w is bit for bit what the same vjp unit gives launched outside any graph (same data, same code), and the closed form sum x_i within rounding. */
+static void companion_row(struct rig* r, const struct units* u) {
+    eg_ctx* ctx = r->ctx;
+    double x[N], w[1] = { 1.7 }, y[N], seed[N], gx[N], gw[1] = { 0.0 }, ox[N], ow[1] = { 0.0 }, want_x[N], want_w[1] = { 0.0 };
+    struct tensor tx, tw, ty, ts, tgx, tgw, tox, tow;
+    for (int i = 0; i < N; ++i) {
+        x[i] = 0.1 * (i + 1) + 1e-9 * i;
+        seed[i] = 1.0 + 0.5 * (i % 3);
+        want_x[i] = w[0] * seed[i];
+        want_w[0] += x[i] * seed[i];
+        y[i] = gx[i] = ox[i] = 0.0;
+    }
+    eg_plane *px = mk(r, &tx, N, x), *pw = mk(r, &tw, 1, w), *py = mk(r, &ty, N, y), *ps = mk(r, &ts, N, seed), *pgx = mk(r, &tgx, N, gx), *pgw = mk(r, &tgw, 1, gw);
+    eg_plane *pox = mk(r, &tox, N, ox), *pow_ = mk(r, &tow, 1, ow);
+    eg_plane* a[] = { px, pw, py };
+    eg_plan* f = plan_with(r, u->scale, 3, a, NULL);
+    /* the same vjp unit launched outside any graph: x, w, bar_y, bar_x, bar_w (the companion is eagle's) */
+    struct eg_plan_desc pd;
+    memset(&pd, 0, sizeof(pd));
+    pd.struct_size = sizeof(pd);
+    pd.unit = u->scale_vjp_comp;
+    pd.structure = r->device ? EG_STRUCTURE_DEVICE : EG_STRUCTURE_HOST_SERIAL;
+    pd.policy = EG_REDUCE_COMPENSATED;
+    pd.n_samples = N;
+    eg_plan* vp = NULL;
+    eg_plane* vplanes[] = { px, pw, ps, pox, pow_ };
+    const int32_t vslots[] = { 0, 1, 2, 3, 4 };
+    struct eg_bind_desc vb;
+    memset(&vb, 0, sizeof(vb));
+    vb.struct_size = sizeof(vb);
+    vb.n_planes = 5;
+    vb.plane_slots = vslots;
+    vb.planes = vplanes;
+    const struct eg_node_vjp vjps[] = { { 0, u->scale_vjp_comp } };
+    eg_graph* g = NULL;
+    eg_plane *in[] = { px, pw }, *gr[] = { pgx, pgw };
+    up(r);
+    int ok = f && eg_plan_new(ctx, &pd, &vp) == EG_OK && eg_bind(ctx, vp, &vb) == EG_OK && eg_launch(ctx, vp, NULL) == EG_OK && eg_sync(ctx) == EG_OK;
+    ok = ok && eg_record_begin(ctx) == EG_OK && eg_launch(ctx, f, NULL) == EG_OK && end_diff(ctx, 1, vjps, &g) == EG_OK && eg_graph_launch(ctx, g) == EG_OK &&
+         reverse(ctx, g, py, ps, 2, in, gr) == EG_OK;
+    down(r);
+    verdict(r, ok && memcmp(gw, ow, sizeof(gw)) == 0 && memcmp(gx, ox, sizeof(gx)) == 0,
+            "a vjp with a companion plane (a Kahan-summed gradient of a shared parameter) through a recorded DIFF graph: bit for bit the same vjp launched outside any graph");
+    verdict(r, ok && close_rel(gw, want_w, 1, 1e-12) && close_rel(gx, want_x, N, 1e-14), "the same gradients equal the closed form: dJ/dw = sum x_i s_i, dJ/dx_i = w s_i");
+    if (g) eg_graph_free(ctx, g);
+    if (vp) eg_plan_free(ctx, vp);
+    if (f) eg_plan_free(ctx, f);
+    release(r);
+}
+
 static void int_read_rows(struct rig* r, const struct units* u) {
+    companion_row(r, u);
     int_read_row(r, u, 0);
     int_read_row(r, u, 1);
     window_int_row(r, u);
@@ -2057,10 +2109,10 @@ static struct units load_units(struct rig* r) {
                              load(r, "mul2", 0x14), load(r, "mul2_vjp", 0x15), load(r, "uscale", 0x16), load(r, "uscale_vjp", 0x17),
                              load(r, "scale_tape_vjp", 0x18), load(r, "scale_open_vjp", 0x19),
                              load(r, "fan", 0x1a), load(r, "fan_vjp", 0x1b), load(r, "norm2", 0x1c), load(r, "norm2_vjp", 0x1d), load(r, "tick", 0x1e), load(r, "scale_scatter_vjp", 0x1f),
-                             load(r, "iscale", 0x20), load(r, "iscale_vjp", 0x21) };
+                             load(r, "iscale", 0x20), load(r, "iscale_vjp", 0x21), load(r, "scale_vjp_comp", 0x22) };
     verdict(r, u.scale && u.scale_vjp && u.square && u.square_vjp && u.mul2 && u.mul2_vjp && u.uscale && u.uscale_vjp && u.tape_vjp &&
-                   u.open_vjp && u.fan && u.fan_vjp && u.norm2 && u.norm2_vjp && u.tick && u.scatter_vjp && u.iscale && u.iscale_vjp,
-            "the graph fixture's eighteen units load");
+                   u.open_vjp && u.fan && u.fan_vjp && u.norm2 && u.norm2_vjp && u.tick && u.scatter_vjp && u.iscale && u.iscale_vjp && u.scale_vjp_comp,
+            "the graph fixture's nineteen units load");
     return u;
 }
 

@@ -40,11 +40,10 @@ char* live(const eg_plane_s& p) { return static_cast<char*>(tensor(p).data) + te
 std::size_t element_bytes(const eg_plane_s& p) { return static_cast<std::size_t>(tensor(p).dtype.bits / 8); }
 std::size_t byte_count(const eg_plane_s& p) { return static_cast<std::size_t>(elements(tensor(p))) * element_bytes(p); }
 
-/** @brief Refuse a unit the graph reverse does not run: a split, SEGMENTED, companion or cell unit, or an index or active set. */
+/** @brief Refuse a unit the graph reverse does not run: a split, SEGMENTED or cell unit, or an index or active set (a companion unit runs). */
 void check_plain_unit(const eg_unit_s& u, const std::string& at) {
-    if (!u.stages.empty() || u.seg.present || !u.dispatches.empty() || !u.companions.empty() || !u.cells.empty() ||
-        u.index_count_slot >= 0 || u.active_count_slot >= 0)
-        refuse(EG_NOT_WRITTEN, at + " (unit '" + u.name + "'): a split, SEGMENTED, companion, cell, index-set or active-set unit is not written in EG_RECORD_DIFF");
+    if (!u.stages.empty() || u.seg.present || !u.dispatches.empty() || !u.cells.empty() || u.index_count_slot >= 0 || u.active_count_slot >= 0)
+        refuse(EG_NOT_WRITTEN, at + " (unit '" + u.name + "'): a split, SEGMENTED, cell, index-set or active-set unit is not written in EG_RECORD_DIFF");
 }
 
 int find_plane(const GraphDiff& d, const eg_plane_s* p) {
@@ -101,8 +100,14 @@ std::vector<VjpLink> link_vjp(const GraphDiff& d, const DiffNode& node, const eg
         out.push_back(k);
     }
     for (std::size_t i = 0; i < vjp.slots.size(); ++i)
-        if (linked[i] == 0 && vjp.slots[i].role != EG_ROLE_NSAMPLES)
+        if (linked[i] == 0 && vjp.slots[i].role != EG_ROLE_NSAMPLES && !vjp.slots[i].made)    // a companion plane is eagle's: the reverse makes it
             refuse(EG_BAD_REQUEST, at + ": unit '" + vjp.name + "' slot " + std::to_string(i) + " ('" + vjp.slots[i].name + "') has no link");
+    for (const CompanionFacts& c : vjp.companions) {    // the compensation of a gradient the vjp accumulates itself
+        const auto it = std::find_if(out.begin(), out.end(), [&](const VjpLink& k) { return k.slot == c.target; });
+        if (it == out.end() || it->kind != VjpLink::GRAD || it->reduced)
+            refuse(EG_BAD_REQUEST, at + ": unit '" + vjp.name + "': the companion '" + vjp.slots[static_cast<std::size_t>(c.slot)].name + "' compensates slot " + std::to_string(c.target) +
+                   ", which must be linked as a GRAD the vjp accumulates itself (not reduced)");
+    }
     return out;
 }
 
@@ -362,6 +367,9 @@ std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<eg_plan_s*>&
                            "only a launch may write it there (the loop's window rebuilds its states by re-launching the body)");
                 if (node.kind == Node::Launch) {
                     const eg_plan_s& primal = *node.plan;
+                    if (!primal.unit->companions.empty())
+                        refuse(EG_NOT_WRITTEN, "eg_record_end: launch " + std::to_string(plan.leaves[static_cast<std::size_t>(m)].node) + " (unit '" + primal.unit->name +
+                               "') in a WHILE body has a companion plane; the loop's window re-launches its body over private copies and does not make one");
                     for (std::size_t sl = 0; sl < primal.bindings.size(); ++sl)     // the rebuild re-runs this launch: every plane it binds must be tracked
                         if (primal.bindings[sl].plane != nullptr && find_plane(*diff, primal.bindings[sl].plane) < 0)
                             refuse(EG_NOT_WRITTEN, "eg_record_end: launch " + std::to_string(plan.leaves[static_cast<std::size_t>(m)].node) + " (unit '" + primal.unit->name +
@@ -774,6 +782,8 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
         const std::size_t n = static_cast<std::size_t>(primal.n_samples);
         eg_plan_s* vp = inner_plan(ctx, node.vjp, primal.structure, primal.n_samples);
         std::vector<Bytes> grads(node.links.size());
+        std::vector<Bytes> compensation;                        // the companion planes of a compensated vjp: zeroed, eagle's own, and what they fold into
+        std::vector<std::unique_ptr<View>> owned_views;
         try {
             for (std::size_t k = 0; k < node.links.size(); ++k) {
                 const VjpLink& l = node.links[k];
@@ -793,6 +803,16 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
                     data = grads[k].data();
                 }
                 bind_raw(*vp, l.slot, data, l.kind == VjpLink::GRAD && l.reduced ? n : bound_count(*vp, l.slot, tensor(plane)));
+            }
+            for (const CompanionFacts& c : node.vjp->companions) {    // the plane the fold reads its size from, and a zeroed companion of the same shape
+                const auto target = std::find_if(node.links.begin(), node.links.end(), [&](const VjpLink& l) { return l.slot == c.target; });
+                const eg_plane_s& plane = *d.planes[static_cast<std::size_t>(target->plane)];
+                compensation.emplace_back(byte_count(plane), D);
+                owned_views.push_back(std::make_unique<View>(plane, grads[static_cast<std::size_t>(target - node.links.begin())].data()));
+                vp->bindings[static_cast<std::size_t>(c.target)].plane = owned_views.back()->get();
+                bind_raw(*vp, c.slot, compensation.back().data(), bound_count(*vp, c.slot, tensor(plane)));
+                owned_views.push_back(std::make_unique<View>(plane, compensation.back().data()));
+                vp->bindings[static_cast<std::size_t>(c.slot)].plane = owned_views.back()->get();
             }
             if (D != nullptr) device_launch_prefix(*vp, primal.n_samples, primal.n_samples);
             else host::run_plan(*vp, threads);
