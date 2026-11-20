@@ -116,12 +116,16 @@ public:
      *  @param[in] negate  Nonzero inverts the guard (``not cell``, ``else``).
      *  @param[in] loop    WHILE only: ``cap`` >= 1 (``kLoopUncapped`` for
      *                     none) and a non-null ``counter``.
+     *  @param[in] borrowed  Arm streams the caller made before the capture
+     *                     began, one per arm (``arms`` is then their count):
+     *                     none are created here and the caller keeps them
+     *                     alive until ``end()``.
      *  @throws std::invalid_argument on an inconsistent form;
      *          std::runtime_error for IF/ELSE or SWITCH below driver 12.8.
      */
     CaptureConditional(const cudaStream_t& origin, CondKind kind,
         CountGuard guard, unsigned int arms = 0, unsigned int negate = 0,
-        conditional::LoopTerms loop = {})
+        conditional::LoopTerms loop = {}, const std::vector<cudaStream_t>& borrowed = {})
         : origin_{ origin }
         , kind_{ kind }
         , guard_{ guard }
@@ -129,6 +133,8 @@ public:
         , loop_{ loop }
     {
         const unsigned int own = kind == CondKind::IfElse ? 2u : 1u;
+        if (!borrowed.empty())
+            arms = static_cast<unsigned int>(borrowed.size());
         if (arms == 0u)
             arms = own;
         if (kind != CondKind::Switch && arms != own)
@@ -150,9 +156,15 @@ public:
             EAGLE_THROW(std::runtime_error, "CaptureConditional: IF/ELSE and "
                 "SWITCH nodes need an NVIDIA driver >= 12.8; this driver is "
                 "older (lower the chain to negated IFs)");
-        armStreams_.reserve(arms);
-        for (unsigned int k = 0; k < arms; ++k)
-            armStreams_.emplace_back(/*nonBlocking=*/true);
+        if (borrowed.empty()) {
+            armStreams_.reserve(arms);
+            for (unsigned int k = 0; k < arms; ++k)
+                armStreams_.emplace_back(/*nonBlocking=*/true);
+            for (const Stream& stream : armStreams_)
+                arms_.push_back(stream.cuda());
+        } else {
+            arms_ = borrowed;
+        }
         armGraphs_.assign(arms, nullptr);
     }
 
@@ -187,12 +199,12 @@ public:
     CondKind kind() const { return kind_; }
 
     /** @brief Number of arms (bodies). */
-    unsigned int arms() const { return static_cast<unsigned int>(armStreams_.size()); }
+    unsigned int arms() const { return static_cast<unsigned int>(arms_.size()); }
 
     /** @brief Arm @p k's pre-created stream, valid from construction: the
      *  origin a NESTED weave inside that arm must be constructed against,
      *  BEFORE capture begins. */
-    cudaStream_t armStream(unsigned int k) const { return armStreams_.at(k).cuda(); }
+    cudaStream_t armStream(unsigned int k) const { return arms_.at(k); }
 
     /** @brief Arm 0's stream (the body of an IF or WHILE). */
     cudaStream_t bodyStream() const { return armStream(0); }
@@ -271,7 +283,7 @@ public:
         captureScope_.emplace();
         open_ = true;
         for (unsigned int k = 0; k < arms(); ++k) {
-            EAGLE_CHECK_ALWAYS(cudaStreamBeginCaptureToGraph(armStreams_[k].cuda(),
+            EAGLE_CHECK_ALWAYS(cudaStreamBeginCaptureToGraph(arms_[k],
                 armGraphs_[k], nullptr, nullptr, 0, cudaStreamCaptureModeThreadLocal));
             ++opened_;
         }
@@ -321,7 +333,7 @@ public:
 
         for (unsigned int k = 0; k < opened_; ++k) {
             cudaGraph_t out              = nullptr;
-            const cudaError_t captureErr = cudaStreamEndCapture(armStreams_[k].cuda(), &out);
+            const cudaError_t captureErr = cudaStreamEndCapture(arms_[k], &out);
             if (err == cudaSuccess)
                 err = captureErr;
         }
@@ -406,7 +418,8 @@ private:
     CountGuard guard_;
     unsigned int negate_;
     conditional::LoopTerms loop_;
-    std::vector<Stream> armStreams_;
+    std::vector<Stream> armStreams_;    // the streams made here (none when borrowed)
+    std::vector<cudaStream_t> arms_;    // every arm's stream
     std::vector<cudaGraph_t> armGraphs_;
     cudaGraphConditionalHandle handle_ = 0;    // set by begin(); read by the tail launch
     cudaGraphNode_t setterNode_        = nullptr;
