@@ -74,8 +74,7 @@ def _plugins(kernels, work):
     """``{name: plugin}``: each plugin carries the host entry and, when a GPU
     is present, the device function — the one object ``eagle.plan.auto``
     takes."""
-    from hawk.artifact import build_bundle, plan_view
-    from hawk.runtime import load
+    from hawk.artifact import build_bundle, plan_view, plugins
 
     targets = ("host", "cuda") if CUPY_AVAILABLE else ("host",)
     bundle = build_bundle(kernels, work, targets=targets)
@@ -84,13 +83,13 @@ def _plugins(kernels, work):
         from eagle.registry import load_manifest
 
         registry = load_manifest(work / "manifest.json")
+    hosts = plugins(bundle)      # the host entry: hawk's library loader self-checks it
     out = {}
     for art in bundle.artifacts:
         view = plan_view(art.sidecar)
         view.pop("host_entry")
-        lib = load(work, art.name)      # hawk's load self-checks the library
-        extra = {"host_entry": lib.entry.address}
-        keep = [lib]
+        extra = {"host_entry": hosts[art.name].host_entry}
+        keep = [hosts[art.name]]
         if registry is not None:
             loaded = registry[art.name]
             extra["device_function"] = loaded.fn.kernel.ptr

@@ -25,37 +25,23 @@ What is pinned (the ruling's rows, host side):
 
 from __future__ import annotations
 
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 
-def _load_host(so, view, name):
-    from hawk.runtime import load
+def host_plan(kern, work, *, kind=None):
+    """The host plan of ``kern`` as hawk builds it; a kernel that finishes carries its ``finish``
+    declaration in the sidecar the plan reads."""
+    from hawk.artifact import build_bundle, plugins
 
     import eagle.exec as eexec
     from eagle import plan as eplan
 
-    lib = load(Path(so).parent, name)      # hawk's load self-checks the library
-    plugin = SimpleNamespace(host_entry=lib.entry.address, name=name, _keepalive=(lib,), **view)
-    return eplan.plan(plugin, structure=eexec.HostTeam)
-
-
-def host_plan(kern, work, *, kind=None):
-    """The host plan of ``kern`` as hawk builds it; a kernel that finishes carries its ``finish``
-    declaration in the sidecar the plan reads."""
-    from hawk.artifact import build_bundle, plan_view
-
     kw = {} if kind is None else {"kind": kind}
     bundle = build_bundle([kern], work, targets=("host",), **kw)
-    art = next(a for a in bundle.artifacts if a.name == kern.name)
-    view = plan_view(art.sidecar)
-    view.pop("host_entry")
-    if "finish" in art.sidecar:
-        view["sidecar"] = art.sidecar
-    return _load_host(Path(art.directory) / f"{kern.name}.so", view, kern.name)
+    return eplan.plan(plugins(bundle)[kern.name], structure=eexec.HostTeam)
 
 
 # --------------------------------------------------------------------------- #

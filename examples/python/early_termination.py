@@ -201,16 +201,10 @@ def _sidecar(bundle, name: str) -> dict:
 
 
 def host_plugin(bundle, name: str):
-    """The plan-able view of the bundle's HOST entry (mirrors two_body_hybrid.py)."""
-    from hawk.artifact import fold_entries, plan_view
-    from hawk.runtime import load
+    """The plan-able view of the bundle's HOST entry: hawk's plugin record, its library self-checked."""
+    from hawk.artifact import plugins
 
-    kernel = load(pathlib.Path(bundle.directory), name)      # hawk's own load: the library, self-checked
-    view = plan_view(kernel.sidecar)
-    view.pop("host_entry")
-    return SimpleNamespace(
-        host_entry=kernel.entry.address,
-        _keepalive=kernel, **fold_entries(kernel.library, kernel.sidecar), **view)
+    return plugins(bundle)[name]
 
 
 def device_plugin(bundle, name: str):

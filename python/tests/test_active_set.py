@@ -249,8 +249,7 @@ def plans(tmp_path_factory):
     pytest.importorskip("hawk")
     from types import SimpleNamespace
 
-    from hawk.artifact import build_bundle, plan_view
-    from hawk.runtime import load
+    from hawk.artifact import build_bundle, plan_view, plugins
     from hawk.ext import Guard, Kind
 
     import eagle.exec as eexec
@@ -268,9 +267,7 @@ def plans(tmp_path_factory):
         sidecar = next(a.sidecar for a in bundle.artifacts if a.name == kern.name)
         view = plan_view(sidecar)
         view.pop("host_entry")
-        lib = load(work, kern.name)      # hawk's load self-checks the library
-        host = SimpleNamespace(host_entry=lib.entry.address, _keepalive=(lib,), **view)
-        out[(label, "host")] = eplan.plan(host, structure=eexec.HostTeam)
+        out[(label, "host")] = eplan.plan(plugins(bundle)[kern.name], structure=eexec.HostTeam)
         if gpu:
             registry = load_manifest(work / "manifest.json")
             loaded = registry[kern.name]

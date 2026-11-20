@@ -28,21 +28,9 @@ def clear_scatter(x: hawk_trace.Scalar, key: hawk_trace.Index,
 
 @pytest.fixture(scope="module")
 def host_plugin(tmp_path_factory):
-    from types import SimpleNamespace
-
-    from hawk.runtime import load
-
-    import eagle.exec as eexec  # noqa: F401
-
     unit = hawk_artifact.build_bundle(
         [clear_scatter], tmp_path_factory.mktemp("clear"), targets=("host",))
-    kernel = load(unit.directory, "clear_scatter")      # hawk's own load: the library, self-checked
-    sidecar = kernel.sidecar
-    view = hawk_artifact.plan_view(sidecar)
-    view.pop("host_entry")
-    return SimpleNamespace(host_entry=kernel.entry.address,
-                           **hawk_artifact.fold_entries(kernel.library, sidecar),
-                           _keepalive=kernel, _meta=sidecar, **view)
+    return hawk_artifact.plugins(unit)["clear_scatter"]
 
 
 def _bind(plugin):

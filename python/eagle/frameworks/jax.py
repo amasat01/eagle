@@ -77,6 +77,7 @@ from jax.interpreters import ad, batching, mlir
 from .. import FINISHED_PLANE, _cell_rows, _layout
 from .._graph_reduce import POLICIES, check_policy
 from .._graph_reduce import fixed_f64 as _fixed_f64
+from ..roles import classify_arg
 from ._kernel_planes import ACTIVE_PLANES, FUSED_STEPS, SAMPLE_ROLES, call_mode, promote
 from ._tower import LOCK, Level, finished_identity, per_cell_source, stage_levels
 
@@ -715,10 +716,29 @@ def _convention(sig, device=False):
             "aliases": aliases}
 
 
+def _slot_kinds(sidecar):
+    """Each ``arg_spec`` slot's binding kind for the C handler, as eagle's own packer binds it: a vector or
+    matrix plane ``gref``, a plane ``handle`` (``int_handle`` when its wire dtype is an integer), the sample
+    count ``nsamples``, and a uniform ``uniform`` (a by-value slot the bridge refuses)."""
+    mutables = sidecar.get("mutables", ())
+    vec = frozenset(m["name"] for m in mutables if m.get("dtype") == "vector")
+    mat = frozenset(m["name"] for m in mutables if m.get("dtype") == "matrix")
+    wire = sidecar.get("arg_dtypes", {})
+    kinds = []
+    for role, name in (tuple(pair) for pair in sidecar["arg_spec"]):
+        tag = classify_arg(role, name, vec_mutables=vec, mat_mutables=mat)
+        if tag in ("GREF_VEC", "GREF_MAT"):
+            kinds.append("gref")
+        elif tag in ("NSAMPLES", "UNIFORM"):
+            kinds.append(tag.lower())
+        else:
+            integer = name in wire and np.dtype(wire[name]).kind in "iu"
+            kinds.append("int_handle" if integer else "handle")
+    return kinds
+
+
 def _recipe_fields(level, artifact, mode, device=False):
     """The platform-free half of ``level``'s recipe, from its built sidecar."""
-    from hawk.runtime import descriptor_for_sidecar
-
     sig = level.sig
     conv = _convention(sig, device)
     sidecar = artifact.sidecar
@@ -727,7 +747,7 @@ def _recipe_fields(level, artifact, mode, device=False):
     if own != list(sig.arg_spec):
         raise RuntimeError(f"{_WHO}: {level.label}: the built artifact's arg_spec "
                            f"{spec} is not the kernel's {list(sig.arg_spec)}")
-    kinds = descriptor_for_sidecar(sidecar)
+    kinds = _slot_kinds(sidecar)
     ops, rets = conv["operands"], conv["results"]
     declared = sidecar.get("arg_dtypes", {})
     dtype = []

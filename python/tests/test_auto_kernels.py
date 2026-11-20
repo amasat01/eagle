@@ -84,8 +84,7 @@ ak_energy_jvp = Kernel("ak_energy_jvp", jvp(ak_energy, wrt=("v",)))
 
 def _hand_plugins(kernels, work, targets=("host",)):
     """The plugins every caller used to assemble by hand, ``{name: plugin}``."""
-    from hawk.artifact import build_bundle, plan_view
-    from hawk.runtime import load
+    from hawk.artifact import build_bundle, plan_view, plugins
 
     bundle = build_bundle(kernels, work, targets=targets)
     registry = None
@@ -93,13 +92,13 @@ def _hand_plugins(kernels, work, targets=("host",)):
         from eagle.registry import load_manifest
 
         registry = load_manifest(work / "manifest.json")
+    hosts = plugins(bundle)      # the host entry: hawk's library loader self-checks it
     out = {}
     for art in bundle.artifacts:
         view = plan_view(art.sidecar)
-        lib = load(work, art.name)      # hawk's load self-checks the library
         view.pop("host_entry")
-        extra = {"host_entry": lib.entry.address}
-        keep = [lib]
+        extra = {"host_entry": hosts[art.name].host_entry}
+        keep = [hosts[art.name]]
         if registry is not None:
             loaded = registry[art.name]
             extra["device_function"] = loaded.fn.kernel.ptr

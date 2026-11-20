@@ -147,8 +147,7 @@ def _oscillator(kind, finishing, steps=1):
 
 def _build(kern, work, targets, cache_dir=None, settings=None):
 
-    from hawk.artifact import build_bundle, plan_view
-    from hawk.runtime import load
+    from hawk.artifact import build_bundle, plan_view, plugins
 
     import eagle.exec as eexec
     from eagle import plan as eplan
@@ -160,8 +159,8 @@ def _build(kern, work, targets, cache_dir=None, settings=None):
     view = plan_view(sidecar)
     view.pop("host_entry")
     out = {}
-    lib = load(work, kern.name)      # hawk's load self-checks the library
-    host = SimpleNamespace(host_entry=lib.entry.address, name=kern.name, _keepalive=(lib,), **view)
+    record = plugins(bundle)[kern.name]      # the host entry: hawk's library loader self-checks it
+    host = SimpleNamespace(host_entry=record.host_entry, name=kern.name, _keepalive=(record,), **view)
     out["host"] = eplan.plan(host, structure=eexec.HostTeam)
     if "cuda" in targets:
         registry = load_manifest(work / "manifest.json")
