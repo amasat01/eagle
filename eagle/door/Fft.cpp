@@ -207,6 +207,31 @@ void fft_run(eg_ctx& ctx, eg_fft_s* plan, eg_plane_s* in, eg_plane_s* out)
         host::fft_exec(*plan, *in, *out, host::team_threads(ctx));
 }
 
+/** @brief The adjoint of the transform as run: its direction and norm swap; a real transform becomes its partner with the Hermitian weight
+ * (R2C's adjoint is C2R reading half of each interior bin, C2R's is R2C writing twice each interior bin). */
+eg_fft_s* fft_adjoint(eg_ctx& ctx, const eg_fft_s& plan)
+{
+    auto f        = std::make_unique<eg_fft_s>(plan);
+    f->dev        = nullptr;
+    f->work       = nullptr;
+    f->refs       = 1;
+    f->caller_ref = false;
+    f->norm       = adjoint_norm(plan.norm);
+    if (plan.kind == EG_FFT_C2C) {
+        f->forward = !plan.forward;
+    } else if (plan.kind == EG_FFT_R2C) {
+        f->kind   = EG_FFT_C2R;
+        f->weight = 0.5 * plan.weight;
+    } else {
+        f->kind   = EG_FFT_R2C;
+        f->weight = 2.0 * plan.weight;
+    }
+    if (f->device)
+        device_fft_new(ctx, *f);
+    ctx.ffts.insert(f.get());
+    return f.release();
+}
+
 /** @brief Drop one reference to @p plan; the last one frees it. */
 void fft_release(eg_ctx& ctx, eg_fft_s* plan)
 {

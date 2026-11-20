@@ -272,19 +272,22 @@ std::vector<int> tape_key(const Tape& tape, const Node& n, int extra = -1) {
     return key;
 }
 
+/** @brief Copy the planes leaf @p n overwrites, as they are before it, into the tape's snapshots of the leaf. */
+void keep_leaf_copies(Tape& tape, const Node& n) {
+    const int leaf = tape.diff->plan.leaf_of.at(tape_key(tape, n));
+    if (tape.diff->plan.leaves[static_cast<std::size_t>(leaf)].loop >= 0) return;   // a windowed WHILE's copies are rebuilt by the reverse
+    for (Snapshot& s : tape.diff->snapshots)
+        if (s.node == static_cast<std::size_t>(leaf)) {
+            const DLTensor& t = tape.diff->planes[static_cast<std::size_t>(s.plane)]->tensor->dl_tensor;
+            std::memcpy(s.bytes.data(), static_cast<const char*>(t.data) + t.byte_offset, s.size);
+        }
+}
+
 /** @brief Run one recorded node. */
 void run_node(eg_ctx& ctx, const Node& n, Tape* tape) {
+    if (tape != nullptr && n.kind != Node::Run && n.kind != Node::Cond) keep_leaf_copies(*tape, n);
     switch (n.kind) {
         case Node::Launch:
-            if (tape != nullptr) {                  // copy the planes this leaf overwrites, as they are before it
-                const int leaf = tape->diff->plan.leaf_of.at(tape_key(*tape, n));
-                const bool windowed = tape->diff->plan.leaves[static_cast<std::size_t>(leaf)].loop >= 0;   // its copies are rebuilt by the reverse
-                for (Snapshot& s : tape->diff->snapshots)
-                    if (!windowed && s.node == static_cast<std::size_t>(leaf)) {
-                        const DLTensor& t = tape->diff->planes[static_cast<std::size_t>(s.plane)]->tensor->dl_tensor;
-                        std::memcpy(s.bytes.data(), static_cast<const char*>(t.data) + t.byte_offset, s.size);
-                    }
-            }
             check_bound(*n.plan);
             n.plan->finished = 0;    // a replayed launch counts from zero, as eg_launch does
             host::run_plan(*n.plan, host::team_threads(ctx));
@@ -499,14 +502,16 @@ void record_end(eg_ctx& ctx, const eg_record_end_desc* desc, eg_graph** out) {
         if ((d.flags & ~EG_RECORD_DIFF) != 0) refuse(EG_BAD_REQUEST, "eg_record_end_desc.flags: unknown bits " + std::to_string(d.flags & ~EG_RECORD_DIFF));
         if ((d.flags & EG_RECORD_DIFF) != 0) {      // a refusal leaves the recording open
             std::vector<eg_plan_s*> launches;       // by launch ordinal: the tree's launches in recording order
+            std::vector<const Node*> others;        // the copies, reduces, transforms and products, in recording order
             const std::function<void(const std::vector<Node>&)> collect = [&](const std::vector<Node>& nodes) {
                 for (const Node& n : nodes) {
                     if (n.kind == Node::Launch) launches.push_back(n.plan);
+                    else if (n.kind != Node::Run && n.kind != Node::Cond) others.push_back(&n);
                     for (const std::vector<Node>& arm : n.arms) collect(arm);
                 }
             };
             collect(rec.top);
-            diff = diff_plan(ctx, launches, rec.shape.reverse_plan(), d);
+            diff = diff_plan(ctx, launches, others, rec.shape.reverse_plan(), d);
         }
         else if (d.n_vjps != 0) refuse(EG_BAD_REQUEST, "eg_record_end_desc.n_vjps: vjps without EG_RECORD_DIFF");
     }

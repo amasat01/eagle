@@ -1138,7 +1138,7 @@ eg_status eg_record_fork_end(eg_ctx* ctx);
  */
 eg_status eg_record_wait(eg_ctx* ctx, int32_t n_planes, eg_plane* const* planes);
 
-#define EG_RECORD_DIFF (1u << 0) /**< plan the recording for ``eg_graph_reverse`` (host, plain launches only) */
+#define EG_RECORD_DIFF (1u << 0) /**< plan the recording for ``eg_graph_reverse`` (launches, copies, sum reduces, transforms and products) */
 
 /** One recorded launch a gradient flows through, and the vjp unit that reverses it. ``launch`` is the 0-based ordinal of the
  *  ``eg_launch`` inside the recording (a plan launched twice is two ordinals). The vjp is a unit of the launch's library whose
@@ -1162,9 +1162,20 @@ struct eg_record_end_desc {
 };
 
 /** End recording; ``*out`` replays it. ``desc`` NULL: a plain graph. With EG_RECORD_DIFF every recorded call must be an
- *  ``eg_launch`` (a run, reduce, copy, fft or gemm is refused by name), on a host plan with no split, SEGMENTED or companion
- *  unit, or a fork, an IF, IF_ELSE, SWITCH or WHILE around launches. The reverse runs over the launches (the leaves) in reverse
- *  recording order; fork, branch, join and wait are structure only. Each replay saves what every conditional's test saw
+ *  ``eg_launch`` on a plan with no split, SEGMENTED or companion unit, an ``eg_copy``, ``eg_reduce``, ``eg_fft_run`` or
+ *  ``eg_gemm_run``, or a fork, an IF, IF_ELSE, SWITCH or WHILE around them; these are the leaves. The reverse runs over the leaves
+ *  in reverse recording order; fork, branch, join and wait are structure only. What each kind reverses to (the door makes these
+ *  transposes at this call, with no ``eg_node_vjp``, on the target of the graph, and frees them with it): a copy copies the adjoint
+ *  of its target back into the adjoint of its source (a source that is not a float plane has no adjoint); a 1-D sum reduce gives
+ *  every sample the adjoint of the sum; a transform of any kind, norm and direction applies its adjoint transform (the Hermitian
+ *  weights of a real kind and the norm swap included) to the adjoint of its output; a product gives A the adjoint of C times op(B)
+ *  transposed, B op(A) transposed times the adjoint of C, and, when it accumulates, passes the adjoint of C on to C's earlier value
+ *  (the three products run as the forward does: the reference loop on the host, cuBLAS on a device). None of these has a scatter-add.
+ *  A reduce whose op is not sum is refused BAD_REQUEST with the text "has no gradient eagle can pull back (a tie has no single
+ *  answer); only op='sum' reverses"; a 2-D or companion reduce NOT_WRITTEN with "eagle does not pull back yet; only a 1-D op='sum'
+ *  reduce reverses"; a run NOT_WRITTEN with "a run is not written in it yet, record the launches it would run". The text after the
+ *  call's name is the same on every target, for the caller to carry unchanged. A device recording refuses a call that runs on the
+ *  host (a host plan, the copy or reduce of host planes) NOT_WRITTEN by name. Each replay saves what every conditional's test saw
  *  (``cell[cell_index]`` and the baseline element) and a leaf under an arm takes part in the reverse only if that arm ran, decided
  *  from the saved values with NEGATE applied, never from the live cells. A WHILE needs ``max_iters`` of 1 or more (0 is refused:
  *  the cap bounds the tape); the tape plans its body unrolled ``max_iters`` times, each copy running only if its iteration did.
@@ -1175,7 +1186,7 @@ struct eg_record_end_desc {
  *  ``ceil(max_iters / w) + w`` states of those planes instead of ``max_iters``, and the gradient is the unrolled plan's. One
  *  ``eg_node_vjp`` per ``eg_launch`` ordinal serves every unrolled copy of it. Status: OK; BAD_REQUEST (not recording, a conditional or fork open,
  *  a vjp whose links the launch cannot satisfy, two names of one plane in a node, overlapping planes); NOT_WRITTEN (a
- *  node or unit the reverse does not cover; a device context); FAULT (capture failed; a snapshot buffer not allocated). */
+ *  node or unit the reverse does not cover); FAULT (capture failed; a snapshot buffer not allocated). */
 eg_status eg_record_end(eg_ctx* ctx, const struct eg_record_end_desc* desc, eg_graph** out);
 
 /** Replay a recorded graph once. Calls today: seam ``launcher_launch`` on a

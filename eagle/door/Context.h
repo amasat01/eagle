@@ -842,6 +842,8 @@ void fft_run(eg_ctx& ctx, eg_fft_s* plan, eg_plane_s* in, eg_plane_s* out);
 void fft_release(eg_ctx& ctx, eg_fft_s* plan);
 /** @brief Free every transform plan of @p ctx (the context is closing). */
 void fft_free_all(eg_ctx& ctx);
+/** @brief The transform that is the adjoint of @p plan as run, made on the same target and owned by the caller's reference alone (EG_RECORD_DIFF's tape frees it). */
+eg_fft_s* fft_adjoint(eg_ctx& ctx, const eg_fft_s& plan);
 /** @brief eg_fft_run while recording: keep the run, false when the context is not recording. */
 bool record_fft(eg_ctx& ctx, eg_fft_s* plan, eg_plane_s* in, eg_plane_s* out);
 
@@ -851,6 +853,8 @@ constexpr std::int64_t kGemmMaxExtent = 2147483647;
 void gemm_shape(GemmCall& c, const std::string& at);
 /** @brief Refuse (BAD_REQUEST, naming @p at) a plane @p t that is not a view of @p rows rows whose row stride (its elements / @p rows) covers @p cols and that cuBLAS takes. */
 void check_gemm_plane(const std::string& at, std::int64_t rows, std::int64_t cols, const DLTensor& t);
+/** @brief The products that give the gradient of A and of B for the product @p g: dA from dC and B, dB from A and dC, each over the stored planes of the forward. */
+std::pair<eg_gemm_s, eg_gemm_s> gemm_adjoints(const eg_gemm_s& g);
 /** @brief Whether a DEVICE plan of @p plan's unit queues the cuBLAS products (a gemm unit the door can route, see eg_door.h). */
 bool gemm_routed(const eg_plan_s& plan);
 /** @brief Read the gemm route of @p ctx's device class from @p rows (a device context; refused EG_FAULT when the table is malformed). Run once at eg_ctx_new. */

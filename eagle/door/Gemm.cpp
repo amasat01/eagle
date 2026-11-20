@@ -92,6 +92,22 @@ void gemm_new(eg_ctx& ctx, const eg_gemm_desc* desc, eg_gemm** out) {
     *out = g.release();
 }
 
+std::pair<eg_gemm_s, eg_gemm_s> gemm_adjoints(const eg_gemm_s& g) {
+    const GemmCall& f = g.call;
+    const bool ta = f.flags & EG_GEMM_TRANS_A, tb = f.flags & EG_GEMM_TRANS_B, tc = f.flags & EG_GEMM_TRANS_C;
+    eg_gemm_s a = g, b = g;
+    // dA = dC op(B)^T, stored as A is; dB = op(A)^T dC, stored as B is. Each reads the stored planes of the forward, so only the flags change.
+    a.call = GemmCall{};
+    a.call.flags = (tc ? EG_GEMM_TRANS_A : 0u) | (tb ? 0u : EG_GEMM_TRANS_B) | (ta ? EG_GEMM_TRANS_C : 0u);
+    a.call.a_rows = f.c_rows, a.call.a_cols = f.c_cols, a.call.b_rows = f.b_rows, a.call.b_cols = f.b_cols, a.call.c_rows = f.a_rows, a.call.c_cols = f.a_cols;
+    gemm_shape(a.call, "eg_record_end: the product of the gradient of A");
+    b.call = GemmCall{};
+    b.call.flags = (ta ? 0u : EG_GEMM_TRANS_A) | (tc ? EG_GEMM_TRANS_B : 0u) | (tb ? EG_GEMM_TRANS_C : 0u);
+    b.call.a_rows = f.a_rows, b.call.a_cols = f.a_cols, b.call.b_rows = f.c_rows, b.call.b_cols = f.c_cols, b.call.c_rows = f.b_rows, b.call.c_cols = f.b_cols;
+    gemm_shape(b.call, "eg_record_end: the product of the gradient of B");
+    return { a, b };
+}
+
 void gemm_run(eg_ctx& ctx, eg_gemm_s* gemm, eg_plane_s* a, eg_plane_s* b, eg_plane_s* c) {
     check_handle(ctx.gemms, gemm, "gemm");
     for (const auto& p : { std::pair<eg_plane_s*, const char*>{ a, "a" }, { b, "b" }, { c, "c" } }) check_handle(ctx.planes, p.first, p.second);

@@ -77,6 +77,7 @@ void device_active_restore(eg_ctx&, eg_runner_s&, const void*, const std::vector
 std::int64_t device_free_bytes(eg_ctx&) { return 0; }
 void device_event_op(eg_ctx&, unsigned, unsigned, const void*) {}
 void device_reduce(eg_ctx&, const eg_reduce_desc&) {}
+void device_reduce_leaf(eg_ctx&, const host::ReduceOp&) {}
 void device_copy(eg_ctx&, eg_plane_s*, eg_plane_s*) {}
 void device_fft_new(eg_ctx&, eg_fft_s&) {}
 void device_fft_run(eg_ctx&, eg_fft_s&, eg_plane_s*, eg_plane_s*) {}
@@ -275,12 +276,15 @@ constexpr unsigned kRecordedLoops = 64;
 /** @brief The streams and events a recording's conditionals and forks can hold at once, made before the capture opens. */
 constexpr unsigned kRecordStreams = 32, kRecordEvents = 128;
 
-/** @brief One call a recording kept to capture again: a launch, or a structure call (with its description). */
+/** @brief One call a recording kept to capture again: a launch, a copy, reduce, transform or product (``leaf``), or a structure call (with its description). */
 struct Op {
-    enum Kind { Launch, CondBegin, CondArm, CondEnd, ForkBegin, ForkBranch, ForkEnd, Wait } kind = Launch;
+    enum Kind { Launch, Leaf, CondBegin, CondArm, CondEnd, ForkBegin, ForkBranch, ForkEnd, Wait } kind = Launch;
     eg_plan_s* plan = nullptr;
     eg_cond_desc cond{};
     std::vector<eg_plane_s*> planes;
+    Op(Kind k = Launch, eg_plan_s* p = nullptr, eg_cond_desc c = {}, std::vector<eg_plane_s*> pl = {}) : kind(k), plan(p), cond(c), planes(std::move(pl)) {}
+    Node leaf;                                          ///< a Leaf: the checked call; a product's ``gemm`` is left unset, ``product`` is its copy
+    eg_gemm_s product;
 };
 
 /** @brief The tests of one conditional (its node ordinal ``cond``) that a replay saves: ``capacity`` entries (one, or one per iteration of the WHILE
@@ -303,6 +307,7 @@ struct LeafCopy {
 
 /** @brief What the second capture of a EG_RECORD_DIFF recording adds: the saved tests by conditional ordinal and the copies in front of each launch. */
 struct DiffPass {
+    std::size_t launches = 0;                           ///< the launches of the recording: the other leaves follow them in the tape's nodes
     std::vector<DiffSlot> slots;
     std::vector<std::vector<LeafCopy>> before;          ///< per launch ordinal
     std::map<int, std::vector<LeafCopy>> checkpoints;   ///< per windowed WHILE (its node ordinal): the planes its body writes, kept at the start of each window
@@ -314,7 +319,8 @@ struct DeviceRecording {
     void* loop_cells = nullptr;                         ///< kRecordedLoops pairs of device words
     DevicePool* pool = nullptr;                         ///< the arm and branch streams and the events of its forks
     unsigned loops = 0;                                 ///< the pairs used
-    std::vector<Op> log;                                ///< the structure calls and launches, kept to capture them again for EG_RECORD_DIFF
+    std::vector<Op> log;                                ///< the structure calls, launches, copies, reduces, transforms and products, kept to capture them again for EG_RECORD_DIFF
+    unsigned others = 0;                                ///< the copies, reduces, transforms and products logged so far
     DiffPass* dp = nullptr;                             ///< the second capture of a EG_RECORD_DIFF recording: what it adds
     std::vector<std::vector<std::uint64_t>> kernels;    ///< per recorded launch (as ``plans``): the kernel nodes of its partitions
     std::vector<std::unique_ptr<HostHook>> hooks;       ///< the host nodes captured so far
@@ -674,6 +680,11 @@ void device_gemm_ready(eg_ctx& ctx) {
 
 namespace {
 
+/** @brief The description kind of the copy, reduce, transform or product kind @p k of a leaf. */
+eg_gnode_kind gnode_kind_of(Node::Kind k) {
+    return k == Node::Copy ? EG_GNODE_COPY : k == Node::Reduce ? EG_GNODE_REDUCE : k == Node::Fft ? EG_GNODE_FFT : EG_GNODE_GEMM;
+}
+
 /** @brief How a unit slot's role touches its plane (graph::PlaneRef access: 0 read, 1 write, 2 in place); -1: not a plane. */
 int slot_access(std::int32_t role) {
     if (role == EG_ROLE_MUTABLE || role == EG_ROLE_TERMINATED) return 2;
@@ -688,13 +699,22 @@ int note_node(eg_ctx& ctx, eg_gnode_kind kind, const std::string& label, std::ve
     return ctx.dev_rec->shape.add(kind, label, unit, std::move(uses), facts);
 }
 
+/** @brief Keep the checked copy, reduce, transform or product @p leaf (a product's copy in @p product) in the recording on @p ctx, if any: its shape
+ *  node, a log entry to capture it again, and the copies the tape keeps in front of it. Called before the call queues its work. */
+void note_leaf(eg_ctx& ctx, const char* label, std::vector<PlaneUse> uses, Node leaf, const eg_gemm_s* product = nullptr);
+
 }  // namespace
 
 /** @brief eg_gemm_run of a device product: queued on the context's stream, in a capture or not. */
 void device_gemm_run(eg_ctx& ctx, const eg_gemm_s& gemm, eg_plane_s* a, eg_plane_s* b, eg_plane_s* c) {
     const auto at = [](const eg_plane_s* p) { return static_cast<char*>(p->tensor->dl_tensor.data) + p->tensor->dl_tensor.byte_offset; };
     const auto stride = [](const eg_plane_s* p) { return static_cast<int>(p->tensor->dl_tensor.shape[1]); };
-    note_node(ctx, EG_GNODE_GEMM, "eg_gemm_run", { { a, 0, -1, "a" }, { b, 0, -1, "b" }, { c, 1, -1, "c" } });
+    Node leaf;
+    leaf.kind = Node::Gemm;
+    leaf.src = a;
+    leaf.rhs = b;
+    leaf.dst = c;
+    note_leaf(ctx, "eg_gemm_run", { { a, 0, -1, "a" }, { b, 0, -1, "b" }, { c, 1, -1, "c" } }, std::move(leaf), &gemm);
     Current current(ctx.dev);
     gemm_product(ctx, ctx.dev.stream, gemm.call, gemm.f32, at(a), stride(a), at(b), stride(b), at(c), stride(c));
 }
@@ -1174,12 +1194,17 @@ std::int64_t device_free_bytes(eg_ctx& ctx) {
 
 /** @brief eg_reduce over device planes: checked as the host's, then the canonical ordered tree on the context's
  *  stream (the order the host runs); returns with the result in place. */
-void device_reduce(eg_ctx& ctx, const eg_reduce_desc& d) {
-    const host::ReduceOp r = host::reduce_check(ctx, d);
+void device_reduce(eg_ctx& ctx, const eg_reduce_desc& d) { device_reduce_leaf(ctx, host::reduce_check(ctx, d)); }
+
+/** @brief The checked reduce @p r on the context's stream, kept in the recording if there is one. */
+void device_reduce_leaf(eg_ctx& ctx, const host::ReduceOp& r) {
     const auto at = [](const eg_plane_s* p) -> void* {
         return p == nullptr ? nullptr : static_cast<char*>(p->tensor->dl_tensor.data) + p->tensor->dl_tensor.byte_offset;
     };
-    note_node(ctx, EG_GNODE_REDUCE, "eg_reduce", { { d.in, 0, -1, "in" }, { d.out, 1, -1, "out" }, { d.comp, r.pair ? 1 : 0, -1, "comp" } });
+    Node leaf;
+    leaf.kind = Node::Reduce;
+    leaf.reduce = r;
+    note_leaf(ctx, "eg_reduce", { { r.in, 0, -1, "in" }, { r.out, 1, -1, "out" }, { r.comp, r.pair ? 1 : 0, -1, "comp" } }, std::move(leaf));
     Current current(ctx.dev);
     reduce_step(ctx.dev.stream, r.code, r.op == EG_REDUCE_ALL ? 3 : r.op, at(r.in), r.n, r.cols, at(r.out), at(r.comp), r.pair);
 }
@@ -1189,7 +1214,11 @@ void device_reduce(eg_ctx& ctx, const eg_reduce_desc& d) {
  *  host plane, pageable or pinned, copies across and waits, so the host bytes are safe to reuse on return. */
 void device_copy(eg_ctx& ctx, eg_plane_s* src, eg_plane_s* dst) {
     host::copy_check(ctx, src, dst);
-    note_node(ctx, EG_GNODE_COPY, "eg_copy", { { src, 0, -1, "src" }, { dst, 1, -1, "dst" } });
+    Node leaf;
+    leaf.kind = Node::Copy;
+    leaf.src = src;
+    leaf.dst = dst;
+    note_leaf(ctx, "eg_copy", { { src, 0, -1, "src" }, { dst, 1, -1, "dst" } }, std::move(leaf));
     const DLTensor& s = src->tensor->dl_tensor;
     const DLTensor& t = dst->tensor->dl_tensor;
     char *ps = static_cast<char*>(s.data) + s.byte_offset, *pd = static_cast<char*>(t.data) + t.byte_offset;
@@ -1228,10 +1257,15 @@ void device_fft_new(eg_ctx& ctx, eg_fft_s& plan) {
 /** @brief eg_fft_run of a device plan: queued on the context's stream; a capture in progress keeps the plan until its graph is freed. */
 void device_fft_run(eg_ctx& ctx, eg_fft_s& plan, eg_plane_s* in, eg_plane_s* out) {
     const auto at = [](const eg_plane_s* p) -> void* { return static_cast<char*>(p->tensor->dl_tensor.data) + p->tensor->dl_tensor.byte_offset; };
+    Node leaf;
+    leaf.kind = Node::Fft;
+    leaf.fft = &plan;
+    leaf.src = in;
+    leaf.dst = out;
+    note_leaf(ctx, "eg_fft_run", { { in, 0, -1, "src" }, { out, 1, -1, "dst" } }, std::move(leaf));
     Current current(ctx.dev);
     fft_enqueue(*plan.dev, plan, at(in), at(out), plan.work, ctx.dev.stream);
     if (ctx.dev_rec == nullptr) return;
-    note_node(ctx, EG_GNODE_FFT, "eg_fft_run", { { in, 0, -1, "src" }, { out, 1, -1, "dst" } });
     ctx.dev_rec->ffts.push_back(&plan);
     ++plan.refs;
 }
@@ -1767,6 +1801,19 @@ void diff_copies(eg_ctx& ctx, const DeviceRecording& rec, std::size_t launch) {
     }
 }
 
+void note_leaf(eg_ctx& ctx, const char* label, std::vector<PlaneUse> uses, Node leaf, const eg_gemm_s* product) {
+    if (ctx.dev_rec == nullptr) return;
+    DeviceRecording& rec = *ctx.dev_rec;
+    note_node(ctx, gnode_kind_of(leaf.kind), label, std::move(uses));
+    if (rec.dp != nullptr) diff_copies(ctx, rec, rec.dp->launches + rec.others);
+    Op op;
+    op.kind = Op::Leaf;
+    op.leaf = std::move(leaf);
+    if (product != nullptr) op.product = *product;
+    rec.log.push_back(std::move(op));
+    ++rec.others;
+}
+
 /** @brief The second capture saves the test of the conditional node @p node into its slot, entry ``*iteration`` of the innermost WHILE (entry 0 outside one). */
 void diff_save(eg_ctx& ctx, const DeviceRecording& rec, int node, const unsigned* cell, const unsigned* baseline) {
     for (const DiffSlot& slot : rec.dp->slots) {
@@ -2070,27 +2117,28 @@ void plan_diff_pass(eg_ctx& ctx, const GraphDiff& diff, std::size_t n_launches, 
         ++entries[t.key.front()];
     }
     for (const auto& e : entries) pass.slots.push_back({ e.first, e.second, static_cast<unsigned*>(grab(static_cast<std::size_t>(e.second) * 3 * sizeof(unsigned))) });
-    pass.before.assign(n_launches, {});
+    pass.launches = n_launches;
+    pass.before.assign(diff.nodes.size(), {});
     std::map<std::pair<int, int>, std::vector<void*>> tables;                   // (launch, plane) in a loop: the copy of each iteration
     std::map<int, unsigned> iterations;                                         // per launch in a loop: its iteration count
     for (const RLeaf& l : plan.leaves) {
         if (l.key.size() > 2) refuse(EG_NOT_WRITTEN, "eg_record_end: a launch inside two nested WHILE loops is not written on a device");
-        if (l.key.size() == 2) iterations[l.launch] = std::max<unsigned>(iterations[l.launch], static_cast<unsigned>(l.key[1]) + 1);
+        if (l.key.size() == 2) iterations[l.node] = std::max<unsigned>(iterations[l.node], static_cast<unsigned>(l.key[1]) + 1);
     }
     for (const Snapshot& snap : diff.snapshots) {
         const RLeaf& leaf = plan.leaves[snap.node];
         if (leaf.loop >= 0) continue;                                           // a windowed WHILE's states are rebuilt by the reverse from its checkpoints
         const DLTensor& t = diff.planes[static_cast<std::size_t>(snap.plane)]->tensor->dl_tensor;
         const char* plane = static_cast<const char*>(t.data) + t.byte_offset;
-        auto& copies = pass.before[static_cast<std::size_t>(leaf.launch)];
+        auto& copies = pass.before[static_cast<std::size_t>(leaf.node)];
         if (leaf.key.size() == 1) {
             copies.push_back({ plane, snap.size, const_cast<char*>(snap.bytes.data()), nullptr, 0 });
             continue;
         }
-        std::vector<void*>& table = tables[{ leaf.launch, snap.plane }];
+        std::vector<void*>& table = tables[{ leaf.node, snap.plane }];
         if (table.empty()) {
-            table.assign(iterations[leaf.launch], grab(snap.size));              // an iteration with no copy of its own writes a spare
-            copies.push_back({ plane, snap.size, nullptr, nullptr, iterations[leaf.launch] });
+            table.assign(iterations[leaf.node], grab(snap.size));              // an iteration with no copy of its own writes a spare
+            copies.push_back({ plane, snap.size, nullptr, nullptr, iterations[leaf.node] });
         }
         table[static_cast<std::size_t>(leaf.key[1])] = const_cast<char*>(snap.bytes.data());
     }
@@ -2117,11 +2165,23 @@ void plan_diff_pass(eg_ctx& ctx, const GraphDiff& diff, std::size_t n_launches, 
     }
 }
 
+/** @brief Capture the copy, reduce, transform or product kept in @p op again. */
+void replay_leaf(eg_ctx& ctx, const Op& op) {
+    const Node& n = op.leaf;
+    switch (n.kind) {
+        case Node::Copy: device_copy(ctx, n.src, n.dst); break;
+        case Node::Reduce: device_reduce_leaf(ctx, n.reduce); break;
+        case Node::Fft: device_fft_run(ctx, *n.fft, n.src, n.dst); break;
+        default: device_gemm_run(ctx, op.product, n.src, n.rhs, n.dst);
+    }
+}
+
 /** @brief Capture @p rec's calls again with @p pass's copies and saves in them: the capture of a EG_RECORD_DIFF recording. @p ctx.dev_rec is the new recording. */
 void capture_again(eg_ctx& ctx, const DeviceRecording& first, DeviceRecording& second) {
     for (const Op& op : first.log) {
         switch (op.kind) {
             case Op::Launch: device_record_launch(ctx, *op.plan); break;
+            case Op::Leaf: replay_leaf(ctx, op); break;
             case Op::CondBegin: device_record_cond_begin(ctx, &op.cond); break;
             case Op::CondArm: device_record_cond_arm(ctx); break;
             case Op::CondEnd: device_record_cond_end(ctx); break;
@@ -2149,7 +2209,14 @@ void device_record_end(eg_ctx& ctx, const eg_record_end_desc* desc, eg_graph** o
         if ((d.flags & ~EG_RECORD_DIFF) != 0) refuse(EG_BAD_REQUEST, "eg_record_end_desc.flags: unknown bits " + std::to_string(d.flags & ~EG_RECORD_DIFF));
         diff_wanted = (d.flags & EG_RECORD_DIFF) != 0;
         if (!diff_wanted && d.n_vjps != 0) refuse(EG_BAD_REQUEST, "eg_record_end_desc.n_vjps: vjps without EG_RECORD_DIFF");
-        if (diff_wanted) reverse = ctx.dev_rec->shape.reverse_plan();    // a refusal leaves the recording open, as the host's does
+        if (diff_wanted) {                       // a refusal leaves the recording open, as the host's does
+            reverse = ctx.dev_rec->shape.reverse_plan();
+            if (ctx.dev_rec->shape.leaves() != static_cast<int>(ctx.dev_rec->plans.size() + ctx.dev_rec->others))
+                refuse(EG_NOT_WRITTEN, "eg_record_end: a call that runs on the host in a device recording (a host plan, the copy or reduce of host planes) is not written in EG_RECORD_DIFF");
+            std::size_t ordinal = 0;
+            for (const Op& op : ctx.dev_rec->log)
+                if (op.kind == Op::Leaf) leaf_check(op.leaf, ordinal++);
+        }
     }
     std::unique_ptr<DeviceRecording> rec(ctx.dev_rec);
     ctx.dev_rec = nullptr;
@@ -2177,7 +2244,13 @@ void device_record_end(eg_ctx& ctx, const eg_record_end_desc* desc, eg_graph** o
         DiffPass pass;
         std::unique_ptr<DeviceRecording> second;
         try {
-            graph->diff = diff_plan(ctx, rec->plans, reverse, *desc);
+            std::vector<const Node*> others;
+            for (Op& op : rec->log)
+                if (op.kind == Op::Leaf) {
+                    if (op.leaf.kind == Node::Gemm) op.leaf.gemm = &op.product;
+                    others.push_back(&op.leaf);
+                }
+            graph->diff = diff_plan(ctx, rec->plans, others, reverse, *desc);
             loop_free(loop);
             loop = nullptr;
             plan_diff_pass(ctx, *graph->diff, rec->plans.size(), pass, graph->buffers);
@@ -2216,6 +2289,8 @@ void device_record_end(eg_ctx& ctx, const eg_record_end_desc* desc, eg_graph** o
         run_later(ctx, *second);
         for (eg_plan_s* p : rec->plans) plan_release(ctx, p);    // the second capture holds its own references
         rec->plans.clear();
+        for (eg_fft_s* f : rec->ffts) fft_release(ctx, f);
+        rec->ffts.clear();
         device_free(ctx, rec->loop_cells);
         rec->loop_cells = nullptr;
         graph->slots = pass.slots;

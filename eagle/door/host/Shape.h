@@ -54,9 +54,9 @@ struct RGate {
     int test = 0, arm = 0;
 };
 
-/** @brief A launch as the reverse sees it: one copy per unrolled WHILE iteration, with the gates of every conditional around it. */
+/** @brief A launch, copy, reduce, transform or product as the reverse sees it: one copy per unrolled WHILE iteration, with the gates of every conditional around it. */
 struct RLeaf {
-    int launch = 0;                             ///< the ordinal among the eg_launch calls of the recording
+    int node = 0;                               ///< its entry in GraphDiff::nodes: the ordinal among the eg_launch calls, or the launch count plus its ordinal among the copy, reduce, fft and gemm calls
     std::vector<RGate> gates;                   ///< empty: it always runs
     std::vector<int> key;                       ///< the launch node's ordinal, then the iteration of each enclosing WHILE
     int loop = -1;                              ///< the windowed WHILE (index in ReversePlan::loops) it is a copy for, else -1
@@ -109,9 +109,10 @@ public:
     void cond_arm();
     void cond_end();
     bool open() const { return !frames_.empty(); }
-    /** @brief The leaves of the recording for EG_RECORD_DIFF. Refuses a call that is not a launch or a conditional or fork around
-     *  launches (NOT_WRITTEN), and a WHILE without max_iters (BAD_REQUEST). */
+    /** @brief The leaves of the recording for EG_RECORD_DIFF. Refuses a run (NOT_WRITTEN), and a WHILE without max_iters (BAD_REQUEST). */
     ReversePlan reverse_plan() const;
+    /** @brief How many leaves the recording holds: its launches and its copies, reduces, transforms and products. */
+    int leaves() const { return launches_ + others_; }
     /** @brief Fill @p store from the nodes and return its count of levels; the description points into @p store. */
     void describe(DescribeStore& store, std::uint32_t flags, eg_graph_description& out) const;
 
@@ -124,6 +125,7 @@ private:
         std::vector<PlaneUse> uses;
         NodeFacts facts;
         int launch = -1;                        ///< a LAUNCH: its ordinal among the launches
+        int other = -1;                         ///< a COPY, REDUCE, FFT or GEMM: its ordinal among those calls
         std::vector<graph::PlaneRef> refs;      ///< ``uses`` as hazard references; ``name`` is the index in ``uses``
     };
     struct Order {
@@ -141,7 +143,7 @@ private:
 
     int container() const { return frames_.empty() ? -1 : frames_.back().branches.back(); }
     int push(eg_gnode_kind kind, int parent, int arm, std::string label, std::vector<PlaneUse> uses = {}, std::string unit = "");
-    int launches_ = 0;
+    int launches_ = 0, others_ = 0;
     Frame& innermost(bool fork, const char* call);
     bool within(int node, int ancestor) const;
     bool apart(int a, int b, eg_gnode_kind through) const;

@@ -4,8 +4,8 @@
  *
  *   graph_reverse_test <fixture_graph lib>
  *
- * Gradients of recorded graphs of plain launches against closed forms: a chain, an in-place overwrite (the snapshot plan), a
- * plane read by two nodes, a second launch with other inputs; then every refusal by status and reason.
+ * Gradients of recorded graphs against closed forms: launches (a chain, an in-place overwrite, a plane read by two nodes), copies, sum
+ * reduces, transforms and products, in a WHILE too; then every refusal by status and reason.
  */
 #include "pair_util.h"
 
@@ -200,6 +200,18 @@ static eg_status reverse(eg_ctx* ctx, eg_graph* g, eg_plane* out, eg_plane* seed
     d.inputs = in;
     d.grads = grads;
     return eg_graph_reverse(ctx, g, &d);
+}
+
+/* Record one eg_reduce of @p in into @p out (one column) with @p op. */
+static eg_status reduce_op(eg_ctx* ctx, eg_plane* in, eg_plane* out, eg_reduce_op op) {
+    struct eg_reduce_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.in = in;
+    d.out = out;
+    d.op = op;
+    d.policy = EG_REDUCE_COMPENSATED;
+    return eg_reduce(ctx, &d);
 }
 
 /* y = w x, z = y^2 with J = sum z: dJ/dx = 2 w^2 x, dJ/dw = sum 2 w x^2. */
@@ -450,9 +462,9 @@ static void refusal_rows(struct rig* r, const struct units* u) {
     eg_graph_free(ctx, partial);
 
     /* a node that is not a launch, and the units no vjp may cover */
-    ok = eg_record_begin(ctx) == EG_OK && eg_copy(ctx, px, pz) == EG_OK;
-    check(ok && refused(end_diff(ctx, 0, NULL, &none), EG_NOT_WRITTEN, ctx, "not an eg_launch"),
-          "eg_record_end with EG_RECORD_DIFF over a recorded copy: refused NOT_WRITTEN by name");
+    ok = eg_record_begin(ctx) == EG_OK && reduce_op(ctx, px, pw, EG_REDUCE_MAX) == EG_OK;
+    check(ok && refused(end_diff(ctx, 0, NULL, &none), EG_BAD_REQUEST, ctx, "only op='sum' reverses"),
+          "eg_record_end with EG_RECORD_DIFF over a recorded reduce MAX: refused BAD_REQUEST by name");
     eg_graph* copy_only = NULL;
     eg_record_end(ctx, NULL, &copy_only);
     eg_graph_free(ctx, copy_only);
@@ -473,7 +485,7 @@ static void refusal_rows(struct rig* r, const struct units* u) {
     drop(ctx, 6, all);
 }
 
-/* The refusals a DEVICE recording adds: a node that is not a launch, and a tape plan that is refused (it ends the recording). */
+/* The refusals a DEVICE recording adds: a reduce with no gradient, and a tape plan that is refused (it ends the recording). */
 static void device_refusal_rows(struct rig* r, const struct units* u) {
     eg_ctx* ctx = r->ctx;
     double x[N], y[N], z[N], w[1];
@@ -493,10 +505,10 @@ static void device_refusal_rows(struct rig* r, const struct units* u) {
     const struct eg_node_vjp both[] = { { 0, u->scale_vjp }, { 1, u->square_vjp } }, wrong[] = { { 0, u->square_vjp } };
     eg_graph *none = NULL, *plain = NULL;
 
-    int ok = f && g && eg_record_begin(ctx) == EG_OK && eg_launch(ctx, f, NULL) == EG_OK && eg_copy(ctx, py, pz) == EG_OK &&
+    int ok = f && g && eg_record_begin(ctx) == EG_OK && eg_launch(ctx, f, NULL) == EG_OK && reduce_op(ctx, py, pw, EG_REDUCE_MAX) == EG_OK &&
              eg_launch(ctx, g, NULL) == EG_OK;
-    verdict(r, ok && refused(end_diff(ctx, 2, both, &none), EG_NOT_WRITTEN, ctx, "not an eg_launch") && none == NULL,
-            "eg_record_end with EG_RECORD_DIFF over a recording that holds a copy between two launches: refused NOT_WRITTEN by name");
+    verdict(r, ok && refused(end_diff(ctx, 2, both, &none), EG_BAD_REQUEST, ctx, "only op='sum' reverses") && none == NULL,
+            "eg_record_end with EG_RECORD_DIFF over a recording that holds a reduce MAX between two launches: refused BAD_REQUEST by name");
     ok = ok && eg_record_end(ctx, NULL, &plain) == EG_OK;
     verdict(r, ok, "the same recording, still open after the refusal, ends as a plain graph");
     eg_graph_free(ctx, plain);
@@ -1026,6 +1038,363 @@ static void option_rows(struct rig* r, const struct units* u) {
     int_input_row(r, u);
 }
 
+
+/* ---- slice 3b: copies, sum reduces, transforms and products in a recording ---------------------------------------------- */
+
+struct tensor3 {
+    struct DLManagedTensorVersioned managed;
+    int64_t shape[3];
+};
+
+/* A float64 plane of @p ndim axes over @p data (the row's host array): a host plane, or on a DEVICE context a device plane beside it. */
+static eg_plane* mkn(struct rig* r, struct tensor3* t, int ndim, const int64_t* shape, double* data) {
+    memset(t, 0, sizeof(*t));
+    for (int i = 0; i < ndim; ++i) t->shape[i] = shape[i];
+    t->managed.version.major = DLPACK_MAJOR_VERSION;
+    t->managed.dl_tensor.data = data;
+    t->managed.dl_tensor.device.device_type = kDLCPU;
+    t->managed.dl_tensor.ndim = ndim;
+    t->managed.dl_tensor.dtype.code = kDLFloat;
+    t->managed.dl_tensor.dtype.bits = 64;
+    t->managed.dl_tensor.dtype.lanes = 1;
+    t->managed.dl_tensor.shape = t->shape;
+    eg_plane* host = NULL;
+    if (eg_plane_wrap(r->ctx, &t->managed, &host) != EG_OK) return NULL;
+    return mk_shaped(r, host, ndim, shape);
+}
+
+static int close_rel(const double* got, const double* want, int n, double tol) {
+    for (int i = 0; i < n; ++i)
+        if (fabs(got[i] - want[i]) > tol * (1.0 + fabs(want[i]))) return 0;
+    return 1;
+}
+
+/* A copy before a launch (@p after 0: z = (copy x)^2, dJ/dx = 2 x) or between two (@p after 1: y = w x, t = copy y, z = t^2). J = sum z. */
+static void copy_row(struct rig* r, const struct units* u, int after) {
+    eg_ctx* ctx = r->ctx;
+    double x[N], y[N], t[N], z[N], w[1], one[N], gx[N], gw[1], wx[N], ww[1] = { 0.0 };
+    struct tensor tx, ty, tt, tz, tw, t1, tgx, tgw;
+    fill(x, w, 0.5);
+    memset(y, 0, sizeof(y));
+    for (int i = 0; i < N; ++i) one[i] = 1.0;
+    eg_plane *px = mk(r, &tx, N, x), *py = mk(r, &ty, N, y), *pt = mk(r, &tt, N, t), *pz = mk(r, &tz, N, z), *pw = mk(r, &tw, 1, w);
+    eg_plane *p1 = mk(r, &t1, N, one), *pgx = mk(r, &tgx, N, gx), *pgw = mk(r, &tgw, 1, gw);
+    eg_plane *a[] = { px, pw, py }, *b[] = { pt, pz };
+    eg_plan *f = plan_with(r, u->scale, 3, a, NULL), *g = plan_with(r, u->square, 2, b, NULL);
+    const struct eg_node_vjp vjps[] = { { 0, u->scale_vjp }, { 1, u->square_vjp } }, only_square[] = { { 0, u->square_vjp } };
+    eg_graph* graph = NULL;
+    up(r);
+    int ok = f && g && eg_record_begin(ctx) == EG_OK;
+    if (after) ok = ok && eg_launch(ctx, f, NULL) == EG_OK && eg_copy(ctx, py, pt) == EG_OK;
+    else ok = ok && eg_copy(ctx, px, pt) == EG_OK;
+    ok = ok && eg_launch(ctx, g, NULL) == EG_OK && end_diff(ctx, after ? 2 : 1, after ? vjps : only_square, &graph) == EG_OK && eg_graph_launch(ctx, graph) == EG_OK;
+    eg_plane *in[] = { px, pw }, *gr[] = { pgx, pgw };
+    ok = ok && reverse(ctx, graph, pz, p1, after ? 2 : 1, in, gr) == EG_OK;
+    down(r);
+    for (int i = 0; i < N; ++i) {
+        wx[i] = after ? 2.0 * w[0] * w[0] * x[i] : 2.0 * x[i];
+        ww[0] += after ? 2.0 * w[0] * x[i] * x[i] : 0.0;
+    }
+    verdict(r, ok && close_to(gx, wx, N) && (!after || close_to(gw, ww, 1)),
+            after ? "eg_graph_reverse through a copy between two launches (y = w x, t = copy y, z = t^2): dJ/dx and dJ/dw match the closed form"
+                  : "eg_graph_reverse through a copy before a launch (z = (copy x)^2): dJ/dx = 2 x, the launch's own gradient");
+    eg_graph_free(ctx, graph);
+    eg_plan_free(ctx, f);
+    eg_plan_free(ctx, g);
+    release(r);
+}
+
+/* y = w x, s = sum y, J = c s: every sample's adjoint is the seed c, so dJ/dx_i = c w and dJ/dw = c sum x. Then the reduces with no gradient. */
+static void reduce_row(struct rig* r, const struct units* u) {
+    eg_ctx* ctx = r->ctx;
+    double x[N], y[N], s[1], w[1], seed[1] = { 1.3 }, gx[N], gw[1], wx[N], ww[1] = { 0.0 };
+    struct tensor tx, ty, ts, tw, tseed, tgx, tgw;
+    fill(x, w, 0.5);
+    memset(y, 0, sizeof(y));
+    s[0] = 0.0;
+    eg_plane *px = mk(r, &tx, N, x), *py = mk(r, &ty, N, y), *ps = mk(r, &ts, 1, s), *pw = mk(r, &tw, 1, w), *pseed = mk(r, &tseed, 1, seed);
+    eg_plane *pgx = mk(r, &tgx, N, gx), *pgw = mk(r, &tgw, 1, gw);
+    eg_plane* a[] = { px, pw, py };
+    eg_plan* f = plan_with(r, u->scale, 3, a, NULL);
+    const struct eg_node_vjp vjps[] = { { 0, u->scale_vjp } };
+    eg_graph* graph = NULL;
+    up(r);
+    int ok = f && eg_record_begin(ctx) == EG_OK && eg_launch(ctx, f, NULL) == EG_OK && reduce_op(ctx, py, ps, EG_REDUCE_SUM) == EG_OK &&
+             end_diff(ctx, 1, vjps, &graph) == EG_OK && eg_graph_launch(ctx, graph) == EG_OK;
+    eg_plane *in[] = { px, pw }, *gr[] = { pgx, pgw };
+    ok = ok && reverse(ctx, graph, ps, pseed, 2, in, gr) == EG_OK;
+    down(r);
+    for (int i = 0; i < N; ++i) {
+        wx[i] = seed[0] * w[0];
+        ww[0] += seed[0] * x[i];
+    }
+    verdict(r, ok && close_to(gx, wx, N) && close_to(gw, ww, 1),
+            "eg_graph_reverse through a sum reduce (y = w x, s = sum y, J = 1.3 s): every sample's adjoint is the seed, dJ/dx_i = 1.3 w and dJ/dw = 1.3 sum x");
+    eg_graph_free(ctx, graph);
+    eg_plan_free(ctx, f);
+
+    double q[2 * N], two[2];
+    struct tensor2 tq;
+    struct tensor tt2;
+    memset(q, 0, sizeof(q));
+    memset(two, 0, sizeof(two));
+    eg_plane *pq = mk2(r, &tq, 2, q), *p2 = mk(r, &tt2, 2, two);
+    eg_graph* none = NULL;
+    ok = pq && p2 && eg_record_begin(ctx) == EG_OK && reduce_op(ctx, pq, p2, EG_REDUCE_SUM) == EG_OK;
+    verdict(r, ok && refused(end_diff(ctx, 0, NULL, &none), EG_NOT_WRITTEN, ctx, "only a 1-D op='sum' reduce reverses") && none == NULL,
+            "eg_record_end with EG_RECORD_DIFF over a 2-D sum reduce: refused NOT_WRITTEN with the 1-D text");
+    ok = eg_record_end(ctx, NULL, &none) == EG_OK;
+    verdict(r, ok, "the recording left open by that refusal ends as a plain graph");
+    eg_graph_free(ctx, none);
+    release(r);
+}
+
+/* The closed forms of J = <w, T x> over the interleaved floats: dJ/dx for the transform @p kind (sign @p sigma: +1 forward, -1 inverse) of length n. */
+static void fft_reference(eg_fft_kind kind, double sigma, double scale, int n, const double* w, double* gx) {
+    const int m = n / 2 + 1;
+    const double two_pi = 8.0 * atan(1.0);
+    if (kind == EG_FFT_C2C) {
+        for (int j = 0; j < n; ++j) {
+            gx[2 * j] = gx[2 * j + 1] = 0.0;
+            for (int k = 0; k < n; ++k) {
+                const double th = two_pi * ((j * k) % n) / n;
+                gx[2 * j] += scale * (w[2 * k] * cos(th) - sigma * w[2 * k + 1] * sin(th));
+                gx[2 * j + 1] += scale * (sigma * w[2 * k] * sin(th) + w[2 * k + 1] * cos(th));
+            }
+        }
+    } else if (kind == EG_FFT_R2C) {
+        for (int j = 0; j < n; ++j) {
+            gx[j] = 0.0;
+            for (int k = 0; k < m; ++k) {
+                const double th = two_pi * ((j * k) % n) / n;
+                gx[j] += scale * (w[2 * k] * cos(th) - w[2 * k + 1] * sin(th));
+            }
+        }
+    } else {
+        for (int k = 0; k < m; ++k) {
+            const double c = k == 0 || (n % 2 == 0 && k == n / 2) ? 1.0 : 2.0;
+            gx[2 * k] = gx[2 * k + 1] = 0.0;
+            for (int j = 0; j < n; ++j) {
+                const double th = two_pi * ((j * k) % n) / n;
+                gx[2 * k] += scale * c * w[j] * cos(th);
+                gx[2 * k + 1] -= scale * c * w[j] * sin(th);
+            }
+        }
+    }
+}
+
+/* J = <w, T x> for one transform: dJ/dx from the door against the closed form and, with @p check_fd, against central differences of J through the graph. */
+static void fft_row(struct rig* r, eg_fft_kind kind, int inverse, eg_fft_norm norm, int n, int check_fd, const char* name) {
+    eg_ctx* ctx = r->ctx;
+    const int m = n / 2 + 1;
+    const int64_t nx_shape[2] = { kind == EG_FFT_C2R ? m : n, 2 }, ny_shape[2] = { kind == EG_FFT_R2C ? m : n, 2 };
+    const int x_ndim = kind == EG_FFT_R2C ? 1 : 2, y_ndim = kind == EG_FFT_C2R ? 1 : 2;
+    const int nx = x_ndim == 1 ? n : 2 * (int)nx_shape[0], ny = y_ndim == 1 ? n : 2 * (int)ny_shape[0];
+    double x[32], y[32], w[32], gx[32], want[32], saved[32], x0[32];
+    for (int i = 0; i < nx; ++i) x[i] = x0[i] = sin(0.7 * i + 0.3);
+    for (int i = 0; i < ny; ++i) w[i] = cos(1.1 * i + 0.2);
+    memset(y, 0, sizeof(y));
+    memset(gx, 0, sizeof(gx));
+    const double sigma = (kind == EG_FFT_C2C && !inverse) || kind == EG_FFT_R2C ? 1.0 : -1.0;
+    const int forward = sigma > 0;
+    const double scale = norm == EG_FFT_NORM_ORTHO ? 1.0 / sqrt((double)n) : (norm == EG_FFT_NORM_FORWARD) == forward ? 1.0 / n : 1.0;
+    struct tensor3 tx, ty, tw, tg;
+    eg_plane *px = mkn(r, &tx, x_ndim, nx_shape, x), *py = mkn(r, &ty, y_ndim, ny_shape, y), *pw = mkn(r, &tw, y_ndim, ny_shape, w);
+    eg_plane* pg = mkn(r, &tg, x_ndim, nx_shape, gx);
+    const int64_t shape_n = n;
+    const int32_t axis = 0;
+    struct eg_fft_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.flags = inverse ? EG_FFT_INVERSE : 0;
+    d.kind = kind;
+    d.norm = norm;
+    d.dtype_bits = 64;
+    d.ndim = 1;
+    d.shape = &shape_n;
+    d.n_axes = 1;
+    d.axes = &axis;
+    eg_fft* plan = NULL;
+    eg_graph* graph = NULL;
+    up(r);
+    int ok = px && py && pw && pg && eg_fft_new(ctx, &d, &plan) == EG_OK && eg_record_begin(ctx) == EG_OK && eg_fft_run(ctx, plan, px, py) == EG_OK &&
+             end_diff(ctx, 0, NULL, &graph) == EG_OK && eg_graph_launch(ctx, graph) == EG_OK;
+    eg_plane *in[] = { px }, *gr[] = { pg };
+    ok = ok && reverse(ctx, graph, py, pw, 1, in, gr) == EG_OK;
+    down(r);
+    fft_reference(kind, sigma, scale, n, w, want);
+    memcpy(saved, gx, sizeof(gx));
+    char what[300];
+    snprintf(what, sizeof(what), "eg_graph_reverse through %s: dJ/dx of J = <w, T x> matches the closed form", name);
+    verdict(r, ok && close_rel(saved, want, nx, 1e-11), what);
+    if (check_fd) {
+        const double h = 0.5;
+        double fd[32];
+        for (int j = 0; ok && j < nx; ++j) {
+            double j_two[2];
+            for (int side = 0; side < 2; ++side) {
+                x[j] = x0[j] + (side == 0 ? h : -h);
+                up(r);
+                ok = eg_graph_launch(ctx, graph) == EG_OK;
+                down(r);
+                j_two[side] = 0.0;
+                for (int i = 0; i < ny; ++i) j_two[side] += w[i] * y[i];
+            }
+            x[j] = x0[j];
+            fd[j] = (j_two[0] - j_two[1]) / (2.0 * h);
+        }
+        snprintf(what, sizeof(what), "the same gradient of %s against central differences of J through the graph", name);
+        verdict(r, ok && close_rel(saved, fd, nx, 1e-9), what);
+    }
+    eg_graph_free(ctx, graph);
+    eg_fft_free(ctx, plan);
+    release(r);
+}
+
+/* The logical matrix entries of a stored (rows, cols) matrix that is transposed when @p trans. */
+static double entry(const double* p, int cols, int trans, int i, int j) { return trans ? p[j * cols + i] : p[i * cols + j]; }
+
+/* J = <W, C> for C = op(A) op(B) (+ C0 with ACCUMULATE): dJ/dA = W op(B)^T and dJ/dB = op(A)^T W in the stored layout, dJ/dC0 = W. */
+static void gemm_row(struct rig* r, uint32_t flags, const char* name) {
+    eg_ctx* ctx = r->ctx;
+    enum { M = 3, K = 4, NC = 5 };
+    const int ta = (flags & EG_GEMM_TRANS_A) != 0, tb = (flags & EG_GEMM_TRANS_B) != 0, tc = (flags & EG_GEMM_TRANS_C) != 0, acc = (flags & EG_GEMM_ACCUMULATE) != 0;
+    const int64_t as[2] = { ta ? K : M, ta ? M : K }, bs[2] = { tb ? NC : K, tb ? K : NC }, cs[2] = { tc ? NC : M, tc ? M : NC };
+    double a[M * K], b[K * NC], c[M * NC], seed[M * NC], ga[M * K], gb[K * NC], gc[M * NC], want_a[M * K], want_b[K * NC];
+    for (int i = 0; i < M * K; ++i) a[i] = sin(0.9 * i + 0.1);
+    for (int i = 0; i < K * NC; ++i) b[i] = cos(0.7 * i + 0.4);
+    for (int i = 0; i < M * NC; ++i) {
+        c[i] = 0.25 * i - 1.0;
+        seed[i] = sin(1.3 * i + 0.6);
+    }
+    memset(ga, 0, sizeof(ga));
+    memset(gb, 0, sizeof(gb));
+    memset(gc, 0, sizeof(gc));
+    for (int i = 0; i < M; ++i)
+        for (int p = 0; p < K; ++p) {
+            double sum = 0.0;
+            for (int j = 0; j < NC; ++j) sum += entry(seed, tc ? M : NC, tc, i, j) * entry(b, tb ? K : NC, tb, p, j);
+            want_a[ta ? p * M + i : i * K + p] = sum;
+        }
+    for (int p = 0; p < K; ++p)
+        for (int j = 0; j < NC; ++j) {
+            double sum = 0.0;
+            for (int i = 0; i < M; ++i) sum += entry(a, ta ? M : K, ta, i, p) * entry(seed, tc ? M : NC, tc, i, j);
+            want_b[tb ? j * K + p : p * NC + j] = sum;
+        }
+    struct tensor3 ta3, tb3, tc3, ts3, tga, tgb, tgc;
+    eg_plane *pa = mkn(r, &ta3, 2, as, a), *pb = mkn(r, &tb3, 2, bs, b), *pc = mkn(r, &tc3, 2, cs, c), *ps = mkn(r, &ts3, 2, cs, seed);
+    eg_plane *pga = mkn(r, &tga, 2, as, ga), *pgb = mkn(r, &tgb, 2, bs, gb), *pgc = mkn(r, &tgc, 2, cs, gc);
+    struct eg_gemm_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.flags = flags;
+    d.dtype_bits = 64;
+    d.a_rows = as[0], d.a_cols = as[1], d.b_rows = bs[0], d.b_cols = bs[1], d.c_rows = cs[0], d.c_cols = cs[1];
+    eg_gemm* gemm = NULL;
+    eg_graph* graph = NULL;
+    up(r);
+    int ok = pa && pb && pc && ps && pga && pgb && pgc && eg_gemm_new(ctx, &d, &gemm) == EG_OK && eg_record_begin(ctx) == EG_OK &&
+             eg_gemm_run(ctx, gemm, pa, pb, pc) == EG_OK && end_diff(ctx, 0, NULL, &graph) == EG_OK && eg_graph_launch(ctx, graph) == EG_OK;
+    eg_plane *in[] = { pa, pb, pc }, *gr[] = { pga, pgb, pgc };
+    ok = ok && reverse(ctx, graph, pc, ps, acc ? 3 : 2, in, gr) == EG_OK;
+    down(r);
+    char what[300];
+    snprintf(what, sizeof(what), "eg_graph_reverse through a product%s: dJ/dA = W op(B)^T and dJ/dB = op(A)^T W match the closed form%s", name,
+             acc ? ", and dJ/dC0 = W" : "");
+    verdict(r, ok && close_rel(ga, want_a, M * K, 1e-12) && close_rel(gb, want_b, K * NC, 1e-12) && (!acc || close_rel(gc, seed, M * NC, 1e-12)), what);
+    eg_graph_free(ctx, graph);
+    eg_gemm_free(ctx, gemm);
+    release(r);
+}
+
+/* X <- X M by a product and a copy, in a WHILE of cap 40 (windows of 16) that runs 37 times, against the same 37 pairs written out: the
+ * window rebuild re-runs the product and the copy, and the gradients are the written-out sequence's bit for bit. */
+static void window_gemm_row(struct rig* r, const struct units* u) {
+    eg_ctx* ctx = r->ctx;
+    enum { PASSES = 37, CAP = 40, S = 3 };
+    const int64_t sq[2] = { S, S };
+    double x0[S * S], x[S * S], mm[S * S], t[S * S], seed[S * S], gx[2][S * S], gm[2][S * S], want[S * S];
+    int32_t c[N];
+    for (int i = 0; i < S * S; ++i) {
+        x0[i] = x[i] = sin(0.8 * i + 0.2);
+        mm[i] = 0.2 + 0.05 * (i % 4);
+        seed[i] = cos(0.6 * i + 0.1);
+        t[i] = 0.0;
+    }
+    struct tensor3 tx, tm, tt, ts, tgx[2], tgm[2];
+    struct tensor tc;
+    eg_plane *px = mkn(r, &tx, 2, sq, x), *pm = mkn(r, &tm, 2, sq, mm), *pt = mkn(r, &tt, 2, sq, t), *ps = mkn(r, &ts, 2, sq, seed);
+    eg_plane *pgx[2] = { mkn(r, &tgx[0], 2, sq, gx[0]), mkn(r, &tgx[1], 2, sq, gx[1]) }, *pgm[2] = { mkn(r, &tgm[0], 2, sq, gm[0]), mkn(r, &tgm[1], 2, sq, gm[1]) };
+    eg_plane* pc = mk_i32(r, &tc, N, c);
+    eg_plane* a3[] = { pc };
+    eg_plan* tk = plan_with(r, u->tick, 1, a3, NULL);
+    struct eg_gemm_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.dtype_bits = 64;
+    d.a_rows = d.a_cols = d.b_rows = d.b_cols = d.c_rows = d.c_cols = S;
+    eg_gemm* gemm = NULL;
+    eg_graph *loop = NULL, *chain = NULL;
+    int ok = tk && eg_gemm_new(ctx, &d, &gemm) == EG_OK && eg_record_begin(ctx) == EG_OK && cond_open(ctx, EG_COND_WHILE, 0, pc, 0, CAP) == EG_OK &&
+             eg_gemm_run(ctx, gemm, px, pm, pt) == EG_OK && eg_copy(ctx, pt, px) == EG_OK && eg_launch(ctx, tk, NULL) == EG_OK &&
+             eg_record_cond_end(ctx) == EG_OK && end_diff(ctx, 0, NULL, &loop) == EG_OK;
+    ok = ok && eg_record_begin(ctx) == EG_OK;
+    for (int k = 0; ok && k < PASSES; ++k) ok = eg_gemm_run(ctx, gemm, px, pm, pt) == EG_OK && eg_copy(ctx, pt, px) == EG_OK;
+    ok = ok && end_diff(ctx, 0, NULL, &chain) == EG_OK;
+    eg_plane* in[] = { px, pm };
+    for (int which = 0; ok && which < 2; ++which) {
+        for (int i = 0; i < S * S; ++i) x[i] = x0[i];
+        for (int i = 0; i < N; ++i) c[i] = PASSES;
+        up(r);
+        eg_plane* gr[] = { pgx[which], pgm[which] };
+            ok = eg_graph_launch(ctx, which ? chain : loop) == EG_OK && reverse(ctx, which ? chain : loop, px, ps, 2, in, gr) == EG_OK;
+        down(r);
+    }
+    double power[S * S], next[S * S];
+    for (int i = 0; i < S * S; ++i) power[i] = i / S == i % S;    /* M^0 */
+    for (int k = 0; k < PASSES; ++k) {
+        for (int i = 0; i < S; ++i)
+            for (int j = 0; j < S; ++j) {
+                next[i * S + j] = 0.0;
+                for (int p = 0; p < S; ++p) next[i * S + j] += power[i * S + p] * mm[p * S + j];
+            }
+        memcpy(power, next, sizeof(power));
+    }
+    for (int i = 0; i < S; ++i)
+        for (int j = 0; j < S; ++j) {    /* X_37 = X_0 M^37, J = <W, X_37>: dJ/dX_0 = W (M^37)^T */
+            want[i * S + j] = 0.0;
+            for (int p = 0; p < S; ++p) want[i * S + j] += seed[i * S + p] * power[j * S + p];
+        }
+    verdict(r, ok && memcmp(gx[0], gx[1], sizeof(gx[0])) == 0 && memcmp(gm[0], gm[1], sizeof(gm[0])) == 0 && close_rel(gx[0], want, S * S, 1e-11),
+            "a WHILE of cap 40 (windows of 16) with a product and a copy in its body, 37 passes: bit for bit the gradients of the same 37 pairs written out, dJ/dX_0 the closed form");
+    eg_graph_free(ctx, loop);
+    eg_graph_free(ctx, chain);
+    eg_gemm_free(ctx, gemm);
+    eg_plan_free(ctx, tk);
+    release(r);
+}
+
+static void leaf_rows(struct rig* r, const struct units* u) {
+    copy_row(r, u, 0);
+    copy_row(r, u, 1);
+    reduce_row(r, u);
+    fft_row(r, EG_FFT_C2C, 0, EG_FFT_NORM_BACKWARD, 8, 1, "a C2C forward transform (backward norm, n = 8)");
+    fft_row(r, EG_FFT_C2C, 1, EG_FFT_NORM_BACKWARD, 8, 0, "a C2C inverse transform (backward norm, 1/n)");
+    fft_row(r, EG_FFT_C2C, 0, EG_FFT_NORM_FORWARD, 8, 0, "a C2C forward transform (forward norm, 1/n)");
+    fft_row(r, EG_FFT_C2C, 0, EG_FFT_NORM_ORTHO, 7, 0, "a C2C forward transform (ortho norm, n = 7)");
+    fft_row(r, EG_FFT_R2C, 0, EG_FFT_NORM_BACKWARD, 8, 1, "an R2C transform (n = 8, half spectrum of 5 bins)");
+    fft_row(r, EG_FFT_R2C, 0, EG_FFT_NORM_ORTHO, 7, 0, "an R2C transform (ortho norm, n = 7)");
+    fft_row(r, EG_FFT_C2R, 0, EG_FFT_NORM_BACKWARD, 8, 1, "a C2R transform (n = 8)");
+    fft_row(r, EG_FFT_C2R, 0, EG_FFT_NORM_FORWARD, 7, 0, "a C2R transform (forward norm, n = 7)");
+    gemm_row(r, 0, "");
+    gemm_row(r, EG_GEMM_TRANS_A | EG_GEMM_TRANS_B | EG_GEMM_TRANS_C, " with every operand transposed");
+    gemm_row(r, EG_GEMM_TRANS_A, " with A transposed");
+    gemm_row(r, EG_GEMM_TRANS_B | EG_GEMM_TRANS_C, " with B and C transposed");
+    gemm_row(r, EG_GEMM_ACCUMULATE | EG_GEMM_TRANS_A, " that accumulates, with A transposed");
+    window_gemm_row(r, u);
+}
+
 /* ---- the policy row: the reduced gradient of a shared parameter is the same bits on the host and on the device, run to run ---------- */
 
 enum { M = 100000 };
@@ -1113,6 +1482,7 @@ int main(int argc, char** argv) {
     refusal_rows(&host, &u);
     conditional_rows(&host, &u);
     option_rows(&host, &u);
+    leaf_rows(&host, &u);
 
     int32_t devices = 0;
     if (eg_device_count(ctx, &devices) != EG_OK || devices < 1) {
@@ -1127,6 +1497,7 @@ int main(int argc, char** argv) {
         device_refusal_rows(&dev, &du);
         conditional_rows(&dev, &du);
         option_rows(&dev, &du);
+        leaf_rows(&dev, &du);
         policy_row(&host, &u, &dev, &du);
         eg_ctx_free(dctx);
     }
