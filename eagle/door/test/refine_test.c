@@ -157,6 +157,10 @@ int main(int argc, char** argv) {
                 snprintf(msg, sizeof(msg), "%s: the refined states, stop times and statuses equal the old path's bitwise (status %d, t_stop %.17g)",
                          what, ran ? status[0] : -1, tstop[0]);
                 check(e_ok, msg);
+                int64_t binned = 0;
+                for (int b = 0; b < EG_K_BINS; ++b) binned += rep.launches_by_k[b];
+                check(ran && rep.mode == EG_MODE_REFINE && binned == rep.launches,
+                      "a refine run reports EG_MODE_REFINE and its launches_by_k sum to its launches");
                 struct tensor bad;
                 float f32[PN];
                 eg_plane* bp = host_plane(ctx, &bad, PN, f32, kDLFloat, 32);

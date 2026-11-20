@@ -112,7 +112,7 @@ static void record_and_reverse(eg_ctx* ctx, eg_runner* r, const struct dplanes* 
     static double x[PMAX], v[PMAX], t[PMAX];
     ok = ok && dget(s, 0, t, (size_t)N * 8) && dget(s, 1, v, (size_t)N * 8) && dget(s, 2, x, (size_t)N * 8);
     int s_ok = ok && rep.steps == run_ref[0] && rep.launches == run_ref[1] && rep.finished == N && (rep.flags & EG_REPORT_DONE) &&
-               rep.mode == EG_MODE_BAND && (theta == 0.0 || rep.reorders > 0);
+               rep.mode == EG_MODE_RECORD && (theta == 0.0 || rep.reorders > 0);
     for (int i = 0; s_ok && i < N; ++i) s_ok = memcmp(&x[i], &ex[i], 8) == 0 && memcmp(&v[i], &ev[i], 8) == 0 && memcmp(&t[i], &et[i], 8) == 0;
     snprintf(what, sizeof(what), "%s: the recorded run's states equal the old device path's bitwise (%lld steps, %lld launches, "
              "%lld finished)", what0, (long long)rep.steps, (long long)rep.launches, (long long)rep.finished);

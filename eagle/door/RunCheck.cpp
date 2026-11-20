@@ -315,6 +315,13 @@ void check_report(const eg_run_report* report) {
 }
 
 /** @brief Write @p r into @p report per the OUTPUT struct rule (the bytes its struct_size covers). */
+void note_launches_by_k(eg_run_report& report, std::int64_t k, std::int64_t launches) {
+    if (k < 1 || launches < 1) return;
+    int bin = 0;
+    while (bin + 1 < EG_K_BINS && (k >> (bin + 1)) != 0) ++bin;
+    report.launches_by_k[bin] += launches;
+}
+
 void write_report(eg_run_report* report, eg_run_report r) {
     const std::uint32_t size = std::min<std::uint32_t>(report->struct_size, sizeof(r));
     r.struct_size = size;

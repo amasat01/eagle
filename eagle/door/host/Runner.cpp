@@ -157,7 +157,7 @@ struct AutoOut {
  *  band of the finishing rate, the last cut to the steps left; with an active set each launch is
  *  followed by its compaction (and reorder). The planes equal every other pacing's. */
 void run_auto(eg_runner_s& runner, int threads, std::int64_t& iterations, std::int64_t& compactions,
-              std::int64_t& reorders, AutoOut& out) {
+              std::int64_t& reorders, AutoOut& out, eg_run_report& report) {
     eg_plan_s& first = *runner.plans[0];
     const FinishFacts& f = first.unit->finish;
     const std::int64_t n = first.n_samples, cap = runner.max_steps;
@@ -195,6 +195,7 @@ void run_auto(eg_runner_s& runner, int threads, std::int64_t& iterations, std::i
             if (a.reorder && a.fire) reorder(a, owned);
         }
         const std::int64_t fin = first.finished;
+        note_launches_by_k(report, word, 1);
         done += word;
         out.mapped += n - fin_at;
         const std::int64_t next = eagle::policy::bandK(kAutoRate, fin - fin_at, n - fin, k, f.steps_max, kAutoKMin);
@@ -204,6 +205,7 @@ void run_auto(eg_runner_s& runner, int threads, std::int64_t& iterations, std::i
         go = fin != n && left > 0;
         if (go) word = std::min(next, left);
         ++iterations;
+        runner.band = BandFigures{ kAutoRate, k, fin, done, cap, go ? 1 : 0 };
     }
     if (runner.active && a.reorder && a.reorders != a.restored_at) restore(a, owned);
     if (runner.active) {
@@ -342,6 +344,7 @@ void runner_reset(eg_ctx& ctx, eg_runner_s* runner) {
     }
     if (runner->dev.ctx != nullptr) device_runner_initial(ctx, *runner);
     record_reset(*runner);
+    runner->band = BandFigures{};
 }
 
 /** @brief eg_runner_free: drop the runner's plan references. */
@@ -400,6 +403,16 @@ void runner_figures(eg_ctx& ctx, const eg_runner_s* runner, struct eg_runner_fig
     f.chunk = f.mode == EG_MODE_PERSIST ? static_cast<std::int32_t>(r.chunk) : -1;
     f.reverse_passes = runner->reverse_passes;
     f.reverse_bitwise = runner->reverse_passes > 0;   // the canonical compensated pair, in sample order
+    const BandFigures& b = runner->band;
+    f.go = b.go;
+    f.fill = r.fill;
+    f.rate = b.rate;
+    f.k = b.k;
+    f.finished_at_launch = b.finished_at_launch;
+    f.steps_done = b.steps_done;
+    f.max_steps = b.max_steps;
+    const std::int64_t launch_k = launch_steps(runner->plans[0]->unit->finish, runner->plans.size());
+    f.every = runner->active ? runner->act.every_steps : launch_k;
     write_output(out, f, "eg_runner_figures");
 }
 
@@ -419,10 +432,11 @@ void run_loop(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
     const std::int64_t k = launch_steps(f, runner->plans.size());
     const std::int64_t per_iteration = runner->active ? runner->act.every_steps : k;   // not read with AUTO
     AutoOut aut;
+    eg_run_report r{};
     const bool automatic = k == EG_STEPS_AUTO;
     if (f.steps == EG_STEPS_AUTO && !automatic) *static_cast<std::int64_t*>(steps_cell(first)) = 1;    // a several-plan step: one step per launch
     if (automatic) {
-        run_auto(*runner, threads, launches, compactions, reorders, aut);
+        run_auto(*runner, threads, launches, compactions, reorders, aut, r);
     } else if (runner->active) {
         run_active(ctx, *runner, threads, launches, compactions, reorders);
     } else {
@@ -433,8 +447,8 @@ void run_loop(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
             ++launches;
         }
     }
+    if (!automatic) note_launches_by_k(r, per_iteration, launches);
     if (report == nullptr) return;
-    eg_run_report r{};
     r.flags = (static_cast<std::int64_t>(first.finished) == n ? EG_REPORT_DONE : 0u) |
               ((automatic ? launches == 0 || static_cast<std::int64_t>(first.finished) != n || aut.word == 1
                           : per_iteration == 1) ? EG_REPORT_EXACT_STEPS : 0u);

@@ -182,6 +182,7 @@ void look_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
         ++L.looks;
     };
     std::int64_t steps = 0, launches = 0;
+    const std::int64_t sorts0 = seg.seg.sorts;
     const DLTensor& mt = first.bindings[static_cast<std::size_t>(f.mask_slot)].plane->tensor->dl_tensor;
     const auto finished_now = [&]() -> std::int64_t {    // the samples whose mask is set, counted from the plane
         std::vector<unsigned char> bytes;
@@ -244,6 +245,13 @@ void look_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
     rep.launches += launches;
     rep.steps += steps;
     rep.mapped += launches * n;
+    note_launches_by_k(rep, K, launches);
+    if (L.looks > 0) {    // the run decided the group: the policy in force at the end and the gain of the last look
+        rep.flags |= EG_REPORT_DISPATCH;
+        rep.dispatch_policy = L.state.current == pol::Policy::Segmented ? EG_DISPATCH_POLICY_SEGMENTED : EG_DISPATCH_POLICY_SWITCH;
+        rep.dispatch_gain = L.gain;
+        rep.class_sorts = seg.seg.sorts - sorts0;
+    }
     if (report != nullptr) write_report(report, rep);
 }
 

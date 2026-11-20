@@ -156,6 +156,8 @@ typedef int32_t eg_run_mode;
 #define EG_MODE_BAND 1      /**< device: the WHILE-graph / policy path */
 #define EG_MODE_FUSED_ONE 2 /**< device: one fused launch, no graph */
 #define EG_MODE_PERSIST 3   /**< device: the persistent entry, no graph */
+#define EG_MODE_RECORD 4    /**< a run of an EG_RUN_RECORD runner (host or device): the recording forward */
+#define EG_MODE_REFINE 5    /**< a run with events REFINE (host or device): the forward and the refine pass */
 
 typedef int32_t eg_cond_kind;
 #define EG_COND_IF 0
@@ -402,6 +404,16 @@ struct eg_runner_desc {
 #define EG_REPORT_DONE (1u << 0)        /**< finished == n */
 #define EG_REPORT_EXACT_STEPS (1u << 1) /**< ``steps`` is exact */
 #define EG_REPORT_SLOT_FILL (1u << 4)   /**< ``slot_fill`` is set */
+#define EG_REPORT_DISPATCH (1u << 5)    /**< the run decided an AUTO dispatch group: ``dispatch_policy`` and ``dispatch_gain`` are set */
+
+/** The policy an AUTO dispatch group runs under (``eg_run_report.dispatch_policy``). */
+#define EG_DISPATCH_POLICY_SWITCH 0     /**< the fused unit: every sample takes its branch inside one launch */
+#define EG_DISPATCH_POLICY_SEGMENTED 1  /**< the samples sorted by branch, one launch per branch */
+
+/** Bins of ``eg_run_report.launches_by_k``: bin i counts the launches that advanced k steps with 2^i <= k < 2^(i+1), i = 0..31; a k of 2^32 or
+ *  more is in bin 31. A fixed-step runner puts all its launches in the bin of its steps per launch (per compaction interval with an active set);
+ *  an automatic runner puts each launch in the bin of the steps it took (the last launch is cut to the steps left, so it need not be a power of two). */
+#define EG_K_BINS 32
 
 /** OUTPUT of ``eg_run``. */
 struct eg_run_report {
@@ -418,6 +430,12 @@ struct eg_run_report {
     int64_t mapped;          /**< samples launched over, summed over launches */
     double build_s;          /**< one-time capture wall; 0 on host */
     double slot_fill;        /**< with EG_REPORT_SLOT_FILL only */
+    /* appended: a struct_size that ends before a member reads 0 */
+    int32_t dispatch_policy; /**< with EG_REPORT_DISPATCH: the policy in force at the end, EG_DISPATCH_POLICY_* (``dispatch`` of Python's RunReport) */
+    int32_t reserved1;
+    double dispatch_gain;    /**< with EG_REPORT_DISPATCH: the predicted gain of splitting at the last look; above 1 the split wins */
+    int64_t class_sorts;     /**< sorts of the samples by branch a segmented run made (``class_sorts``); 0 for a run that never ran segmented */
+    int64_t launches_by_k[EG_K_BINS]; /**< launches by steps per launch, see EG_K_BINS (``launches_by_k``); they sum to ``launches`` */
 };
 
 /** OUTPUT of ``eg_runner_figures``. ``block``, ``chunk`` and ``grid`` are -1 where the runner has no such launch. */
@@ -433,6 +451,16 @@ struct eg_runner_figures {
     /* appended: a struct_size that ends before a member reads 0 */
     int32_t reverse_passes;  /**< the memory passes of the last ``eg_reverse`` of this runner; 0 before one */
     int32_t reverse_bitwise; /**< 1 once an ``eg_reverse`` ran: its sums over samples are the canonical compensated pair, bitwise; 0 before one */
+    /* appended, as ``Runner.launch_policy`` and ``Runner.policy`` of the Python runner named them; -1 (-1.0) where the runner has none */
+    int32_t go;              /**< steps AUTO on the host, after a run: 1 if the policy would launch again, else 0; -1 otherwise (``go``) */
+    int32_t reserved1;
+    double fill;             /**< PERSIST only: the step fill the persist launch was sized for (``fill``) */
+    double rate;             /**< steps AUTO on the host: the finishing-rate weight of a compaction the band read (``rate``) */
+    int64_t k;               /**< steps AUTO on the host, after a run: the band's steps for the next launch (``k``) */
+    int64_t every;           /**< steps between two compactions of an active set; else the steps one launch advances; -1 for an automatic count without one */
+    int64_t finished_at_launch; /**< steps AUTO on the host, after a run: the finished count the band last read (``finished_at_launch``) */
+    int64_t steps_done;      /**< steps AUTO on the host, after a run: the steps launched so far (``steps_done``) */
+    int64_t max_steps;       /**< steps AUTO on the host, after a run: the runner's step budget (``max_steps``) */
 };
 
 /** Entry flags. */

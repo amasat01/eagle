@@ -194,7 +194,7 @@ int main(int argc, char** argv) {
                      ran ? status[0] : -1, tstop[0]);
             check(e_ok, msg);
             snprintf(msg, sizeof(msg), "%s: the report's steps and launches equal the old device path's (%lld, %lld)", nm[0], (long long)rep.steps, (long long)rep.launches);
-            check(ran && rep.steps == max_steps && rep.launches == max_steps && rep.mode == EG_MODE_BAND, msg);
+            check(ran && rep.steps == max_steps && rep.launches == max_steps && rep.mode == EG_MODE_REFINE, msg);
             struct dplanes b = { .k = 0 };
             float f32[MAXN];
             eg_plane* bp = dplane(ctx, &b, f32, n, kDLFloat, 32);

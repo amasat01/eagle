@@ -603,6 +603,28 @@ static struct eg_runner_desc runner_desc(eg_plan* const* plans, int32_t n_plans,
     return d;
 }
 
+/* The bin of eg_run_report.launches_by_k that holds k steps per launch: floor(log2 k). */
+static int k_bin(int64_t k) {
+    int b = 0;
+    while (b + 1 < EG_K_BINS && (k >> (b + 1)) != 0) ++b;
+    return b;
+}
+
+/* True when the report's launches_by_k holds exactly want[] (a table of EG_K_BINS counts). */
+static int bins_equal(const struct eg_run_report* rep, const int64_t* want) {
+    for (int i = 0; i < EG_K_BINS; ++i)
+        if (rep->launches_by_k[i] != want[i]) return 0;
+    return 1;
+}
+
+static struct eg_runner_figures figures_of(eg_ctx* ctx, const eg_runner* r, eg_status* s) {
+    struct eg_runner_figures f;
+    memset(&f, 0, sizeof(f));
+    f.struct_size = sizeof(f);
+    *s = eg_runner_figures(ctx, r, &f);
+    return f;
+}
+
 /* Bind k, limit and mask (slots 0, 1, 2) of a count plan. */
 static eg_status bind_count(eg_ctx* ctx, eg_plan* p, eg_plane* k, eg_plane* limit, eg_plane* mask) {
     const int32_t slots[3] = { 0, 1, 2 };
@@ -700,6 +722,16 @@ static void run_count(eg_ctx* ctx, eg_unit* unit, int64_t steps, eg_structure st
               rep.compactions == 0 && rep.reorders == 0 && rep.build_s == 0.0 &&
               rep.flags == ((done ? EG_REPORT_DONE : 0u) | (steps == 1 ? EG_REPORT_EXACT_STEPS : 0u)),
           what);
+    {   /* the launches by steps per launch (all in the bin of K) and the figures of a fixed-step runner, counted from the closed form */
+        int64_t want_bins[EG_K_BINS];
+        memset(want_bins, 0, sizeof(want_bins));
+        want_bins[k_bin(steps)] = want_launches;
+        eg_status fs = EG_FAULT;
+        const struct eg_runner_figures fg = figures_of(ctx, r, &fs);
+        check(s == EG_OK && bins_equal(&rep, want_bins) && fs == EG_OK && fg.every == steps && fg.k == -1 && fg.go == -1 &&
+                  fg.fill == -1.0 && fg.rate == -1.0,
+              "a fixed-step run: launches_by_k holds the closed form's launches in the bin of K; the figures' every is K, the band figures none");
+    }
     if (done && s == EG_OK) { /* a second run re-syncs the counter to the mask: nothing to launch */
         memset(&rep, 0, sizeof(rep));
         rep.struct_size = sizeof(rep);
@@ -1155,6 +1187,55 @@ static void step_graph_case(eg_ctx* ctx, eg_unit* axpb, eg_unit* cu, eg_structur
     eg_plane_free(ctx, w.px);
     eg_plane_free(ctx, w.py);
     eg_plane_free(ctx, w.pcell);
+}
+
+/* The reorder threshold (4096 samples, as the Python active set's MIN_REORDER_SPAN): a reordering runner over n samples reports the reorders it
+ * ran, 0 below the threshold, and either way leaves k in sample order, as the closed form of the plain count. */
+static void reorder_threshold_case(eg_ctx* ctx, eg_unit* a1, int64_t n, int want_reorders) {
+    static double k[4200], limit[4200];
+    static unsigned char mask[4200];
+    struct tensor t[3];
+    char what[200];
+    for (int64_t i = 0; i < n; ++i) k[i] = 0.0, limit[i] = (double)(1 + (i * 37) % 50), mask[i] = i % 97 == 0;
+    tensor_init(&t[0], k, n, 64);
+    tensor_init(&t[1], limit, n, 64);
+    mask_init(&t[2], mask, n);
+    eg_plane *pk = NULL, *pl = NULL, *pm = NULL;
+    eg_plan* p = NULL;
+    eg_status s = eg_plane_wrap(ctx, &t[0].managed, &pk);
+    if (s == EG_OK) s = eg_plane_wrap(ctx, &t[1].managed, &pl);
+    if (s == EG_OK) s = eg_plane_wrap(ctx, &t[2].managed, &pm);
+    if (s == EG_OK) s = plan(ctx, a1, EG_STRUCTURE_HOST_TEAM, n, 0, NULL, NULL, &p);
+    if (s == EG_OK) s = bind_count(ctx, p, pk, pl, pm);
+    eg_runner* r = NULL;
+    struct eg_runner_desc d = runner_desc(&p, 1, 1000);
+    d.every = 4;
+    d.flags = EG_RUN_REORDER;
+    d.reorder_theta = 0.5;
+    if (s == EG_OK) s = eg_runner_new(ctx, &d, &r);
+    struct eg_run_report rep;
+    memset(&rep, 0, sizeof(rep));
+    rep.struct_size = sizeof(rep);
+    if (s == EG_OK) s = eg_run(ctx, r, &rep);
+    int ok = s == EG_OK && rep.finished == n;
+    for (int64_t i = 0; i < n; ++i) ok &= k[i] == (mask[i] && i % 97 == 0 ? 0.0 : limit[i]);
+    snprintf(what, sizeof(what), "a reordering runner over %lld samples (%s the 4096 threshold) reports %s reorders and leaves k in sample order",
+             (long long)n, want_reorders ? "at or above" : "below", want_reorders ? "some" : "no");
+    check(ok && (want_reorders ? rep.reorders > 0 : rep.reorders == 0), what);
+    eg_runner_free(ctx, r);
+    eg_plan_free(ctx, p);
+    eg_plane_free(ctx, pk), eg_plane_free(ctx, pl), eg_plane_free(ctx, pm);
+}
+
+static void check_reorder_threshold(eg_ctx* ctx) {
+    eg_unit* a1 = NULL;
+    if (load(ctx, "count1a", 0xE1, &a1) != EG_OK) {
+        check(0, "reorder threshold: count1a loaded");
+        return;
+    }
+    reorder_threshold_case(ctx, a1, 1000, 0);
+    reorder_threshold_case(ctx, a1, 4095, 0);
+    reorder_threshold_case(ctx, a1, 4096, 1);
 }
 
 static void check_step_graph(eg_ctx* ctx, eg_unit* axpb) {
@@ -2505,6 +2586,8 @@ static int64_t model_band_k(double rate, int64_t newly, int64_t live, int64_t k,
 
 struct auto_out {
     int64_t iters, steps, mapped, compactions, finished, last_word;
+    int64_t bins[EG_K_BINS];          /* launches by the steps each took */
+    int64_t k, fin_at, go;            /* the band's cells after the last launch */
 };
 
 /* The old pacing (first launch 16 steps, then the band, the last cut to the steps left; with an active set a
@@ -2539,6 +2622,7 @@ static void model_auto(const double* limit, const unsigned char* mask0, int64_t 
             ++o->compactions;
             at_last = finished;
         }
+        ++o->bins[k_bin(word)];
         steps_done += word;
         o->mapped += RN - fin_at;
         const int64_t next = model_band_k(8.0, finished - fin_at, RN - finished, k, 64, 8);
@@ -2547,6 +2631,7 @@ static void model_auto(const double* limit, const unsigned char* mask0, int64_t 
         go = finished != RN && max_steps - steps_done > 0;
         if (go) word = next < max_steps - steps_done ? next : max_steps - steps_done;
         ++o->iters;
+        o->k = k, o->fin_at = fin_at, o->go = go;
     }
     o->steps = steps_done;
     o->finished = finished;
@@ -2588,6 +2673,17 @@ static void run_auto_case(eg_ctx* ctx, eg_unit* unit, int active, eg_structure s
               rep.steps == m.steps && rep.compactions == m.compactions && rep.flags == flags &&
               rep.mapped == (active ? m.mapped : m.iters * RN),
           what);
+    {   /* the launches by steps, and the band's cells, from the model (its own count of each launch's steps) */
+        eg_status fs = EG_FAULT;
+        const struct eg_runner_figures fg = figures_of(ctx, r, &fs);
+        int cells = fs == EG_OK && fg.every == (active ? 8 : -1);
+        if (m.iters > 0)
+            cells = cells && fg.rate == 8.0 && fg.k == m.k && fg.finished_at_launch == m.fin_at && fg.steps_done == m.steps &&
+                    fg.max_steps == max_steps && fg.go == m.go;
+        else cells = cells && fg.k == -1 && fg.go == -1;
+        check(s == EG_OK && bins_equal(&rep, m.bins) && cells,
+              "steps AUTO: launches_by_k and the figures (rate, k, finished_at_launch, steps_done, max_steps, go, every) as the model counted them");
+    }
     check(eg_runner_free(ctx, r) == EG_OK && t[0].deleted == 1, "AUTO runner freed");
 }
 
@@ -4591,7 +4687,7 @@ static void check_auto_look(eg_ctx* ctx) {
     FILE* f = fopen(path, "r");
     check(f != NULL, "the recorded decisions of the old stack are present");
     char line[256];
-    int rows = 0, agree = 0, switched = 0, fused_from_start = 0, segmented_to_end = 0;
+    int rows = 0, agree = 0, switched = 0, fused_from_start = 0, segmented_to_end = 0, dispatch_agree = 0;
     while (f != NULL && fgets(line, sizeof(line), f) != NULL) {
         char name[32];
         int n1, l1, max_steps, want_seg, want_total;
@@ -4614,6 +4710,15 @@ static void check_auto_look(eg_ctx* ctx) {
         for (int i = 0; ok && i < SGN; ++i)    /* the path of every sample's steps is the old stack's decision, its values the plain fused unit's */
             ok = q.how[i] == auto_how(q.limit, i, n1, want_seg, want_total) && q.k[i] == ref.k[i] && q.mask[i] == ref.mask[i];
         ok = ok && rep.launches == want_total && rep.steps == want_total && rep.mode == EG_MODE_HOST && rep.launches == rep_ref.launches;
+        /* the report's dispatch fields: decided when the run looked at all; segmented at the end iff the old stack stayed segmented to the end;
+         * one class sort per segmented launch (a launch classifies again, then sorts; the units here take one step a launch, so the old stack's
+         * segmented steps are its segmented launches) */
+        const int dispatch_ok = (rep.flags & EG_REPORT_DISPATCH) != 0 && rep.dispatch_gain > 0.0 && rep.class_sorts == want_seg &&
+                                rep.dispatch_policy == (want_seg > 0 && want_seg == want_total ? EG_DISPATCH_POLICY_SEGMENTED : EG_DISPATCH_POLICY_SWITCH);
+        if (!dispatch_ok)
+            printf("      case %s n1 %d l1 %d: flags %x policy %d gain %g sorts %lld (old stack segmented %d of %d)\n", name, n1, l1, rep.flags,
+                   rep.dispatch_policy, rep.dispatch_gain, (long long)rep.class_sorts, want_seg, want_total);
+        dispatch_agree += dispatch_ok;
         ++rows;
         agree += ok;
         switched += want_seg > 0 && want_seg < want_total;
@@ -4651,6 +4756,8 @@ static void check_auto_look(eg_ctx* ctx) {
     snprintf(what, sizeof(what), "the AUTO runner takes the old stack's decision in all %d recorded runs (%d fused from the start, %d segmented to the end, %d switched to fused at a look), "
              "its values equal the plain fused unit's bitwise", rows, fused_from_start, segmented_to_end, switched);
     check(rows == 36 && agree == rows && fused_from_start > 0 && segmented_to_end > 0 && switched > 0, what);
+    check(rows == 36 && dispatch_agree == rows,
+          "the AUTO runs report the decided policy (segmented only where the old stack stayed segmented to the end), a gain above 0 and one class sort per segmented launch");
     /* the refusals of a runner over an AUTO group with a segmented set */
     {
         eg_unit *steps_auto = NULL, *k3 = NULL;
@@ -5316,6 +5423,7 @@ int main(int argc, char** argv) {
     oracle(ctx, unit, 100001, 50000, "n=100001 threads=1");
     check_runner(ctx, unit);
     check_step_graph(ctx, unit);
+    check_reorder_threshold(ctx);
     check_weight_row(ctx);
     check_auto_look(ctx);
     check_segmented_runner(ctx);

@@ -226,6 +226,7 @@ inline std::uint64_t run_segmented(const eg_plan_s& plan, int threads) {
         for (std::size_t s = 0; s < n; ++s) next[s] = S.perm.empty() ? order[s] : S.perm[static_cast<std::size_t>(order[s])];
         S.perm = std::move(next);
         S.sorted = true;
+        ++S.sorts;
     }
     for (std::size_t j = 0; j < k; ++j) {
         std::vector<void*> p = seg::params_of(plan, j, *g.branches[j], owned, &n32);

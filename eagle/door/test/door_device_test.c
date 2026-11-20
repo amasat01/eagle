@@ -35,6 +35,13 @@ static void check(int ok, const char* what) {
     if (!ok) ++failures;
 }
 
+/* The bin of eg_run_report.launches_by_k that holds k steps per launch: floor(log2 k). */
+static int k_bin(int64_t k) {
+    int b = 0;
+    while (b + 1 < EG_K_BINS && (k >> (b + 1)) != 0) ++b;
+    return b;
+}
+
 /* True when the context's reason contains @p part (the reason is printed when it does not). */
 static int reason_has(eg_ctx* ctx, const char* part) {
     char buf[1024];
@@ -916,6 +923,7 @@ static void figures_device(eg_ctx* ctx, const char* dev_lib) {
          (double)f.grid == geom[1] && f.grid == (FN + f.block - 1) / f.block;
     if (!ok) printf("      block %d grid %lld, the kernel saw %g x %g\n", f.block, (long long)f.grid, geom[0], geom[1]);
     check(ok, "eg_runner_figures after eg_run: block and grid == the launch the kernel saw (blockDim, gridDim), grid covers the samples");
+    check(rep.launches > 0 && rep.launches_by_k[k_bin(1)] == rep.launches && f.every == 1, "a device run's launches_by_k sum into the bin of its one step a launch");
     struct eg_plan_counters counters;
     int32_t n_mix = -1;
     memset(&counters, 0, sizeof(counters));
@@ -986,18 +994,18 @@ static void dcount_inputs(struct dcount* c) {
     cudaMemcpy(c->dm, c->mask, sizeof(c->mask), cudaMemcpyHostToDevice);
 }
 
-static eg_status dcount_new(eg_ctx* ctx, eg_unit* unit, int64_t every, double theta, struct dcount* c) {
+static eg_status dcount_new_n(eg_ctx* ctx, eg_unit* unit, int64_t every, double theta, int64_t n, struct dcount* c) {
     memset(c, 0, sizeof(*c));
     cudaMalloc((void**)&c->dk, sizeof(c->k));
     cudaMalloc((void**)&c->dl, sizeof(c->limit));
     cudaMalloc((void**)&c->dm, sizeof(c->mask));
-    c->pk = wrap(ctx, &c->tk, c->dk, 1, DN, 0, 1, 0);
-    c->pl = wrap(ctx, &c->tl, c->dl, 1, DN, 0, 1, 0);
-    c->pm = wrap_device_typed(ctx, &c->tm, c->dm, DN, kDLBool, 8);
+    c->pk = wrap(ctx, &c->tk, c->dk, 1, n, 0, 1, 0);
+    c->pl = wrap(ctx, &c->tl, c->dl, 1, n, 0, 1, 0);
+    c->pm = wrap_device_typed(ctx, &c->tm, c->dm, n, kDLBool, 8);
     if (!(c->pk && c->pl && c->pm)) return EG_FAULT;
     const int32_t slots[3] = { 0, 1, 2 };
     eg_plane* planes[3] = { c->pk, c->pl, c->pm };
-    eg_status s = plan_n(ctx, unit, EG_STRUCTURE_DEVICE, DN, 0, NULL, NULL, &c->plan);
+    eg_status s = plan_n(ctx, unit, EG_STRUCTURE_DEVICE, n, 0, NULL, NULL, &c->plan);
     if (s == EG_OK) s = bind_planes(ctx, c->plan, 3, slots, planes);
     struct eg_runner_desc d;
     memset(&d, 0, sizeof(d));
@@ -1009,6 +1017,10 @@ static eg_status dcount_new(eg_ctx* ctx, eg_unit* unit, int64_t every, double th
     if (theta > 0) d.flags = EG_RUN_REORDER, d.reorder_theta = theta;
     if (s == EG_OK) s = eg_runner_new(ctx, &d, &c->runner);
     return s;
+}
+
+static eg_status dcount_new(eg_ctx* ctx, eg_unit* unit, int64_t every, double theta, struct dcount* c) {
+    return dcount_new_n(ctx, unit, every, theta, DN, c);
 }
 
 static eg_status dcount_run(eg_ctx* ctx, struct dcount* c, struct eg_run_report* rep) {
@@ -1454,6 +1466,48 @@ static void reset_device(eg_ctx* ctx, const char* dev_lib) {
     eg_unit_free(ctx, active);
 }
 
+/* The runs of dcount over its closed forms: the captured loop's launches by steps per launch land in the bin of its steps per launch, and a
+ * reordering runner reports the reorders it ran, none below the 4096-sample threshold. */
+static void report_device(eg_ctx* ctx, const char* dev_lib) {
+    eg_unit *plain = NULL, *active = NULL;
+    if (load(ctx, dev_lib, "dcount1", 0xD9, &plain) != EG_OK || load(ctx, dev_lib, "dcount1a", 0xDA, &active) != EG_OK) {
+        check(0, "report: dcount1 and dcount1a loaded");
+        return;
+    }
+    static struct dcount c;
+    struct eg_run_report rep;
+    struct eg_runner_figures fg;
+    int ok = dcount_new(ctx, plain, 0, 0.0, &c) == EG_OK;
+    if (ok) dcount_inputs(&c), ok = dcount_run(ctx, &c, &rep) == EG_OK;
+    memset(&fg, 0, sizeof(fg));
+    fg.struct_size = sizeof(fg);
+    ok = ok && eg_runner_figures(ctx, c.runner, &fg) == EG_OK;
+    /* the longest limit among the live samples is 50: one launch a step, 50 launches, all in the bin of K = 1 */
+    check(ok && rep.launches == 50 && rep.launches_by_k[k_bin(1)] == 50 && fg.every == 1 && fg.k == -1 && fg.fill == -1.0 && fg.rate == -1.0,
+          "a device band run: 50 launches by closed form, all in the bin of one step a launch; the figures' every is 1, no band cells");
+    dcount_free(ctx, &c);
+    ok = dcount_new(ctx, active, 4, 0.0, &c) == EG_OK;
+    if (ok) dcount_inputs(&c), ok = dcount_run(ctx, &c, &rep) == EG_OK;
+    ok = ok && eg_runner_figures(ctx, c.runner, &fg) == EG_OK;
+    /* whole intervals of 4 steps: 13 of them reach step 50 (52 steps) */
+    check(ok && rep.launches == 13 && rep.launches_by_k[k_bin(4)] == 13 && fg.every == 4,
+          "a device active-set run (every 4): 13 intervals by closed form, all in the bin of 4 steps; the figures' every is 4");
+    dcount_free(ctx, &c);
+    const int64_t sizes[3] = { 1000, 4095, 4096 };    /* the reorder threshold: below it none, at it the reorders that ran */
+    for (int i = 0; i < 3; ++i) {
+        ok = dcount_new_n(ctx, active, 4, 0.5, sizes[i], &c) == EG_OK;
+        if (ok) dcount_inputs(&c), ok = dcount_run(ctx, &c, &rep) == EG_OK;
+        const int want = sizes[i] >= 4096;
+        char what[200];
+        snprintf(what, sizeof(what), "a device reordering runner over %lld samples (%s the 4096 threshold) reports %s reorders", (long long)sizes[i],
+                 want ? "at" : "below", want ? "some" : "no");
+        check(ok && rep.finished == sizes[i] && (want ? rep.reorders > 0 : rep.reorders == 0), what);
+        dcount_free(ctx, &c);
+    }
+    eg_unit_free(ctx, plain);
+    eg_unit_free(ctx, active);
+}
+
 /* ---- step graphs on a device runner -------------------------------------- */
 
 /* The runner's own planes (k, limit, mask) and the step work's: a second count plan (k2, limit2, mask2) and a copy of k (kc).
@@ -1772,6 +1826,8 @@ static void fast_entries(eg_ctx* ctx, const char* dev_lib) {
             check(eg_runner_figures(ctx, r.runner, &rf) == EG_OK && rf.mode == EG_MODE_PERSIST && rf.grid == geo[0] &&
                       rf.block == geo[1] && rf.chunk == geo[2],
                   "eg_runner_figures of a persist run: mode PERSIST, grid, block and chunk == the launch the kernel saw");
+            check(rep.launches_by_k[k_bin(1)] == 1 && rf.fill > 0.0 && rf.fill <= 1.0 && rf.every == -1 && rf.k == -1,
+                  "a persist run: one launch in the bin of its step budget (1), the step fill it was sized for in (0, 1], no band cells");
             struct eg_entry_figures ef;
             memset(&ef, 0, sizeof(ef));
             ef.struct_size = sizeof(ef);
@@ -2588,6 +2644,7 @@ int main(int argc, char** argv) {
     cell_rows_device(ctx, dev_lib);
     reset_device(ctx, dev_lib);
     step_graph_device(ctx, dev_lib);
+    report_device(ctx, dev_lib);
     check_segmented_device(ctx, dev_lib);
     check_auto_device(ctx, dev_lib);
     fast_entries(ctx, dev_lib);

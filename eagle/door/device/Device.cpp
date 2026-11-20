@@ -1003,6 +1003,7 @@ void launch_segmented(const eg_plan_s& plan) {
         if (&owned[i] != mask) rows_of(i, planes);
     reset_step(stream, perm, inv, imap, cells, cells + 1, n);
     class_sort_step(stream, planes, mask_copy, K, cls8, perm, inv, imap, cells, cells + 1, off32, cells + 2, scratch, n);
+    ++S.sorts;
     std::vector<unsigned> off(K + 1);
     cells_read(stream, reinterpret_cast<std::uint64_t>(off32), off.data(), K + 1);
     std::vector<std::int64_t> off64(off.begin(), off.end());
@@ -1455,6 +1456,7 @@ void fast_runner_setup(eg_ctx& ctx, const eg_runner_desc& d, eg_runner_s& runner
     const bool fp64 = u.scalar_type != EG_SCALAR_FLOAT32;
     const double ops = static_cast<double>(u.finish.ops > 0 ? u.finish.ops : kAutoStepOps);
     const policy::LaunchDevice l = launch_device(dev);
+    runner.dev.fill = policy::PERSIST_FIRST_FILL;
     runner.dev.chunk = static_cast<unsigned>(policy::persistChunk(l, fp64, ops, 1e9));
     const int threads = policy::persistThreads(l, fp64, u.persist_regs, n, policy::PERSIST_FIRST_FILL,
                                                static_cast<int>(runner.dev.chunk), ops);
@@ -1520,6 +1522,7 @@ void fast_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
     out.launches = 1;
     out.steps = persist ? static_cast<std::int64_t>(steps_read) : runner->max_steps;
     out.mapped = n;
+    note_launches_by_k(out, runner->max_steps, 1);
     write_report(report, out);
 }
 
@@ -1730,6 +1733,7 @@ void stepped_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
     out.launches = launches;
     out.steps = launches * launch_steps(f, runner->plans.size());
     out.mapped = launches * n;
+    note_launches_by_k(out, launch_steps(f, runner->plans.size()), launches);
     write_report(report, out);
 }
 
@@ -1845,6 +1849,7 @@ void device_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
         }
     }
     out.mapped = static_cast<std::int64_t>(ran) * n;
+    note_launches_by_k(out, every, ran);
     out.build_s = r.build_s;
     write_report(report, out);
 }

@@ -385,6 +385,7 @@ struct SegState {
     std::vector<std::int64_t> run_len;        ///< per class: its run in the sort
     std::uint32_t count = 0;                  ///< the live prefix of ``map``
     std::int64_t stale_now = 0;               ///< stale live samples after the last launch
+    std::int64_t sorts = 0;                   ///< sorts of the samples by class made since the plan was made (a launch re-sorts when the batch went stale)
     bool sorted = false;
     plugin::ScalarHandle map_h{}, count_h{};
     std::vector<std::uint8_t> sortkey;        ///< DEVICE dynamic: the class of each sample (sample order) at the last sort
@@ -528,6 +529,7 @@ struct DeviceRun {
     int mode = EG_MODE_BAND;                  ///< steps AUTO: EG_MODE_FUSED_ONE or EG_MODE_PERSIST (no graph)
     bool stepped = false;                     ///< a SEGMENTED group: no captured loop, one host-driven launch of the group per step
     unsigned block = 0, grid = 0, chunk = 0;  ///< the persist launch
+    double fill = -1.0;                       ///< the step fill the persist launch was sized for; -1: none
     std::uint64_t fast = 0;                   ///< the persist entry's device [next, steps] (uint32)
     std::vector<unsigned char> bound;         ///< the plans' argument bytes the loop was captured over
     DeviceRun() = default;
@@ -535,6 +537,16 @@ struct DeviceRun {
     DeviceRun& operator=(const DeviceRun&) = delete;
     ~DeviceRun();
 };
+
+/** @brief The figures of the band policy after a host run of an automatic unit: what ``eg_runner_figures`` reads (the cells of ``Runner.policy``). */
+struct BandFigures {
+    double rate = -1.0;
+    std::int64_t k = -1, finished_at_launch = -1, steps_done = -1, max_steps = -1;
+    int go = -1;
+};
+
+/** @brief Add @p launches to the bin of ``eg_run_report.launches_by_k`` that holds @p k steps per launch. */
+void note_launches_by_k(eg_run_report& report, std::int64_t k, std::int64_t launches);
 
 /** @brief What a runner over an AUTO group that names its segmented set keeps (the look): the plan of the segmented set, stepped while the group
  *  runs segmented, and the band's state. */
@@ -563,6 +575,7 @@ struct eg_runner_s {
     eagle::door::DeviceRun dev;               ///< a DEVICE runner's loop and cells
     eagle::door::RunRecord* record = nullptr; ///< EG_RUN_RECORD: the derived plans and the last record
     eagle::door::AutoLook* look = nullptr;    ///< a runner over an AUTO group that names its segmented set: the look that decides each run
+    eagle::door::BandFigures band;            ///< the band policy's cells after the last host run of an automatic unit
     eg_graph_s* step_graph = nullptr;         ///< the graph run once per step (one reference held, released with the runner)
 };
 

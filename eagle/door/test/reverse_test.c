@@ -183,6 +183,10 @@ static void lin_rows(eg_ctx* ctx, const char* lib) {
                              "(%lld steps, all done)", si ? "HOST_TEAM" : "HOST_SERIAL", threads[ti], (long long)windows[w],
                              pass ? ", several passes" : "", (long long)rep.steps);
                     check(x_ok, what);
+                    int64_t binned = 0;
+                    for (int b = 0; b < EG_K_BINS; ++b) binned += rep.launches_by_k[b];
+                    check(ok && rep.mode == EG_MODE_RECORD && binned == rep.launches && rep.launches > 0,
+                          "a recorded run reports EG_MODE_RECORD and its launches_by_k sum to its launches");
                     double seed[LN], gx[LN], gt[LN], ga = -1.0, gb = -1.0;
                     for (int i = 0; i < LN; ++i) seed[i] = 1.0;
                     struct tensor ts, tgx, tgt, tga, tgb;

@@ -1284,7 +1284,8 @@ void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report) {
     if (report == nullptr) return;
     eg_run_report out{};
     out.flags = (static_cast<std::int64_t>(fwd.finished) == n ? EG_REPORT_DONE : 0u) | EG_REPORT_EXACT_STEPS;
-    out.mode = D != nullptr ? EG_MODE_BAND : EG_MODE_HOST;
+    out.mode = refine ? EG_MODE_REFINE : EG_MODE_RECORD;
+    note_launches_by_k(out, launches > 0 ? ran / launches : 0, launches);
     out.n = n;
     out.finished = fwd.finished;
     out.launches = launches;
