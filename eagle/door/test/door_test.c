@@ -31,6 +31,9 @@
 #include <unistd.h>
 
 static int failures = 0;
+/* A build fact, read once from the door (main): the library carries the device group, so it answers the device calls and
+ * refuses a device context for want of a device, where a door without it refuses them NOT_WRITTEN. */
+static int device_group = 0;
 static const char* library_path = NULL;
 
 static void check(int ok, const char* what) {
@@ -229,8 +232,9 @@ static void check_settings(void) {
     const uint32_t short_size = (uint32_t)(offsetof(struct eg_ctx_settings, abi_major) + sizeof(uint32_t));
     check(settings_status(short_size, 0, 0) == EG_OK,
           "settings with struct_size + abi_major only: a host-only context (info.device -1)");
-    check(settings_status(sizeof(struct eg_ctx_settings), EG_CTX_DEVICE, 0) == EG_NOT_WRITTEN,
-          "EG_CTX_DEVICE refused NOT_WRITTEN (device group not built)");
+    if (!device_group)    /* with the group, a device context is made or refused for want of a device: check_device_count */
+        check(settings_status(sizeof(struct eg_ctx_settings), EG_CTX_DEVICE, 0) == EG_NOT_WRITTEN,
+              "EG_CTX_DEVICE refused NOT_WRITTEN (device group not built)");
     check(settings_status(sizeof(struct eg_ctx_settings), 0, 1) == EG_BAD_REQUEST,
           "device != 0 without EG_CTX_DEVICE refused BAD_REQUEST");
 }
@@ -262,8 +266,8 @@ static void check_bad_input(eg_ctx* ctx, eg_unit* unit) {
     const int64_t base[2] = { 0, 2 }, count[2] = { 3, 2 };
     check(plan(ctx, unit, EG_STRUCTURE_HOST_TEAM, 4, 2, base, count, &p) == EG_BAD_REQUEST,
           "overlapping partitions refused BAD_REQUEST");
-    check(plan(ctx, unit, EG_STRUCTURE_DEVICE, 4, 0, NULL, NULL, &p) == EG_NOT_WRITTEN,
-          "DEVICE structure refused NOT_WRITTEN");
+    check(plan(ctx, unit, EG_STRUCTURE_DEVICE, 4, 0, NULL, NULL, &p) == (device_group ? EG_BAD_REQUEST : EG_NOT_WRITTEN),
+          "DEVICE structure on a host context refused: NOT_WRITTEN without the device group, BAD_REQUEST (host-only context) with it");
 
     double x32[4] = { 0 }, y[4] = { 0 };
     struct tensor tx, ty;
@@ -601,9 +605,9 @@ static void check_runner(eg_ctx* ctx, eg_unit* axpb) {
     check(eg_bind(ctx, plans[0], &bd) == EG_BAD_REQUEST && reason_has(ctx, "finished counter"),
           "binding the eagle-made finished counter refused BAD_REQUEST");
     eg_plan* dev = NULL;
-    check(plan(ctx, c1, EG_STRUCTURE_DEVICE, RN, 0, NULL, NULL, &dev) == EG_NOT_WRITTEN &&
+    check(plan(ctx, c1, EG_STRUCTURE_DEVICE, RN, 0, NULL, NULL, &dev) == (device_group ? EG_BAD_REQUEST : EG_NOT_WRITTEN) &&
               reason_has(ctx, "DEVICE"),
-          "a DEVICE plan of a finishing unit refused NOT_WRITTEN");
+          "a DEVICE plan of a finishing unit on a host context refused: NOT_WRITTEN without the device group, BAD_REQUEST with it");
     d = runner_desc(plans, 1, 10);
     check(eg_runner_new(ctx, &d, &r) == EG_OK && eg_run_events(ctx, r, NULL, NULL) == EG_BAD_REQUEST &&
               reason_has(ctx, "no refine run") && eg_reverse(ctx, r, NULL, NULL) == EG_BAD_REQUEST &&
@@ -2972,18 +2976,49 @@ static void check_reset(eg_ctx* ctx) {
 
 /* A door built without the device group: every device-group call is NOT_WRITTEN by the same reason, but eg_sync, which is OK. */
 static void check_no_device_group(eg_ctx* ctx) {
-    int32_t count = 0;
+    int32_t count = -1;
     struct eg_device_props props;
     memset(&props, 0, sizeof(props));
     props.struct_size = sizeof(props);
     const char* none = "the device group is not built";
-    int ok = eg_device_count(ctx, &count) == EG_NOT_WRITTEN && reason_has(ctx, none);
+    int ok = eg_device_count(ctx, &count) == EG_OK && count == 0;
     ok = ok && eg_device_props(ctx, 0, &props) == EG_NOT_WRITTEN && reason_has(ctx, none);
     ok = ok && eg_stream_use(ctx, 0) == EG_NOT_WRITTEN && reason_has(ctx, "eg_stream_use: the device group is not built");
     ok = ok && eg_record_child(ctx, 0) == EG_NOT_WRITTEN && reason_has(ctx, none);
     ok = ok && eg_sync(ctx) == EG_OK;
-    check(ok, "a door without the device group: eg_device_count, eg_device_props, eg_stream_use and eg_record_child NOT_WRITTEN "
-              "(\"the device group is not built\"), eg_sync OK");
+    check(ok, "a door without the device group: eg_device_count OK with 0, eg_device_props, eg_stream_use and eg_record_child "
+              "NOT_WRITTEN (\"the device group is not built\"), eg_sync OK");
+}
+
+/* eg_device_count answers on a host context in either build; a device context is made when the driver sees a device and
+ * refused BAD_REQUEST naming the count (or the driver) when it sees none. A door without the device group refuses it
+ * NOT_WRITTEN. */
+static void check_device_count(eg_ctx* ctx) {
+    int32_t count = -1;
+    check(eg_device_count(ctx, &count) == EG_OK && count >= 0 && eg_device_count(ctx, NULL) == EG_BAD_REQUEST,
+          "eg_device_count on a host context: OK with a count of 0 or more, a NULL count BAD_REQUEST");
+    const int built = device_group;
+    struct eg_ctx_settings st;
+    memset(&st, 0, sizeof(st));
+    st.struct_size = sizeof(st);
+    st.abi_major = EG_DOOR_VERSION_MAJOR;
+    st.flags = EG_CTX_DEVICE;
+    eg_ctx* dev = NULL;
+    const eg_status made = eg_ctx_new(&st, &dev);
+    int ok;
+    if (!built)
+        ok = made == EG_NOT_WRITTEN && reason_has(dev, "the device group is not built");
+    else if (count == 0)
+        ok = made == EG_BAD_REQUEST && (reason_has(dev, "the driver sees 0 device(s)") || reason_has(dev, "no CUDA driver could be opened"));
+    else
+        ok = made == EG_OK;
+    check(ok, "a device context: made when the driver sees a device, BAD_REQUEST naming the count or the driver when it sees none, "
+              "NOT_WRITTEN without the device group");
+    eg_ctx_free(dev);
+    eg_ctx* host = make_ctx();
+    int32_t again = -1;
+    check(host != NULL && eg_device_count(host, &again) == EG_OK && again == count, "host contexts work and see the same count");
+    eg_ctx_free(host);
 }
 
 /* ---- transforms ---------------------------------------------------------- */
@@ -3808,6 +3843,7 @@ int main(int argc, char** argv) {
     eg_ctx* ctx = make_ctx();
     check(ctx != NULL, "eg_ctx_new host context");
     if (ctx == NULL) return 1;
+    device_group = eg_stream_use(ctx, 0) != EG_NOT_WRITTEN;    /* a host context has no stream: BAD_REQUEST with the group built */
     struct eg_ctx_info info;
     memset(&info, 0, sizeof(info));
     info.struct_size = sizeof(info);
@@ -3850,7 +3886,8 @@ int main(int argc, char** argv) {
     check_banded(ctx);
     check_figures(ctx);
     check_reset(ctx);
-    check_no_device_group(ctx);
+    if (!device_group) check_no_device_group(ctx);
+    check_device_count(ctx);
 
     check_reduce(ctx);
     fft_values(ctx, 0);

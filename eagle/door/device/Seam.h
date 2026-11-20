@@ -13,6 +13,8 @@ namespace door {
 // The device group (device/Device.cpp); the host-only build refuses EG_CTX_DEVICE and structure DEVICE.
 void device_open(eg_ctx& ctx, std::int32_t device);
 void device_close(eg_ctx& ctx) noexcept;
+/** @brief The devices the driver sees (device/Device.cpp); 0 with no driver, no device, or no device group built. */
+std::int32_t device_count(eg_ctx& ctx);
 void device_unit_load(eg_unit_s& unit, const eg_unit_meta& meta, void* library);
 void device_unit_free(eg_unit_s& unit) noexcept;
 void device_plan_check(const eg_ctx& ctx, const eg_unit_s& unit);
@@ -25,13 +27,19 @@ void device_sync(eg_ctx& ctx);
 void device_record_begin(eg_ctx& ctx);
 void device_record_launch(eg_ctx& ctx, eg_plan_s& plan);
 void device_record_end(eg_ctx& ctx, eg_graph** out);
+/** @brief Record a HOST node on the capture in scope: when the graph replays, the driver's host-function launch calls
+ *  @p run(@p user, failure) on a driver thread, ordered on the stream. @p run must not throw and makes no CUDA call (the
+ *  driver forbids it); it stores a failure in @p failure, which the context's next ``eg_graph_launch`` or ``eg_sync``
+ *  returns. The graph owns @p user until it is freed, when @p release(ctx, user) drops it (after the stream is idle). */
+void device_record_host_step(eg_ctx& ctx, void (*run)(void* user, StepFailure& failure) noexcept, void* user,
+                             void (*release)(eg_ctx& ctx, void* user));
 bool device_graph(const eg_ctx& ctx, const eg_graph* graph);
 void device_graph_launch(eg_ctx& ctx, eg_graph* graph);
 void device_graph_free(eg_ctx& ctx, eg_graph* graph);
 void device_graphs_drop(eg_ctx& ctx) noexcept;
 void device_stream_use(eg_ctx& ctx, std::uint64_t stream);
 void device_quiet(const eg_ctx& ctx, const char* call, eg_status status, const char* why);
-/** @brief The refusal reason shared by every host-side call made while a device recording is in scope. */
+/** @brief The refusal reason of the host calls a device recording does not keep (eg_reverse). */
 inline constexpr const char* kHostWorkInGraph = "host work inside a device graph is not written in this build of the door";
 void device_plan_cells(eg_plan_s& plan);
 void device_plan_free(eg_plan_s& plan) noexcept;

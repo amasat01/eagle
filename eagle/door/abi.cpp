@@ -152,7 +152,6 @@ EG_EXPORT eg_status eg_launch(eg_ctx* ctx, eg_plan* plan, uint64_t* tiles) {
 EG_EXPORT eg_status eg_reduce(eg_ctx* ctx, const struct eg_reduce_desc* desc) {
     return door::call(ctx, [&](eg_ctx& c) {
         const eg_reduce_desc d = door::read_input(desc, "eg_reduce_desc");
-        door::device_quiet(c, "eg_reduce", EG_NOT_WRITTEN, door::kHostWorkInGraph);
         if (door::device_planes(c, "eg_reduce", { d.in, d.out, d.comp })) door::device_reduce(c, d);
         else door::reduce(c, desc);
     });
@@ -165,7 +164,6 @@ EG_EXPORT eg_status eg_copy(eg_ctx* ctx, eg_plane* src, eg_plane* dst) {
         } else if (door::device_planes(c, "eg_copy", { src, dst })) {
             door::device_copy(c, src, dst);
         } else {
-            door::device_quiet(c, "eg_copy", EG_NOT_WRITTEN, door::kHostWorkInGraph);
             door::copy(c, src, dst);
         }
     });
@@ -275,7 +273,6 @@ EG_EXPORT eg_status eg_run(eg_ctx* ctx, eg_runner* runner, struct eg_run_report*
         if (runner->look != nullptr) door::look_run(c, runner, report);
         else if (runner->dev.ctx != nullptr) door::device_run(c, runner, report);
         else {
-            door::device_quiet(c, "eg_run of a host runner", EG_NOT_WRITTEN, door::kHostWorkInGraph);
             door::run(c, runner, report);
         }
     });
@@ -303,12 +300,18 @@ EG_EXPORT eg_status eg_stream_use(eg_ctx* ctx, uint64_t stream) {
     return door::call(ctx, [stream](eg_ctx& c) { door::device_stream_use(c, stream); });
 }
 
+EG_EXPORT eg_status eg_device_count(eg_ctx* ctx, int32_t* count) {
+    return door::call(ctx, [count](eg_ctx& c) {
+        if (count == nullptr) door::refuse(EG_BAD_REQUEST, "eg_device_count: count is NULL");
+        *count = door::device_count(c);
+    });
+}
+
 // ---- not written in this build ---------------------------------------------
 
 EG_EXPORT eg_status eg_run_events(eg_ctx* ctx, eg_runner* runner, eg_plane* t_stop, eg_plane* status) {
     return door::call(ctx, [=](eg_ctx& c) { door::run_events(c, runner, t_stop, status); });
 }
-EG_EXPORT eg_status eg_device_count(eg_ctx* ctx, int32_t*) { return not_written(ctx, "eg_device_count"); }
 EG_EXPORT eg_status eg_device_props(eg_ctx* ctx, int32_t, struct eg_device_props*) {
     return not_written(ctx, "eg_device_props");
 }

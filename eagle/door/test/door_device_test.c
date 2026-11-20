@@ -466,6 +466,111 @@ static void set_count_device(eg_ctx* ctx, const char* dev_lib) {
     eg_unit_free(ctx, unit);
 }
 
+/* ---- host steps inside a device recording ---------------------------------------------------------------------------- */
+
+/* A one-dimensional host or device plane of @p n elements of type (@p code, @p bits) over @p data. */
+static eg_plane* wrap_typed(eg_ctx* ctx, struct tensor* t, void* data, uint8_t code, uint8_t bits, int64_t n, int cuda) {
+    eg_plane* p = wrap(ctx, t, data, 1, n, 0, cuda, 0);
+    if (p == NULL) return NULL;
+    eg_plane_free(ctx, p);    /* re-wrap with the element type: wrap() makes float64 */
+    t->managed.dl_tensor.dtype.code = code;
+    t->managed.dl_tensor.dtype.bits = bits;
+    p = NULL;
+    return eg_plane_wrap(ctx, &t->managed, &p) == EG_OK ? p : NULL;
+}
+
+/* A device plan, a host plan, a device plan recorded once: each replay runs the three in stream order. The host plan counts
+ * its launches in a host cell; the device plans chain y2 = 2 (2 x + 1) + 1. A host step whose launch is refused at the replay
+ * (an index count above its entries) reports FAULT naming it at the next eg_sync, once. The graph freed while replays are queued
+ * waits for them: their host steps run before the references go. */
+static void host_steps_in_graph(eg_ctx* ctx, const char* dev_lib, const char* host_lib) {
+    enum { HN = 64, REPLAYS = 3 };
+    eg_unit *dp = NULL, *tick = NULL, *prefix = NULL;
+    check(load(ctx, dev_lib, "dprefix", 0xD6, &dp) == EG_OK && load(ctx, host_lib, "tick", 0xB8, &tick) == EG_OK &&
+              load(ctx, host_lib, "prefix", 0x92, &prefix) == EG_OK,
+          "eg_unit_load dprefix (device), tick and prefix (host) for host steps in a device graph");
+    if (dp == NULL || tick == NULL || prefix == NULL) return;
+    double x[HN], got[HN], want[HN];
+    for (int i = 0; i < HN; ++i) x[i] = 0.5 * i - 7.0, want[i] = 2.0 * (2.0 * x[i] + 1.0) + 1.0;
+    uint32_t count = HN;
+    int64_t ticks = 0;
+    double *dx = dev_doubles(x, HN), *d1 = dev_doubles(NULL, HN), *d2 = dev_doubles(NULL, HN);
+    uint32_t* dc = NULL;
+    cudaMalloc((void**)&dc, sizeof(count));
+    cudaMemcpy(dc, &count, sizeof(count), cudaMemcpyHostToDevice);
+    struct tensor tx, t1, t2, tc, tt;
+    eg_plane *px = wrap(ctx, &tx, dx, 1, HN, 0, 1, 0), *p1 = wrap(ctx, &t1, d1, 1, HN, 0, 1, 0), *p2 = wrap(ctx, &t2, d2, 1, HN, 0, 1, 0),
+             *pc = wrap_typed(ctx, &tc, dc, kDLUInt, 32, 1, 1), *pt = wrap_typed(ctx, &tt, &ticks, kDLInt, 64, 1, 0);
+    eg_plan *a = NULL, *b = NULL, *h = NULL;
+    const int32_t slots[3] = { 0, 1, 2 }, cell_slot[1] = { 0 };
+    eg_plane* a_planes[3] = { p1, px, pc };
+    eg_plane* b_planes[3] = { p2, p1, pc };
+    eg_plane* h_planes[1] = { pt };
+    int ok = px && p1 && p2 && pc && pt && plan_n(ctx, dp, EG_STRUCTURE_DEVICE, HN, 0, NULL, NULL, &a) == EG_OK &&
+             plan_n(ctx, dp, EG_STRUCTURE_DEVICE, HN, 0, NULL, NULL, &b) == EG_OK && bind_planes(ctx, a, 3, slots, a_planes) == EG_OK &&
+             bind_planes(ctx, b, 3, slots, b_planes) == EG_OK && plan_n(ctx, tick, EG_STRUCTURE_HOST_SERIAL, 1, 0, NULL, NULL, &h) == EG_OK &&
+             bind_planes(ctx, h, 1, cell_slot, h_planes) == EG_OK;
+    check(ok, "host steps: two device plans and a host plan made and bound on a device context");
+    if (!ok) return;
+    /* the eager sequence, once */
+    ok = eg_launch(ctx, a, NULL) == EG_OK && eg_launch(ctx, h, NULL) == EG_OK && eg_launch(ctx, b, NULL) == EG_OK && eg_sync(ctx) == EG_OK;
+    cudaMemcpy(got, d2, sizeof(got), cudaMemcpyDeviceToHost);
+    ok = ok && ticks == 1 && memcmp(got, want, sizeof(got)) == 0;
+    check(ok, "host steps: the eager sequence (device plan, host plan, device plan) gives the chained values and one tick");
+    ticks = 0;
+    cudaMemset(d1, 0, sizeof(got));    /* the legacy stream is not ordered against the context's stream: settle the reset first */
+    cudaMemset(d2, 0, sizeof(got));
+    cudaDeviceSynchronize();
+    eg_graph* g = NULL;
+    ok = eg_record_begin(ctx) == EG_OK && eg_launch(ctx, a, NULL) == EG_OK && eg_launch(ctx, h, NULL) == EG_OK &&
+         eg_launch(ctx, b, NULL) == EG_OK && eg_record_end(ctx, &g) == EG_OK;
+    if (!ok) reason_has(ctx, "(the recording was refused)");
+    check(ok && ticks == 0, "host steps: a host launch recorded inside a device recording runs nothing at record time");
+    for (int k = 0; ok && k < REPLAYS; ++k) ok = eg_graph_launch(ctx, g) == EG_OK && eg_sync(ctx) == EG_OK;
+    cudaMemcpy(got, d2, sizeof(got), cudaMemcpyDeviceToHost);
+    int first_diff = -1;
+    for (int i = 0; i < HN && first_diff < 0; ++i)
+        if (memcmp(&got[i], &want[i], sizeof(double)) != 0) first_diff = i;
+    if (ticks != REPLAYS || first_diff >= 0)
+        printf("      ticks %lld (want %d), first differing value at %d: got %.17g want %.17g\n", (long long)ticks, REPLAYS, first_diff,
+               first_diff >= 0 ? got[first_diff] : 0.0, first_diff >= 0 ? want[first_diff] : 0.0);
+    check(ok && ticks == REPLAYS, "host steps: 3 replays of device plan, host plan, device plan: the host plan ran 3 times");
+    check(ok && first_diff < 0, "host steps: after the 3 replays the values equal the eager sequence bitwise");
+    /* freed while replays are queued */
+    ticks = 0;
+    ok = ok && eg_graph_launch(ctx, g) == EG_OK && eg_graph_launch(ctx, g) == EG_OK && eg_graph_launch(ctx, g) == EG_OK &&
+         eg_graph_free(ctx, g) == EG_OK && eg_sync(ctx) == EG_OK;
+    check(ok && ticks == REPLAYS, "host steps: a graph freed with 3 replays queued is safe: its host steps ran 3 times before the references went");
+    /* a failing step */
+    double hx[8] = { 1, 2, 3, 4, 5, 6, 7, 8 }, hy[8] = { 0 };
+    uint32_t hcount = 8;
+    struct tensor thx, thy, thc;
+    eg_plane *phx = wrap(ctx, &thx, hx, 1, 8, 0, 0, 0), *phy = wrap(ctx, &thy, hy, 1, 8, 0, 0, 0),
+             *phc = wrap_typed(ctx, &thc, &hcount, kDLUInt, 32, 1, 0);
+    eg_plane* f_planes[3] = { phy, phx, phc };
+    eg_plan* f = NULL;
+    eg_graph* gf = NULL;
+    ok = phx && phy && phc && plan_n(ctx, prefix, EG_STRUCTURE_HOST_SERIAL, 8, 0, NULL, NULL, &f) == EG_OK &&
+         bind_planes(ctx, f, 3, slots, f_planes) == EG_OK && eg_record_begin(ctx) == EG_OK && eg_launch(ctx, f, NULL) == EG_OK &&
+         eg_record_end(ctx, &gf) == EG_OK;
+    hcount = 9;    /* above the 8 entries: the host launch is refused when the step runs */
+    ok = ok && eg_graph_launch(ctx, gf) == EG_OK;
+    check(ok && refused(eg_sync(ctx), EG_FAULT, ctx, "eg_launch of unit 'prefix'") && reason_has(ctx, "index count 9"),
+          "host steps: a step refused at the replay reports FAULT at the next eg_sync, naming the step and the cause");
+    check(eg_sync(ctx) == EG_OK, "host steps: the failure is cleared once reported");
+    hcount = 8;
+    check(ok && eg_graph_launch(ctx, gf) == EG_OK && eg_sync(ctx) == EG_OK && hy[7] == 17.0, "host steps: the graph replays OK once the cause is gone");
+    if (gf) eg_graph_free(ctx, gf);
+    eg_plan_free(ctx, f);
+    eg_plan_free(ctx, h);
+    eg_plan_free(ctx, a);
+    eg_plan_free(ctx, b);
+    eg_plane_free(ctx, phx), eg_plane_free(ctx, phy), eg_plane_free(ctx, phc);
+    eg_plane_free(ctx, px), eg_plane_free(ctx, p1), eg_plane_free(ctx, p2), eg_plane_free(ctx, pc), eg_plane_free(ctx, pt);
+    eg_unit_free(ctx, dp), eg_unit_free(ctx, tick), eg_unit_free(ctx, prefix);
+    cudaFree(dx), cudaFree(d1), cudaFree(d2), cudaFree(dc);
+}
+
 /* eg_plane_new / eg_plane_dlpack on a device context: a DEVICE plane (kDLCUDA) and a PINNED plane (kDLCUDAHost) by their export fields and
  * the driver's own reading of the pointers; a DEVICE launch on made planes against the plain-C oracle (bitwise); the refusals of the
  * device kinds. */
@@ -1587,9 +1692,9 @@ int main(int argc, char** argv) {
     {   /* the device group on a host context of a door built with it */
         int32_t count = 0;
         check(eg_sync(host) == EG_OK && refused(eg_stream_use(host, 0), EG_BAD_REQUEST, host, "host-only context") &&
-                  refused(eg_device_count(host, &count), EG_NOT_WRITTEN, host, "not written in this build"),
+                  eg_device_count(host, &count) == EG_OK && count >= 1,
               "a host context of a door with the device group: eg_sync OK, eg_stream_use BAD_REQUEST (host-only context), "
-              "eg_device_count NOT_WRITTEN (not written in either build)");
+              "eg_device_count OK with a count of 1 or more");
     }
 
     /* Units. */
@@ -1737,6 +1842,7 @@ int main(int argc, char** argv) {
     set_count_device(ctx, dev_lib);
     lookup_device(ctx, dev_lib);
     figures_device(ctx, dev_lib);
+    host_steps_in_graph(ctx, dev_lib, host_lib);
     reset_device(ctx, dev_lib);
     check_segmented_device(ctx, dev_lib);
     check_auto_device(ctx, dev_lib);

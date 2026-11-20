@@ -5,9 +5,11 @@
 // an ordered tree of nodes instead of running; eg_graph_launch replays it in
 // C. A node holds a reference to each plan, runner and plane it names (the
 // plan, runner, transform plan and plane counts of slice 1), so a recorded graph outlives the
-// caller's handles; eg_graph_free drops them.
+// caller's handles; eg_graph_free drops them. In a device recording the same nodes become host nodes of the capture
+// (record_host_step): the graph holds them and their references until it is freed.
 #include "eagle/door/Context.h"
 #include "eagle/door/host/Ops.h"
+#include "eagle/door/device/Seam.h"
 #include "eagle/door/host/Team.h"
 
 #include <memory>
@@ -88,8 +90,72 @@ namespace door {
 
 namespace {
 
-/** @brief Record @p node when @p ctx is recording; false when it is not (the caller runs it). */
+void replay(eg_ctx& ctx, const std::vector<Node>& nodes);
+
+/** @brief One host step of a device graph: the recorded node, what it is called in a failure, and its context. */
+struct HostStep {
+    eg_ctx* ctx = nullptr;
+    std::vector<Node> node;                     ///< the one node it runs
+    std::string name;
+};
+
+/** @brief The step's words in a failure: the call that was recorded. */
+std::string describe(const Node& n) {
+    switch (n.kind) {
+        case Node::Launch: return "eg_launch of unit '" + n.plan->unit->name + "'";
+        case Node::Run: return "eg_run";
+        case Node::Reduce: return "eg_reduce";
+        case Node::Copy: return "eg_copy";
+        case Node::Fft: return "eg_fft_run";
+        case Node::Gemm: return "eg_gemm_run";
+        case Node::Cond: return "a conditional";
+    }
+    return "a host step";
+}
+
+/** @brief What the driver's host node runs at each replay, on a driver thread: the recorded step on the context's host
+ *  team. It makes no CUDA call (the driver forbids it inside a host node; the host steps make none) and never throws;
+ *  a failure is stored for the next eg_graph_launch or eg_sync. */
+void run_host_step(void* user, StepFailure& failure) noexcept {
+    const auto* step = static_cast<const HostStep*>(user);
+    try {
+        replay(*step->ctx, step->node);
+    } catch (const std::exception& e) {
+        failure.set(step->name + ": " + e.what());
+    } catch (...) {
+        failure.set(step->name + ": an unknown failure inside eagle");
+    }
+}
+
+/** @brief The graph is freed: drop the references the step holds. */
+void release_host_step(eg_ctx& ctx, void* user) {
+    const std::unique_ptr<HostStep> step(static_cast<HostStep*>(user));
+    release(ctx, step->node);
+}
+
+/** @brief Keep @p node as a host node of the device recording in scope, holding a reference to what it names. */
+void record_host_step(eg_ctx& ctx, Node&& node) {
+    auto step = std::make_unique<HostStep>();
+    step->ctx = &ctx;
+    step->name = describe(node);
+    step->node.push_back(std::move(node));
+    retain(step->node.front());
+    try {
+        device_record_host_step(ctx, run_host_step, step.get(), release_host_step);
+    } catch (...) {
+        release(ctx, step->node);
+        throw;
+    }
+    step.release();
+}
+
+/** @brief Record @p node when @p ctx is recording; false when it is not (the caller runs it). A device recording keeps
+ *  it as a host node of the capture. */
 bool record(eg_ctx& ctx, Node&& node) {
+    if (ctx.dev_rec != nullptr) {
+        record_host_step(ctx, std::move(node));
+        return true;
+    }
     if (ctx.rec == nullptr) return false;
     std::vector<Node>& list = ctx.rec->current();
     list.push_back(std::move(node));

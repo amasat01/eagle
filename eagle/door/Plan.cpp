@@ -908,8 +908,6 @@ void bind_raw(eg_plan_s& plan, int slot, void* data, std::uint64_t count) {
  *  queues one kernel launch per partition on the context's stream (eg_sync waits for them). */
 void launch(eg_ctx& ctx, eg_plan_s* plan, std::uint64_t* tiles) {
     check_handle(ctx.plans, plan, "plan");
-    if (plan->structure != EG_STRUCTURE_DEVICE)
-        device_quiet(ctx, "eg_launch of a host plan", EG_NOT_WRITTEN, kHostWorkInGraph);
     check_bound(*plan);
     if (plan->structure == EG_STRUCTURE_DEVICE) {
         if (ctx.dev_rec != nullptr) {    // captured on the stream in scope

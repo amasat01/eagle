@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <memory>
 #include <cstring>
 
 #include <dlfcn.h>
@@ -37,6 +38,7 @@ void device_open(eg_ctx&, std::int32_t device) {
            "): the device group is not built");
 }
 void device_close(eg_ctx&) noexcept {}
+std::int32_t device_count(eg_ctx&) { return 0; }
 void device_unit_load(eg_unit_s&, const eg_unit_meta&, void*) {}
 void device_unit_free(eg_unit_s&) noexcept {}
 void device_plan_check(const eg_ctx&, const eg_unit_s&) {
@@ -81,6 +83,7 @@ void device_run(eg_ctx&, eg_runner_s*, eg_run_report*) {}
 DeviceRun::~DeviceRun() = default;
 void device_record_begin(eg_ctx&) {}
 void device_record_launch(eg_ctx&, eg_plan_s&) {}
+void device_record_host_step(eg_ctx&, void (*)(void*, StepFailure&) noexcept, void*, void (*)(eg_ctx&, void*)) {}
 void device_record_end(eg_ctx&, eg_graph**) {}
 bool device_graph(const eg_ctx&, const eg_graph*) { return false; }
 void device_graph_launch(eg_ctx&, eg_graph*) {}
@@ -230,7 +233,17 @@ void* reorder_scratch(DeviceRun& r, std::int64_t n, const std::vector<DevicePlan
 
 /** @brief A capture in progress: the stream it is on, the plans it launched (one reference each) with their
  *  argument bytes at that launch, and the device frees asked for meanwhile, run when it ends. */
+/** @brief A host node of a device graph: the function the driver calls at each replay and what it runs. */
+struct HostHook {
+    void (*run)(void*, StepFailure&) noexcept;
+    void* user;
+    void (*release)(eg_ctx&, void*);
+    std::shared_ptr<StepFailure> failure;
+};
+
 struct DeviceRecording {
+    std::vector<std::unique_ptr<HostHook>> hooks;       ///< the host nodes captured so far
+    std::shared_ptr<StepFailure> failure;               ///< shared by the hooks and, once recorded, the graph
     DeviceCapture* capture = nullptr;
     std::uint64_t stream = 0;
     std::vector<eg_plan_s*> plans;
@@ -241,6 +254,8 @@ struct DeviceRecording {
 
 /** @brief A recorded device graph: the instantiated capture and the plans whose bindings it holds by value. */
 struct DeviceGraph {
+    std::vector<std::unique_ptr<HostHook>> hooks;       ///< its host nodes, each holding the references its step runs
+    std::shared_ptr<StepFailure> failure;               ///< the first failure of a host node, kept for the next launch or sync
     DeviceLoop* loop = nullptr;
     std::vector<eg_plan_s*> plans;
     std::vector<eg_fft_s*> ffts;    ///< the transform plans it runs, one reference each
@@ -284,21 +299,76 @@ void run_later(eg_ctx& ctx, DeviceRecording& rec) noexcept {
     (void)ctx;
 }
 
+
+/** @brief The driver's host-function call of a host node: run its step. */
+void CUDA_CB host_hook_run(void* data) {
+    auto* hook = static_cast<HostHook*>(data);
+    hook->run(hook->user, *hook->failure);
+}
+
+/** @brief Drop what the host nodes @p hooks hold; the stream they ran on is idle or never ran them. */
+void release_hooks(eg_ctx& ctx, std::vector<std::unique_ptr<HostHook>>& hooks) noexcept {
+    for (std::unique_ptr<HostHook>& h : hooks) {
+        try {
+            h->release(ctx, h->user);
+        } catch (...) {
+        }
+    }
+    hooks.clear();
+}
+
+/** @brief Wait until the context's stream is idle, so no host node runs after its references are dropped. */
+void drain_stream(eg_ctx& ctx) {
+    EG_DRIVER(cuStreamSynchronize);
+    Current current(ctx.dev);
+    check(cuStreamSynchronize_(reinterpret_cast<CUstream>(ctx.dev.stream)), "cuStreamSynchronize");
+}
+
+/** @brief Refuse FAULT with the first failure a host node of @p failure kept, and clear it. */
+void raise_step_failure(StepFailure& failure) {
+    std::string why;
+    if (failure.take(why)) refuse(EG_FAULT, "a host step of a device graph failed: " + why);
+}
+
 }  // namespace
+
+/** @brief The devices the driver sees, or -1 with @p why (the runtime's words) when no driver can be opened. A driver
+ *  whose cuInit reports no device sees 0; any other failure after the driver opened is a FAULT. */
+std::int32_t driver_device_count(std::string& why) {
+    try {
+        EG_DRIVER(cuInit);
+        EG_DRIVER(cuDeviceGetCount);
+        const CUresult init = cuInit_(0);
+        if (init == CUDA_ERROR_NO_DEVICE) return 0;
+        check(init, "cuInit");
+        int count = 0;
+        check(cuDeviceGetCount_(&count), "cuDeviceGetCount");
+        return count;
+    } catch (const std::runtime_error& e) {
+        if (dynamic_cast<const Refusal*>(&e) != nullptr) throw;
+        why = e.what();
+        return -1;
+    }
+}
+
+/** @brief eg_device_count: the devices the driver sees, 0 when there is no usable driver. */
+std::int32_t device_count(eg_ctx&) {
+    std::string why;
+    return std::max<std::int32_t>(0, driver_device_count(why));
+}
 
 /** @brief EG_CTX_DEVICE: retain the device's primary context, make the context's stream, read the launch facts. */
 void device_open(eg_ctx& ctx, std::int32_t device) {
-    EG_DRIVER(cuInit);
-    EG_DRIVER(cuDeviceGetCount);
-    EG_DRIVER(cuDeviceGet);
-    EG_DRIVER(cuDevicePrimaryCtxRetain);
-    EG_DRIVER(cuStreamCreate);
-    check(cuInit_(0), "cuInit");
-    int count = 0;
-    check(cuDeviceGetCount_(&count), "cuDeviceGetCount");
+    std::string why;
+    const std::int32_t count = driver_device_count(why);
+    if (count < 0)
+        refuse(EG_BAD_REQUEST, "eg_ctx_settings EG_CTX_DEVICE: no CUDA driver could be opened (" + why + ")");
     if (device >= count)
         refuse(EG_BAD_REQUEST, "eg_ctx_settings.device " + std::to_string(device) + ": the driver sees " +
                std::to_string(count) + " device(s)");
+    EG_DRIVER(cuDeviceGet);
+    EG_DRIVER(cuDevicePrimaryCtxRetain);
+    EG_DRIVER(cuStreamCreate);
     DeviceState& d = ctx.dev;
     CUdevice dev = 0;
     check(cuDeviceGet_(&dev, device), "cuDeviceGet");
@@ -1525,6 +1595,20 @@ void device_record_launch(eg_ctx& ctx, eg_plan_s& plan) {
     launch_on(plan, rec.stream);
 }
 
+/** @brief A host node on the capture in scope (device/Seam.h). Nothing in it makes a CUDA call. */
+void device_record_host_step(eg_ctx& ctx, void (*run)(void*, StepFailure&) noexcept, void* user, void (*release)(eg_ctx&, void*)) {
+    DeviceRecording& rec = *ctx.dev_rec;
+    EG_DRIVER(cuLaunchHostFunc);
+    if (!rec.failure) rec.failure = std::make_shared<StepFailure>();
+    rec.hooks.push_back(std::make_unique<HostHook>(HostHook{ run, user, release, rec.failure }));
+    Current current(ctx.dev);
+    const CUresult r = cuLaunchHostFunc_(reinterpret_cast<CUstream>(rec.stream), &host_hook_run, rec.hooks.back().get());
+    if (r != CUDA_SUCCESS) {
+        rec.hooks.pop_back();    // the caller still owns the step it passed
+        check(r, "cuLaunchHostFunc");
+    }
+}
+
 /** @brief eg_record_end on a device context: end the capture and instantiate it (FAULT when the capture failed). */
 void device_record_end(eg_ctx& ctx, eg_graph** out) {
     if (out == nullptr) refuse(EG_BAD_REQUEST, "eg_record_end: out is NULL");
@@ -1544,6 +1628,7 @@ void device_record_end(eg_ctx& ctx, eg_graph** out) {
     rec->capture = nullptr;
     run_later(ctx, *rec);
     if (loop == nullptr) {
+        release_hooks(ctx, rec->hooks);
         for (eg_plan_s* p : rec->plans) plan_release(ctx, p);
         for (eg_fft_s* f : rec->ffts) fft_release(ctx, f);
         refuse(EG_FAULT, "eg_record_end: the device capture failed: " + failed);
@@ -1553,6 +1638,8 @@ void device_record_end(eg_ctx& ctx, eg_graph** out) {
     graph->plans = std::move(rec->plans);
     graph->ffts = std::move(rec->ffts);
     graph->bound = std::move(rec->bound);
+    graph->hooks = std::move(rec->hooks);
+    graph->failure = std::move(rec->failure);
     ctx.dev_graphs.insert(graph.get());
     *out = reinterpret_cast<eg_graph*>(graph.release());
 }
@@ -1567,6 +1654,7 @@ bool device_graph(const eg_ctx& ctx, const eg_graph* graph) {
 void device_graph_launch(eg_ctx& ctx, eg_graph* handle) {
     auto* graph = reinterpret_cast<DeviceGraph*>(handle);
     device_quiet(ctx, "eg_graph_launch", EG_NOT_WRITTEN, "a graph inside a device graph is not written in this build of the door");
+    if (graph->failure) raise_step_failure(*graph->failure);    // a host node of an earlier replay failed
     for (std::size_t i = 0; i < graph->plans.size(); ++i)
         if (binding_bytes(*graph->plans[i]) != graph->bound[i])
             refuse(EG_BAD_REQUEST, "eg_graph_launch: a plan of unit '" + graph->plans[i]->unit->name + "' was rebound since "
@@ -1580,6 +1668,13 @@ void device_graph_free(eg_ctx& ctx, eg_graph* handle) {
     auto* graph = reinterpret_cast<DeviceGraph*>(handle);
     ctx.dev_graphs.erase(graph);
     const std::unique_ptr<DeviceGraph> owned(graph);
+    if (!graph->hooks.empty()) {    // replays may still be queued: their host nodes run before the references go
+        try {
+            drain_stream(ctx);
+        } catch (...) {
+        }
+        release_hooks(ctx, graph->hooks);
+    }
     for (eg_plan_s* p : graph->plans) plan_release(ctx, p);
     for (eg_fft_s* f : graph->ffts) fft_release(ctx, f);
     eg_ctx* c = &ctx;
@@ -1604,6 +1699,7 @@ void device_graphs_drop(eg_ctx& ctx) noexcept {
                 run_later(ctx, *rec);
             } catch (...) {
             }
+            release_hooks(ctx, rec->hooks);
         }
     }
     for (DeviceGraph* g : ctx.dev_graphs) {
@@ -1612,6 +1708,13 @@ void device_graphs_drop(eg_ctx& ctx) noexcept {
                 Current current(ctx.dev);
                 loop_free(g->loop);
             } catch (...) {
+            }
+            if (!g->hooks.empty()) {
+                try {
+                    drain_stream(ctx);
+                } catch (...) {
+                }
+                release_hooks(ctx, g->hooks);
             }
         }
         delete g;
@@ -1652,6 +1755,8 @@ void device_sync(eg_ctx& ctx) {
     EG_DRIVER(cuStreamSynchronize);
     Current current(ctx.dev);
     check(cuStreamSynchronize_(reinterpret_cast<CUstream>(ctx.dev.stream)), "eg_sync: cuStreamSynchronize");
+    for (DeviceGraph* g : ctx.dev_graphs)    // a host node of a replay that has run now reports its failure
+        if (g->failure) raise_step_failure(*g->failure);
 }
 
 #undef EG_DRIVER

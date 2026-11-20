@@ -628,7 +628,7 @@ $(DEVICE_FIXTURE): test/fixture_device.c $(OUT)/fixture_device.fatbin $(OUT)/fat
 $(DEVICE_TEST): test/door_device_test.c $(LIB) | check-cuda
 	$(CC) $(DEPFLAGS) $(CFLAGS_C) -DEG_TEST_DIR='"$(CURDIR)/test"' -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
 
-device: check-cuda symbols $(FIXTURE) $(DEVICE_FIXTURE) $(DEVICE_TEST) $(GEMM_FIXTURE) $(GEMM_DEVICE_TEST) $(GEMM_ROUTE_TEST) $(NO_CUBLAS)
+device: check-cuda symbols $(FIXTURE) $(FIXTURE_BAD) $(TEST) $(DEVICE_FIXTURE) $(DEVICE_TEST) $(GEMM_FIXTURE) $(GEMM_DEVICE_TEST) $(GEMM_ROUTE_TEST) $(NO_CUBLAS)
 
 PAIR_DEVICE_TEST := $(OUT)/pair_device_test
 RUNNER_PAIR_TEST := $(OUT)/runner_pair_test
