@@ -66,6 +66,11 @@ PAIR_HOST_FLAGS ?= -O3 -ffp-contract=fast -fno-math-errno -march=native -mprefer
 
 CUDA ?=
 NVCC ?= $(CUDA)/bin/nvcc
+# CUDA_ARCHS: the GPU architectures the library's device code is built for (SASS for each, plus PTX of the newest so a later
+# GPU can still JIT it); the family's default list. Test fixtures stay sm_61 images: they run on the test machine only.
+CUDA_ARCHS ?= 61 70 80 90
+CUDA_GENCODE = $(foreach a,$(CUDA_ARCHS),-gencode arch=compute_$(a),code=sm_$(a)) \
+  -gencode arch=compute_$(lastword $(CUDA_ARCHS)),code=compute_$(lastword $(CUDA_ARCHS))
 PAIR_CUDA_WING_DIR ?=
 CUDA_WING_FACTS ?= $(PAIR_CUDA_WING_DIR)/raptor_facts.h
 PAIR_DEVICE_UNITS := mv osc osc_x4 ksum_c fixed_count _osc _osc_x4 _gosc _plain kg_fwd kq oscillator bosc g disp_r0_k2_pred disp_r0_k2_switch disp_r0_k5_pred disp_r0_k5_switch disp_r0_k16_pred disp_r0_k16_switch
@@ -141,7 +146,7 @@ $(OUT)/device/Device.o: device/Device.cpp | check-inputs
 # A device runner's captured loop over eagle's capture seam (CUDA builds only).
 $(OUT)/device/Loop.o: device/Loop.cu | check-inputs check-cuda
 	@mkdir -p $(dir $@)
-	$(NVCC) -std=c++20 -O2 -arch=sm_61 -Wno-deprecated-gpu-targets -Werror all-warnings -ccbin $(CXX) \
+	$(NVCC) -std=c++20 -O2 $(CUDA_GENCODE) -Wno-deprecated-gpu-targets -Werror all-warnings -ccbin $(CXX) \
 	  -Xcompiler -fPIC,-fvisibility=hidden,-Wall,-Wextra -DAETHER_HAS_CUDA -diag-suppress=20050 -include $(CUDA_WING_FACTS) -I$(ROOT) -I$(AETHER_INCLUDE) -MMD -MP -c $< -o $@
 
 # Darwin: the exported-symbols list is door.map's global pattern with the C symbol underscore.
