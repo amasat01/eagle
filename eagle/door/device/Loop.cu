@@ -19,7 +19,9 @@
 #include "eagle/events/Sensitivity.h"
 
 #include <algorithm>
+#include <exception>
 #include <memory>
+#include <thread>
 
 namespace eagle {
 namespace door {
@@ -526,15 +528,28 @@ DevicePool* pool_new(unsigned streams, unsigned events) {
 
 void pool_free(DevicePool* pool) noexcept { delete pool; }
 
-void* scratch_alloc(DevicePool* pool, std::size_t bytes) {
+void* scratch_alloc(DevicePool* pool, std::size_t bytes, int device) {
+    // The capturing thread may not allocate (cudaErrorStreamCaptureUnsupported); a thread of its own may, because a thread-local capture
+    // restricts only its own thread. The side stream is not captured and is settled before the block is used.
     const auto side = reinterpret_cast<std::uint64_t>(pool->side.cuda());
-    void* data = alloc_async(side, bytes, true);
-    try {
-        stream_wait(side);
-    } catch (...) {
-        free_async(side, side, data);
-        throw;
-    }
+    void* data = nullptr;
+    std::exception_ptr failure;
+    std::thread helper([&] {
+        try {
+            EAGLE_CHECK_ALWAYS(cudaSetDevice(device));
+            data = alloc_async(side, bytes, true);
+            try {
+                stream_wait(side);
+            } catch (...) {
+                free_async(side, side, data);
+                throw;
+            }
+        } catch (...) {
+            failure = std::current_exception();
+        }
+    });
+    helper.join();
+    if (failure) std::rethrow_exception(failure);
     return data;
 }
 

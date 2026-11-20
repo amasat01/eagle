@@ -1952,7 +1952,7 @@ const Frame* innermost_while(const DeviceRecording& rec, bool& nested) {
 void* device_record_scratch(eg_ctx& ctx, std::size_t bytes) {
     DeviceRecording& rec = recording_of(ctx);
     Current current(ctx.dev);
-    void* data = scratch_alloc(rec.pool, bytes);
+    void* data = scratch_alloc(rec.pool, bytes, ctx.dev.ordinal);
     rec.scratch.push_back(data);
     return data;
 }

@@ -194,9 +194,9 @@ void pool_free(DevicePool* pool) noexcept;
 /** @brief Whether @p pool still has @p streams streams and @p events events to hand out. */
 bool pool_has(const DevicePool* pool, unsigned streams, unsigned events);
 
-/** @brief Zeroed device memory of @p bytes for the recording @p pool belongs to, made while its capture is open: allocated and settled on a stream
- *  of its own that is not being captured, so it is ready for the captured work on return. Free it with scratch_free. */
-void* scratch_alloc(DevicePool* pool, std::size_t bytes);
+/** @brief Zeroed device memory of @p bytes for the recording @p pool belongs to, made while its capture is open: allocated by a thread of its own (the capturing
+ *  thread may not allocate) on a stream that is not captured, and settled, so it is ready for the captured work on return; @p device is the context's. Free it with scratch_free. */
+void* scratch_alloc(DevicePool* pool, std::size_t bytes, int device);
 
 /** @brief Queue on @p stream the free of scratch_alloc memory, after the work queued there. */
 void scratch_free(std::uint64_t stream, void* data) noexcept;
