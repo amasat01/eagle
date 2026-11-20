@@ -1285,21 +1285,44 @@ void device_reduce_leaf(eg_ctx& ctx, const host::ReduceOp& r) {
     reduce_step(ctx.dev.stream, r.code, r.op == EG_REDUCE_ALL ? 3 : r.op, at(r.in), r.n, r.cols, at(r.out), at(r.comp), r.pair);
 }
 
+/** @brief Whether @p p is page-locked host memory the device can DMA: a pinned plane the door made, or any range the driver knows as host memory (registered or allocated pinned). */
+static bool host_pinned(const eg_plane_s& p) {
+    if (p.pinned) return true;
+    EG_DRIVER(cuPointerGetAttribute);
+    const DLTensor& t = p.tensor->dl_tensor;
+    unsigned int kind = 0;
+    const CUdeviceptr at = reinterpret_cast<CUdeviceptr>(static_cast<char*>(t.data) + t.byte_offset);
+    return cuPointerGetAttribute_(&kind, CU_POINTER_ATTRIBUTE_MEMORY_TYPE, at) == CUDA_SUCCESS && kind == CU_MEMORYTYPE_HOST;
+}
+
 /** @brief eg_copy with at least one device plane: checked as the host's, then a copy on the context's stream. Two device
  *  planes copy device to device (planes of one range of memory copy nothing; partly overlapping ones are refused). One
  *  host plane, pageable or pinned, copies across and waits, so the host bytes are safe to reuse on return. */
 void device_copy(eg_ctx& ctx, eg_plane_s* src, eg_plane_s* dst) {
     host::copy_check(ctx, src, dst);
-    Node leaf;
-    leaf.kind = Node::Copy;
-    leaf.src = src;
-    leaf.dst = dst;
-    note_leaf(ctx, "eg_copy", { { src, 0, -1, "src" }, { dst, 1, -1, "dst" } }, std::move(leaf));
     const DLTensor& s = src->tensor->dl_tensor;
     const DLTensor& t = dst->tensor->dl_tensor;
     char *ps = static_cast<char*>(s.data) + s.byte_offset, *pd = static_cast<char*>(t.data) + t.byte_offset;
     const std::size_t bytes = static_cast<std::size_t>(elements(s)) * (s.dtype.bits / 8);
+    const bool crosses = (s.device.device_type == kDLCPU) != (t.device.device_type == kDLCPU);
+    if (crosses && ctx.dev_rec != nullptr) {    // a captured memcpy node needs page-locked host memory; refuse before the recording changes
+        const eg_plane_s* host_side = s.device.device_type == kDLCPU ? src : dst;
+        if (!host_pinned(*host_side))
+            refuse(EG_BAD_REQUEST, std::string("eg_copy while recording: the host plane (") + (host_side == src ? "src" : "dst") + ") is not page-locked, and a copy captured in a device graph "
+                   "reads or writes it by DMA when the graph runs; make the host plane with eg_plane_new EG_MEM_PINNED, or copy before or after the recording");
+    }
+    Node leaf;
+    leaf.kind = Node::Copy;
+    leaf.src = src;
+    leaf.dst = dst;
+    note_leaf(ctx, crosses ? (s.device.device_type == kDLCPU ? "eg_copy (host to device)" : "eg_copy (device to host)") : "eg_copy", { { src, 0, -1, "src" }, { dst, 1, -1, "dst" } }, std::move(leaf));
     if (bytes == 0 || ps == pd) return;
+    if (crosses && ctx.dev_rec != nullptr) {    // one memcpy node of the capture, in the direction of the planes; the caller keeps the host plane alive until the graph has run
+        EG_DRIVER(cuMemcpyAsync);
+        Current current(ctx.dev);
+        check(cuMemcpyAsync_(reinterpret_cast<CUdeviceptr>(pd), reinterpret_cast<CUdeviceptr>(ps), bytes, reinterpret_cast<CUstream>(ctx.dev.stream)), "cuMemcpyAsync");
+        return;
+    }
     if (s.device.device_type == kDLCPU) {
         Current current(ctx.dev);
         write_bytes(ctx.dev.stream, pd, ps, bytes);
@@ -2383,6 +2406,10 @@ void device_record_end(eg_ctx& ctx, const eg_record_end_desc* desc, eg_graph** o
         diff_wanted = (d.flags & EG_RECORD_DIFF) != 0;
         if (!diff_wanted && d.n_vjps != 0) refuse(EG_BAD_REQUEST, "eg_record_end_desc.n_vjps: vjps without EG_RECORD_DIFF");
         if (diff_wanted) {                       // a refusal leaves the recording open, as the host's does
+            for (const Op& op : ctx.dev_rec->log)
+                if (op.kind == Op::Leaf && op.leaf.kind == Node::Copy &&
+                    (op.leaf.src->tensor->dl_tensor.device.device_type == kDLCPU) != (op.leaf.dst->tensor->dl_tensor.device.device_type == kDLCPU))
+                    refuse(EG_NOT_WRITTEN, "eg_record_end: a host<->device eg_copy in an EG_RECORD_DIFF recording is not written: the adjoint it hands back would cross memory kinds");
             reverse = ctx.dev_rec->shape.reverse_plan();
             if (ctx.dev_rec->shape.leaves() != static_cast<int>(ctx.dev_rec->plans.size() + ctx.dev_rec->others))
                 refuse(EG_NOT_WRITTEN, "eg_record_end: a call that runs on the host in a device recording (a host plan, the copy or reduce of host planes) is not written in EG_RECORD_DIFF");

@@ -670,6 +670,81 @@ static void host_nodes_device(eg_ctx* ctx, const char* dev_lib) {
     cudaFree(dx), cudaFree(d1), cudaFree(d2), cudaFree(dc);
 }
 
+/* ---- host<->device copies in a device recording ---- */
+
+/* True when @p e is cudaSuccess; otherwise the row fails with @p what and the CUDA error string. */
+static int cuda_ok(cudaError_t e, const char* what) {
+    if (e == cudaSuccess) return 1;
+    char msg[200];
+    snprintf(msg, sizeof(msg), "%s failed: %s", what, cudaGetErrorString(e));
+    check(0, msg);
+    return 0;
+}
+
+/* H2D copy of x -> launch (p1 = 2 x + 1) -> D2H copy of p1, recorded and replayed twice with the host input changed between the replays, against the same
+ * sequence done eagerly (bitwise); a pageable host plane is refused by name with the recording left open; a graph ended with EG_RECORD_DIFF that holds such a
+ * copy is refused NOT_WRITTEN; the description shows the copies as COPY nodes over the host and device planes. */
+static void host_device_copies(eg_ctx* ctx, const char* dev_lib) {
+    enum { HN = 64 };
+    eg_unit* dp = NULL;
+    check(load(ctx, dev_lib, "dprefix", 0xD6, &dp) == EG_OK, "eg_unit_load dprefix for host<->device copies in a device graph");
+    if (dp == NULL) return;
+    double *hx = NULL, *hy = NULL;
+    double pageable[HN], want[2][HN];
+    double *dx = dev_doubles(NULL, HN), *d1 = dev_doubles(NULL, HN);
+    uint32_t count = HN, *dc = NULL;
+    int ok = cuda_ok(cudaMallocHost((void**)&hx, sizeof(double) * HN), "cudaMallocHost in") && cuda_ok(cudaMallocHost((void**)&hy, sizeof(double) * HN), "cudaMallocHost out") &&
+             cuda_ok(cudaMalloc((void**)&dc, sizeof(count)), "cudaMalloc count") && cuda_ok(cudaMemcpy(dc, &count, sizeof(count), cudaMemcpyHostToDevice), "cudaMemcpy count");
+    struct tensor thx, thy, tpg, tdx, td1, tc;
+    eg_plane *phx = ok ? wrap(ctx, &thx, hx, 1, HN, 0, 0, 0) : NULL, *phy = ok ? wrap(ctx, &thy, hy, 1, HN, 0, 0, 0) : NULL, *ppg = wrap(ctx, &tpg, pageable, 1, HN, 0, 0, 0);
+    eg_plane *pdx = wrap(ctx, &tdx, dx, 1, HN, 0, 1, 0), *pd1 = wrap(ctx, &td1, d1, 1, HN, 0, 1, 0), *pc = wrap_typed(ctx, &tc, dc, kDLUInt, 32, 1, 1);
+    eg_plan* a = NULL;
+    const int32_t slots[3] = { 0, 1, 2 };
+    eg_plane* a_planes[3] = { pd1, pdx, pc };
+    ok = ok && phx && phy && ppg && pdx && pd1 && pc && plan_n(ctx, dp, EG_STRUCTURE_DEVICE, HN, 0, NULL, NULL, &a) == EG_OK && bind_planes(ctx, a, 3, slots, a_planes) == EG_OK;
+    check(ok, "host<->device copies: a pinned pair, a pageable plane, device planes and a plan made");
+    if (!ok) return;
+    double inputs[2][HN];
+    for (int k = 0; k < 2; ++k)
+        for (int i = 0; i < HN; ++i) inputs[k][i] = 0.25 * i - 3.0 + 10.0 * k;
+    for (int k = 0; k < 2; ++k) {    /* the eager sequence, once per input */
+        memcpy(hx, inputs[k], sizeof(inputs[k]));
+        ok = ok && eg_copy(ctx, phx, pdx) == EG_OK && eg_launch(ctx, a, NULL) == EG_OK && eg_copy(ctx, pd1, phy) == EG_OK && eg_sync(ctx) == EG_OK;
+        memcpy(want[k], hy, sizeof(want[k]));
+    }
+    check(ok && want[0][1] == 2.0 * inputs[0][1] + 1.0 && want[1][5] == 2.0 * inputs[1][5] + 1.0, "an eager host->device copy, a launch and a device->host copy give the closed form");
+    memset(hy, 0, sizeof(double) * HN);
+    eg_graph* g = NULL;
+    ok = eg_record_begin(ctx) == EG_OK;
+    const int refused_pageable = ok && refused(eg_copy(ctx, ppg, pdx), EG_BAD_REQUEST, ctx, "not page-locked") && reason_has(ctx, "EG_MEM_PINNED");
+    ok = ok && eg_copy(ctx, phx, pdx) == EG_OK && eg_launch(ctx, a, NULL) == EG_OK && eg_copy(ctx, pd1, phy) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK;
+    check(ok && refused_pageable, "a pageable host plane in a copy while recording is refused BAD_REQUEST by name with EG_MEM_PINNED as the way out; the recording stays open and ends");
+    for (int k = 0; ok && k < 2; ++k) {    /* a replay reads the host input as it is when the graph runs */
+        memcpy(hx, inputs[k], sizeof(inputs[k]));
+        ok = eg_graph_launch(ctx, g) == EG_OK && eg_sync(ctx) == EG_OK && memcmp(hy, want[k], sizeof(want[k])) == 0;
+    }
+    check(ok, "H2D copy -> launch -> D2H copy recorded in a device graph and replayed twice on changing host input: the host output equals the eager sequence, bitwise");
+    struct eg_graph_description d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    ok = ok && eg_graph_describe(ctx, g, &d) == EG_OK && d.n_nodes == 3 && d.nodes[0].kind == EG_GNODE_COPY && d.nodes[0].planes[0] == phx && d.nodes[0].planes[1] == pdx &&
+         d.nodes[2].kind == EG_GNODE_COPY && d.nodes[2].planes[0] == pd1 && d.nodes[2].planes[1] == phy;
+    check(ok, "eg_graph_describe: the host->device and device->host copies are COPY nodes over their host and device planes");
+    eg_graph_free(ctx, g);
+    ok = eg_record_begin(ctx) == EG_OK && eg_copy(ctx, phx, pdx) == EG_OK;
+    eg_graph* none = NULL;
+    struct eg_record_end_desc ed;
+    memset(&ed, 0, sizeof(ed));
+    ed.struct_size = sizeof(ed);
+    ed.flags = EG_RECORD_DIFF;
+    check(ok && refused(eg_record_end(ctx, &ed, &none), EG_NOT_WRITTEN, ctx, "would cross memory kinds") && none == NULL && eg_record_abort(ctx) == EG_OK,
+          "a graph ended with EG_RECORD_DIFF that holds a host<->device copy is refused NOT_WRITTEN by name");
+    eg_plan_free(ctx, a);
+    eg_plane_free(ctx, phx), eg_plane_free(ctx, phy), eg_plane_free(ctx, ppg), eg_plane_free(ctx, pdx), eg_plane_free(ctx, pd1), eg_plane_free(ctx, pc);
+    eg_unit_free(ctx, dp);
+    cudaFreeHost(hx), cudaFreeHost(hy), cudaFree(dx), cudaFree(d1), cudaFree(dc);
+}
+
 /* A launch writes each cell as the reduction over the lanes it RAN: a DEVICE prefix set of live count 8, 3, 0, 5, 0 over a SUM cell of rows
  * of 4 gives the sum of the first count lanes (0 for none), never the cell's old value or a stale row. */
 static void cell_rows_device(eg_ctx* ctx, const char* dev_lib) {
@@ -2034,13 +2109,13 @@ static void copy_across(eg_ctx* ctx) {
             eg_graph* g = NULL;
             cudaMemset(dev_b, 0, bytes);
             ok = eg_record_begin(ctx) == EG_OK &&
-                 refused(eg_copy(ctx, h_in, d_a), EG_NOT_WRITTEN, ctx, "a host<->device copy is not recordable; copy before or after the recording") &&
-                 refused(eg_copy(ctx, d_a, h_out), EG_NOT_WRITTEN, ctx, "not recordable") && eg_copy(ctx, d_a, d_b) == EG_OK &&
+                 refused(eg_copy(ctx, h_in, d_a), EG_BAD_REQUEST, ctx, "is not page-locked") &&
+                 refused(eg_copy(ctx, d_a, h_out), EG_BAD_REQUEST, ctx, "EG_MEM_PINNED") && eg_copy(ctx, d_a, d_b) == EG_OK &&
                  eg_record_end(ctx, NULL, &g) == EG_OK;
             ok = ok && eg_graph_launch(ctx, g) == EG_OK && eg_sync(ctx) == EG_OK;
             unsigned char* back = calloc(bytes, 1);
             ok = ok && back && cudaMemcpy(back, dev_b, bytes, cudaMemcpyDeviceToHost) == cudaSuccess && memcmp(back, in, bytes) == 0;
-            check(ok, "inside a recording a host<->device eg_copy is refused NOT_WRITTEN by name and a device -> device one records and replays");
+            check(ok, "inside a recording a host<->device eg_copy of a pageable host plane is refused BAD_REQUEST by name and a device -> device one records and replays");
             free(back);
             if (g) eg_graph_free(ctx, g);
         }
@@ -2641,6 +2716,7 @@ int main(int argc, char** argv) {
     figures_device(ctx, dev_lib);
     host_steps_in_graph(ctx, dev_lib, host_lib);
     host_nodes_device(ctx, dev_lib);
+    host_device_copies(ctx, dev_lib);
     cell_rows_device(ctx, dev_lib);
     reset_device(ctx, dev_lib);
     step_graph_device(ctx, dev_lib);

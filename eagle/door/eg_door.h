@@ -1011,11 +1011,15 @@ eg_status eg_reduce(eg_ctx* ctx, const struct eg_reduce_desc* desc);
  * device copy across, either way, on the context's stream, and the call
  * returns once the copy has finished: the host plane may be pageable or
  * pinned and is the caller's again on return. ``eg_sync`` orders it like any
- * op. A same-side copy is recordable; a host<->device copy is not: inside a
- * recording it is refused NOT_WRITTEN, so copy before or after the recording.
+ * op. Recorded on a device context, a same-side copy is kept as it is, and a host<->device copy is one memcpy node of the capture (as eagle's
+ * Python graphs held ``eagle.copy``: ``_graph_kinds.py`` copy node, ``_transfer.copy_run``): it does not wait, it reads or writes the host plane by DMA
+ * when the graph runs, so the host plane must be page-locked (a plane made with ``eg_plane_new`` EG_MEM_PINNED, or a range the driver knows as pinned) and
+ * stays the caller's, alive until the graph has run; a pageable host plane is refused BAD_REQUEST by name, the recording left open, with the way out in the
+ * reason (``eg_plane_new`` of EG_MEM_HOST is pageable). ``eg_graph_describe`` shows it as an EG_GNODE_COPY node reading ``src`` and writing ``dst``: the
+ * direction is the side of each plane (kDLCPU or kDLCUDAHost against kDLCUDA). A graph ended with EG_RECORD_DIFF that holds such a copy is refused
+ * NOT_WRITTEN at ``eg_record_end``: the adjoint it hands back would cross memory kinds.
  * Replaces: ``_transfer`` copy nodes.
- * Status: OK; BAD_REQUEST (shape, dtype, access); NOT_WRITTEN (a host<->device
- * copy while recording).
+ * Status: OK; BAD_REQUEST (shape, dtype, access, a pageable host plane in a recording).
  */
 eg_status eg_copy(eg_ctx* ctx, eg_plane* src, eg_plane* dst);
 
