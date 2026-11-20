@@ -225,16 +225,28 @@ static void copy_rows(eg_ctx* ctx, const char* dir) {
         ov = eg_plane_wrap(ctx, &o2.t.managed, &o2.p) == EG_OK;
     }
     check(ov && eg_copy(ctx, o1.p, o2.p) == EG_BAD_REQUEST && reason_has(ctx, "overlap"), "eg_copy: partly overlapping device planes refused BAD_REQUEST");
-    /* recording on a device context: the host-side operations are refused by name */
+    /* recording on a device context: a host<->device copy is refused by name; an eg_reduce of device planes is recorded as a captured reduce, and a replay gives
+     * the output the same reduce run eagerly gives (same code, same data) */
+    struct dplane rin = { 0 }, eager = { 0 }, recorded = { 0 };
+    uint64_t want = 0, got = 0;
+    eg_graph* g = NULL;
+    const int planes_ok = ok && dplane_new(ctx, &rin, 2, 1, N, kDLFloat, 64, x) && dplane_new(ctx, &eager, 1, 1, 1, kDLFloat, 64, NULL) && dplane_new(ctx, &recorded, 1, 1, 1, kDLFloat, 64, NULL);
     struct eg_reduce_desc d;
     memset(&d, 0, sizeof(d));
     d.struct_size = sizeof(d);
-    d.in = a.p;
-    d.out = b.p;
-    eg_graph* g = NULL;
-    check(ok && hp && eg_record_begin(ctx) == EG_OK && eg_copy(ctx, a.p, hp) == EG_NOT_WRITTEN && reason_has(ctx, "not recordable") &&
-              eg_reduce(ctx, &d) == EG_NOT_WRITTEN && reason_has(ctx, "while recording") && eg_record_end(ctx, NULL, &g) == EG_OK && eg_graph_free(ctx, g) == EG_OK,
-          "a host<->device eg_copy and eg_reduce while recording on a device context: NOT_WRITTEN by name");
+    d.in = rin.p;
+    d.out = eager.p;
+    d.op = EG_REDUCE_SUM;
+    d.policy = EG_REDUCE_COMPENSATED;
+    const int ran = planes_ok && eg_reduce(ctx, &d) == EG_OK && eg_sync(ctx) == EG_OK && cudaMemcpy(&want, eager.d, sizeof(want), cudaMemcpyDeviceToHost) == cudaSuccess;
+    d.out = recorded.p;
+    check(ran && hp && eg_record_begin(ctx) == EG_OK && eg_copy(ctx, a.p, hp) == EG_NOT_WRITTEN && reason_has(ctx, "not recordable") && eg_reduce(ctx, &d) == EG_OK &&
+              eg_record_end(ctx, NULL, &g) == EG_OK && eg_graph_launch(ctx, g) == EG_OK && eg_sync(ctx) == EG_OK &&
+              cudaMemcpy(&got, recorded.d, sizeof(got), cudaMemcpyDeviceToHost) == cudaSuccess && got == want && want != 0 && eg_graph_free(ctx, g) == EG_OK,
+          "while recording on a device context a host<->device eg_copy is refused NOT_WRITTEN by name, and an eg_reduce is recorded: its replay equals the eager reduce, bitwise");
+    if (rin.p != NULL) dplane_free(ctx, &rin);
+    if (eager.p != NULL) dplane_free(ctx, &eager);
+    if (recorded.p != NULL) dplane_free(ctx, &recorded);
     if (hp) eg_plane_free(ctx, hp);
     if (ov) {
         eg_plane_free(ctx, o2.p);
