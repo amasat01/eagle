@@ -562,6 +562,10 @@ void graph_launch(eg_ctx& ctx, eg_graph_s* graph) {
     diff_launched(diff);
 }
 
+void graph_describe(eg_ctx&, const eg_graph_s*, eg_graph_description*) {
+    refuse(EG_NOT_WRITTEN, "eg_graph_describe is not written in this build of the door");
+}
+
 void graph_free(eg_ctx& ctx, eg_graph_s* graph) {
     check_handle(ctx.graphs, graph, "graph");
     ctx.graphs.erase(graph);

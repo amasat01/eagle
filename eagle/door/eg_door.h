@@ -1193,6 +1193,74 @@ struct eg_graph_reverse_desc {
  *  no vjp, a seed or gradient plane that does not match); NOT_WRITTEN (a device context or graph). */
 eg_status eg_graph_reverse(eg_ctx* ctx, eg_graph* graph, const struct eg_graph_reverse_desc* desc);
 
+/** What a node of a graph description is. */
+typedef int32_t eg_gnode_kind;
+#define EG_GNODE_LAUNCH 0  /**< ``eg_launch`` */
+#define EG_GNODE_RUN 1     /**< ``eg_run`` */
+#define EG_GNODE_REDUCE 2  /**< ``eg_reduce`` */
+#define EG_GNODE_COPY 3    /**< ``eg_copy`` */
+#define EG_GNODE_FFT 4     /**< ``eg_fft_run`` */
+#define EG_GNODE_GEMM 5    /**< ``eg_gemm_run`` */
+#define EG_GNODE_COND 6    /**< a conditional's test: it reads its cell and baseline */
+#define EG_GNODE_ARM 7     /**< one arm of a conditional */
+#define EG_GNODE_FORK 8    /**< ``eg_record_fork_begin`` */
+#define EG_GNODE_BRANCH 9  /**< one branch of a fork */
+#define EG_GNODE_JOIN 10   /**< ``eg_record_fork_end``: what the next node waits for */
+#define EG_GNODE_WAIT 11   /**< ``eg_record_wait`` */
+
+/** What an edge of a graph description is. */
+typedef int32_t eg_gedge_kind;
+#define EG_GEDGE_RAW 0   /**< the later node reads what the earlier wrote (derived from the planes) */
+#define EG_GEDGE_WAR 1   /**< the later node overwrites what the earlier read */
+#define EG_GEDGE_WAW 2   /**< both write the plane */
+#define EG_GEDGE_WAIT 3  /**< a writer to the ``eg_record_wait`` node that names its plane */
+#define EG_GEDGE_JOIN 4  /**< a node of a fork to its join */
+#define EG_GEDGE_ORDER 5 /**< recording order the replay keeps without a hazard: a container to its content, a wait to what follows it in its branch, a join to the next node */
+
+/** One node of a graph description. ``planes``, ``access`` and ``slot`` hold ``n_planes`` entries. */
+struct eg_graph_node {
+    uint32_t struct_size;
+    eg_gnode_kind kind;
+    int32_t parent;       /**< the enclosing node: an ARM's COND, a BRANCH's FORK, else the ARM or BRANCH the call was recorded in; -1 at top level */
+    int32_t level;        /**< the schedule level: nodes of one level may run at the same time */
+    int32_t arm;          /**< ARM: its index; COND: its ``eg_cond_kind``; else -1 */
+    int32_t n_planes;     /**< the planes the node reads or writes (a plane bound to two slots appears twice) */
+    const char* unit;     /**< LAUNCH: the unit's name; else NULL */
+    eg_plane* const* planes;
+    const uint8_t* access;  /**< per plane: 1 read, 2 write, 3 both */
+    const int32_t* slot;    /**< per plane: the unit slot of a LAUNCH, else -1 */
+};
+
+/** One edge of a graph description: ``from`` must finish before ``to`` starts. ``plane`` is NULL for JOIN and ORDER. */
+struct eg_graph_edge {
+    int32_t from, to;
+    eg_gedge_kind kind;
+    int32_t from_slot, to_slot;  /**< the unit slots the hazard goes through, -1 for a node that is not a launch */
+    eg_plane* plane;
+};
+
+/** OUTPUT of ``eg_graph_describe``. */
+struct eg_graph_description {
+    uint32_t struct_size;
+    uint32_t flags;                        /**< EG_RECORD_DIFF when the graph was ended so, else 0 */
+    int32_t n_nodes;
+    const struct eg_graph_node* nodes;     /**< recording order: a node's parent and every edge point to lower indices */
+    int32_t n_edges;
+    const struct eg_graph_edge* edges;
+    int32_t n_levels;                      /**< 0 for an empty graph, else the highest ``level`` plus one */
+};
+
+/**
+ * Describe a recorded graph for drawing: its nodes (a fork, its branches and join, a conditional and its arms, every recorded
+ * call), the hazard, wait, join and order edges, and the schedule level of each node (the longest path from a root). The same
+ * description is kept for a host and a device graph: the door builds it at record time, it is not read back from a driver.
+ * Read-only and callback-free; the arrays are the door's and stay valid until ``eg_graph_free`` of the graph or the next
+ * ``eg_graph_describe`` of it, so a caller copies what it keeps. A host graph replays in recording order, which respects every
+ * level. Status: OK; BAD_REQUEST (a NULL, freed or foreign graph; ``out`` NULL); NOT_WRITTEN (a device graph, where the
+ * recording does not keep the description yet).
+ */
+eg_status eg_graph_describe(eg_ctx* ctx, const eg_graph* graph, struct eg_graph_description* out);
+
 /** Free a graph. NULL-safe. */
 eg_status eg_graph_free(eg_ctx* ctx, eg_graph* graph);
 

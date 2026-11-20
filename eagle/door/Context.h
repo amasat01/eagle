@@ -881,6 +881,7 @@ float sample_sum(const float* x, std::int64_t count, int threads);
 void bind_value(eg_plan_s& p, int slot, const void* value, std::size_t bytes);
 void graph_launch(eg_ctx& ctx, eg_graph_s* graph);
 void graph_free(eg_ctx& ctx, eg_graph_s* graph);
+void graph_describe(eg_ctx& ctx, const eg_graph_s* graph, eg_graph_description* out);
 void record_drop_all(eg_ctx& ctx);
 bool device_planes(const eg_ctx& ctx, const char* op, std::initializer_list<const eg_plane_s*> planes);
 /** @brief Whether @p src and @p dst of @p ctx are one host plane and one device plane (eg_copy's only mixed case). */
