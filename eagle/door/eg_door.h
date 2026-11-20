@@ -380,8 +380,9 @@ struct eg_runner_desc {
                                              runner, a device graph for a device one) that runs once per step, BEFORE the step's plans,
                                              on every launch, on the planes it was recorded over. It may hold launches, copies, reduces, transforms,
                                              products, forks and, on the host, conditionals; never a run of a runner (a device graph
-                                             with a conditional is NOT_WRITTEN: the driver refuses a conditional node inside the loop's
-                                             own conditional body). Each plan must advance exactly one step per launch (finish steps 1): a unit that
+                                             with a conditional is NOT_WRITTEN: cudaGraphAddChildGraphNode of a graph holding a conditional
+                                             node into the loop's own conditional body answers cudaErrorNotSupported, 801 "operation not
+                                             supported", measured on a CUDA 12.6 runtime over a 560 driver). Each plan must advance exactly one step per launch (finish steps 1): a unit that
                                              advances K > 1 steps per launch, or an automatic count, is BAD_REQUEST, as the per-step hook
                                              nodes of eagle's Python runner were (read, not run: it refused them the same way).
                                              On the host the graph is replayed ahead of each launch, with an active set ahead of each of

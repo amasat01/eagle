@@ -276,6 +276,13 @@ $(GEMM_ROUTE_TEST): test/gemm_test.c $(OBJ) $(OUT)/test/gemm_route_seam.o | chec
 	$(CC) $(DEPFLAGS) $(CFLAGS_C) -DEG_GEMM_DEVICE -DEG_GEMM_ROUTE -isystem $(CUDA)/include -Itest/c_shim -c $< -o $@.o
 	$(CXX) -o $@ $@.o $(OBJ) $(OUT)/test/gemm_route_seam.o $(CUDART) -ldl -lm -pthread
 
+# The capture-attribution facility's node types, on a graph with a conditional node (nvcc, header only: no door object).
+CAPTURE_NODE_TEST := $(OUT)/capture_node_type_test
+$(CAPTURE_NODE_TEST): test/capture_node_type_test.cu | check-inputs check-cuda
+	@mkdir -p $(OUT)
+	$(NVCC) -std=c++20 -O2 $(CUDA_GENCODE) -Wno-deprecated-gpu-targets -Werror all-warnings -ccbin $(CXX) -Xcompiler -Wall,-Wextra \
+	  -DAETHER_HAS_CUDA -diag-suppress=20050 -include $(CUDA_WING_FACTS) -I$(ROOT) -I$(AETHER_INCLUDE) -MMD -MP -o $@ $< -cudart static -ldl -lrt
+
 $(NO_CUBLAS): test/no_cublas.c
 	@mkdir -p $(OUT)
 	$(CC) $(DEPFLAGS) -std=c11 -O2 -Wall -Wextra -Werror -fPIC -shared -o $@ $< -ldl

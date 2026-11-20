@@ -4,6 +4,7 @@
 #pragma once
 
 #include "eagle/typedefs.h"
+#include "eagle/cuda/detail/DriverEntry.h"
 #include "eagle/cuda/detail/RuntimeCompat.h"
 #include "eagle/util/DeviceError.h"
 #include "eagle/util/throw.h"
@@ -14,6 +15,7 @@
 #include <string>
 #include <vector>
 
+#include <cuda.h>
 #include <cuda_runtime.h>
 
 /* A facility-scoped floor, mirroring
@@ -32,7 +34,7 @@
  * the declaration) -- weaker than 12.3, so it is folded into the SAME
  * file-level guard rather than split into two: one #error covering the
  * whole file is simpler than two, and 12.3 already subsumes 11.6.
- * isNodeToggleable (cudaGraphNodeGetType) carries no floor of its own.
+ * isNodeToggleable (the driver's node type) carries no floor of its own.
  *
  * eagle_core.cu's compiled binding already impose a 12.3 floor as a whole
  * (it unconditionally includes CaptureConditional.h, which transitively
@@ -154,6 +156,22 @@ inline std::vector<cudaGraphNode_t> captureSnapshotNodes(cudaStream_t stream)
                   // propagate [[noreturn]] through the macro-wrapped call.
 }
 
+namespace detail {
+
+/** @brief The type of @p node, asked of the driver: the runtime's ``cudaGraphNodeGetType`` answers ``cudaErrorUnknown`` for a conditional node
+ *  (CUDA 12.6 runtime over a 560 driver), where the driver's ``cuGraphNodeGetType`` names it; the two enums share their values. */
+inline cudaGraphNodeType nodeType(cudaGraphNode_t node)
+{
+    static const auto get = driver_entry<decltype(&::cuGraphNodeGetType)>("cuGraphNodeGetType");
+    CUgraphNodeType type;
+    const CUresult status = get(reinterpret_cast<CUgraphNode>(node), &type);
+    if (status != CUDA_SUCCESS)
+        EAGLE_THROW(std::runtime_error, "cuGraphNodeGetType failed with driver status " + std::to_string(static_cast<int>(status)));
+    return static_cast<cudaGraphNodeType>(type);
+}
+
+} // namespace detail
+
 /**
  * @brief Whether @p node's type is one ``setNodeEnabled`` may safely
  *        toggle.
@@ -169,8 +187,7 @@ inline std::vector<cudaGraphNode_t> captureSnapshotNodes(cudaStream_t stream)
  */
 inline bool isNodeToggleable(cudaGraphNode_t node)
 {
-    cudaGraphNodeType type;
-    EAGLE_CHECK_ALWAYS(cudaGraphNodeGetType(node, &type));
+    const cudaGraphNodeType type = detail::nodeType(node);
     return type == cudaGraphNodeTypeKernel || type == cudaGraphNodeTypeMemcpy
         || type == cudaGraphNodeTypeMemset;
 }
@@ -188,8 +205,7 @@ inline const char* bodyRefusedNodeType(cudaGraph_t graph)
     if (n > 0)
         EAGLE_CHECK_ALWAYS(cudaGraphGetNodes(graph, nodes.data(), &n));
     for (cudaGraphNode_t node : nodes) {
-        cudaGraphNodeType type;
-        EAGLE_CHECK_ALWAYS(cudaGraphNodeGetType(node, &type));
+        const cudaGraphNodeType type = detail::nodeType(node);
         switch (type) {
         case cudaGraphNodeTypeKernel:
         case cudaGraphNodeTypeMemcpy:
