@@ -31,6 +31,9 @@
 #include <unistd.h>
 
 static int failures = 0;
+/* A build fact, read once from the door (main): the library carries the device group, so it answers the device calls and
+ * refuses a device context for want of a device, where a door without it refuses them NOT_WRITTEN. */
+static int device_group = 0;
 static const char* library_path = NULL;
 
 static void check(int ok, const char* what) {
@@ -229,8 +232,9 @@ static void check_settings(void) {
     const uint32_t short_size = (uint32_t)(offsetof(struct eg_ctx_settings, abi_major) + sizeof(uint32_t));
     check(settings_status(short_size, 0, 0) == EG_OK,
           "settings with struct_size + abi_major only: a host-only context (info.device -1)");
-    check(settings_status(sizeof(struct eg_ctx_settings), EG_CTX_DEVICE, 0) == EG_NOT_WRITTEN,
-          "EG_CTX_DEVICE refused NOT_WRITTEN (device group not built)");
+    if (!device_group)    /* with the group, a device context is made or refused for want of a device: check_device_count */
+        check(settings_status(sizeof(struct eg_ctx_settings), EG_CTX_DEVICE, 0) == EG_NOT_WRITTEN,
+              "EG_CTX_DEVICE refused NOT_WRITTEN (device group not built)");
     check(settings_status(sizeof(struct eg_ctx_settings), 0, 1) == EG_BAD_REQUEST,
           "device != 0 without EG_CTX_DEVICE refused BAD_REQUEST");
 }
@@ -262,8 +266,8 @@ static void check_bad_input(eg_ctx* ctx, eg_unit* unit) {
     const int64_t base[2] = { 0, 2 }, count[2] = { 3, 2 };
     check(plan(ctx, unit, EG_STRUCTURE_HOST_TEAM, 4, 2, base, count, &p) == EG_BAD_REQUEST,
           "overlapping partitions refused BAD_REQUEST");
-    check(plan(ctx, unit, EG_STRUCTURE_DEVICE, 4, 0, NULL, NULL, &p) == EG_NOT_WRITTEN,
-          "DEVICE structure refused NOT_WRITTEN");
+    check(plan(ctx, unit, EG_STRUCTURE_DEVICE, 4, 0, NULL, NULL, &p) == (device_group ? EG_BAD_REQUEST : EG_NOT_WRITTEN),
+          "DEVICE structure on a host context refused: NOT_WRITTEN without the device group, BAD_REQUEST (host-only context) with it");
 
     double x32[4] = { 0 }, y[4] = { 0 };
     struct tensor tx, ty;
@@ -601,9 +605,9 @@ static void check_runner(eg_ctx* ctx, eg_unit* axpb) {
     check(eg_bind(ctx, plans[0], &bd) == EG_BAD_REQUEST && reason_has(ctx, "finished counter"),
           "binding the eagle-made finished counter refused BAD_REQUEST");
     eg_plan* dev = NULL;
-    check(plan(ctx, c1, EG_STRUCTURE_DEVICE, RN, 0, NULL, NULL, &dev) == EG_NOT_WRITTEN &&
+    check(plan(ctx, c1, EG_STRUCTURE_DEVICE, RN, 0, NULL, NULL, &dev) == (device_group ? EG_BAD_REQUEST : EG_NOT_WRITTEN) &&
               reason_has(ctx, "DEVICE"),
-          "a DEVICE plan of a finishing unit refused NOT_WRITTEN");
+          "a DEVICE plan of a finishing unit on a host context refused: NOT_WRITTEN without the device group, BAD_REQUEST with it");
     d = runner_desc(plans, 1, 10);
     check(eg_runner_new(ctx, &d, &r) == EG_OK && eg_run_events(ctx, r, NULL, NULL) == EG_BAD_REQUEST &&
               reason_has(ctx, "no refine run") && eg_reverse(ctx, r, NULL, NULL) == EG_BAD_REQUEST &&
@@ -2993,7 +2997,7 @@ static void check_device_count(eg_ctx* ctx) {
     int32_t count = -1;
     check(eg_device_count(ctx, &count) == EG_OK && count >= 0 && eg_device_count(ctx, NULL) == EG_BAD_REQUEST,
           "eg_device_count on a host context: OK with a count of 0 or more, a NULL count BAD_REQUEST");
-    const int built = eg_stream_use(ctx, 0) != EG_NOT_WRITTEN;    /* a host context has no stream: BAD_REQUEST with the group built */
+    const int built = device_group;
     struct eg_ctx_settings st;
     memset(&st, 0, sizeof(st));
     st.struct_size = sizeof(st);
@@ -3839,6 +3843,7 @@ int main(int argc, char** argv) {
     eg_ctx* ctx = make_ctx();
     check(ctx != NULL, "eg_ctx_new host context");
     if (ctx == NULL) return 1;
+    device_group = eg_stream_use(ctx, 0) != EG_NOT_WRITTEN;    /* a host context has no stream: BAD_REQUEST with the group built */
     struct eg_ctx_info info;
     memset(&info, 0, sizeof(info));
     info.struct_size = sizeof(info);
@@ -3881,7 +3886,7 @@ int main(int argc, char** argv) {
     check_banded(ctx);
     check_figures(ctx);
     check_reset(ctx);
-    if (eg_stream_use(ctx, 0) == EG_NOT_WRITTEN) check_no_device_group(ctx);
+    if (!device_group) check_no_device_group(ctx);
     check_device_count(ctx);
 
     check_reduce(ctx);

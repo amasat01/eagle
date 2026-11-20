@@ -359,9 +359,6 @@ std::int32_t device_count(eg_ctx&) {
 
 /** @brief EG_CTX_DEVICE: retain the device's primary context, make the context's stream, read the launch facts. */
 void device_open(eg_ctx& ctx, std::int32_t device) {
-    EG_DRIVER(cuDeviceGet);
-    EG_DRIVER(cuDevicePrimaryCtxRetain);
-    EG_DRIVER(cuStreamCreate);
     std::string why;
     const std::int32_t count = driver_device_count(why);
     if (count < 0)
@@ -369,6 +366,9 @@ void device_open(eg_ctx& ctx, std::int32_t device) {
     if (device >= count)
         refuse(EG_BAD_REQUEST, "eg_ctx_settings.device " + std::to_string(device) + ": the driver sees " +
                std::to_string(count) + " device(s)");
+    EG_DRIVER(cuDeviceGet);
+    EG_DRIVER(cuDevicePrimaryCtxRetain);
+    EG_DRIVER(cuStreamCreate);
     DeviceState& d = ctx.dev;
     CUdevice dev = 0;
     check(cuDeviceGet_(&dev, device), "cuDeviceGet");
