@@ -681,15 +681,6 @@ static void host_nodes_device(eg_ctx* ctx, const char* dev_lib) {
 
 /* ---- host<->device copies in a device recording ---- */
 
-/* True when @p e is cudaSuccess; otherwise the row fails with @p what and the CUDA error string. */
-static int cuda_ok(cudaError_t e, const char* what) {
-    if (e == cudaSuccess) return 1;
-    char msg[200];
-    snprintf(msg, sizeof(msg), "%s failed: %s", what, cudaGetErrorString(e));
-    check(0, msg);
-    return 0;
-}
-
 /* H2D copy of x -> launch (p1 = 2 x + 1) -> D2H copy of p1, recorded and replayed twice with the host input changed between the replays, against the same
  * sequence done eagerly (bitwise); a pageable host plane is refused by name with the recording left open; a graph ended with EG_RECORD_DIFF that holds such a
  * copy ends and replays; the description shows the copies as COPY nodes over the host and device planes. */
@@ -752,6 +743,8 @@ static void host_device_copies(eg_ctx* ctx, const char* dev_lib) {
     eg_plane_free(ctx, phx), eg_plane_free(ctx, phy), eg_plane_free(ctx, ppg), eg_plane_free(ctx, pdx), eg_plane_free(ctx, pd1), eg_plane_free(ctx, pc);
     eg_unit_free(ctx, dp);
     cudaFreeHost(hx), cudaFreeHost(hy), cudaFree(dx), cudaFree(d1), cudaFree(dc);
+}
+
 /* ---- checked units on a device context ---- */
 
 
