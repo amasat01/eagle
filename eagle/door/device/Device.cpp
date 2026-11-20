@@ -2134,9 +2134,9 @@ bool device_graph(const eg_ctx& ctx, const eg_graph* graph) {
 /** @brief Give kernel node @p node of @p loop the arguments @p args followed by the triple (@p base, @p count, @p n), in the template
  *  and in the instance; false when the driver refused the update of the instance (the template is updated either way). */
 bool set_kernel_args(const DeviceLoop* loop, std::uint64_t node, const std::vector<void*>& args, std::int64_t base, std::int64_t count, std::int64_t n) {
-    static const auto get = cuda::detail::driver_entry<decltype(&::cuGraphKernelNodeGetParams)>("cuGraphKernelNodeGetParams_v2");
-    static const auto set = cuda::detail::driver_entry<decltype(&::cuGraphKernelNodeSetParams)>("cuGraphKernelNodeSetParams_v2");
-    static const auto set_exec = cuda::detail::driver_entry<decltype(&::cuGraphExecKernelNodeSetParams)>("cuGraphExecKernelNodeSetParams_v2");
+    static const auto get = cuda::detail::driver_entry<decltype(&::cuGraphKernelNodeGetParams)>("cuGraphKernelNodeGetParams");
+    static const auto set = cuda::detail::driver_entry<decltype(&::cuGraphKernelNodeSetParams)>("cuGraphKernelNodeSetParams");
+    static const auto set_exec = cuda::detail::driver_entry<decltype(&::cuGraphExecKernelNodeSetParams)>("cuGraphExecKernelNodeSetParams");
     const auto at = reinterpret_cast<CUgraphNode>(node);
     CUDA_KERNEL_NODE_PARAMS p = {};
     check(get(at, &p), "cuGraphKernelNodeGetParams");
