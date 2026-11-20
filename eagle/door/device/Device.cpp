@@ -818,9 +818,16 @@ void launch_segmented(const eg_plan_s& plan) {
     device_write(ctx, static_cast<char*>(plan.segdev[0]->tensor->dl_tensor.data) + plan.segdev[0]->tensor->dl_tensor.byte_offset, off64.data(), off64.size() * sizeof(std::int64_t));
     // The argument list of a stage unit: each stage slot joined at load to a slot of the planned unit (the caller's plane, or the sorted copy of it) or to a
     // scratch plane eagle made. @p slots maps a stage slot to the planned unit's slot (-1: none).
-    const auto plane_arg = [&](std::int32_t slot, std::vector<void*>& args, std::size_t j, const eg_plane_s* scratch, int role, std::vector<plugin::ScalarHandle>& handles) {
+    const auto plane_arg = [&](std::int32_t slot, std::vector<void*>& args, std::size_t j, const eg_plane_s* scratch, const SlotFacts& sf, const TeamPlaneFacts* joined, std::vector<plugin::ScalarHandle>& handles,
+                              std::vector<plugin::GRefMirror>& mirrors) {
         if (scratch != nullptr) {
             const DLTensor& t = scratch->tensor->dl_tensor;
+            if (sf.mirror) {    // a vector plane: the generated code reads the plane's own pitches
+                mirrors[j] = team_mirror(t, *joined, plugin::kEagleAbiDeviceCUDA);
+                args[j] = &mirrors[j];
+                return;
+            }
+            const int role = sf.role;
             plugin::ScalarHandle& h = handles[j];
             h.data = static_cast<char*>(t.data) + t.byte_offset;
             h.samples = static_cast<std::uint64_t>(role == EG_ROLE_LOOKUP ? elements(t) : role == EG_ROLE_WIDE_IN || role == EG_ROLE_WIDE_OUT ? t.shape[t.ndim - 1] : n);
@@ -836,13 +843,15 @@ void launch_segmented(const eg_plan_s& plan) {
         args[j] = arg;
     };
     // A member that is one stage of itself runs that stage over its own slots (the member's argument list @p p) and its own scratch planes.
-    const auto stage_args = [&](const eg_unit_s& u, std::size_t mi, const std::vector<void*>& p, std::vector<plugin::ScalarHandle>& handles) {
+    const auto stage_args = [&](const eg_unit_s& u, std::size_t mi, const std::vector<void*>& p, std::vector<plugin::ScalarHandle>& handles,
+                                std::vector<plugin::GRefMirror>& mirrors) {
         const StageFacts& st = u.stages[0];
         std::vector<void*> sp(u.slots.size());
         handles.resize(u.slots.size());
+        mirrors.resize(u.slots.size());
         for (std::size_t s = 0; s < u.slots.size(); ++s) {
             if (st.source_of[s] >= 0) sp[s] = p[static_cast<std::size_t>(st.source_of[s])];
-            else if (st.plane_of[s] >= 0) plane_arg(-1, sp, s, plan.seg_team(u, mi)[static_cast<std::size_t>(st.plane_of[s])], u.slots[s].role, handles);
+            else if (st.plane_of[s] >= 0) plane_arg(-1, sp, s, plan.seg_team(u, mi)[static_cast<std::size_t>(st.plane_of[s])], u.slots[s], &u.team_planes[static_cast<std::size_t>(st.plane_of[s])], handles, mirrors);
             else sp[s] = &n32;
         }
         return sp;
@@ -853,7 +862,8 @@ void launch_segmented(const eg_plan_s& plan) {
         const eg_unit_s& u = *g.branches[j];
         std::vector<void*> p = seg::params_of(plan, j, u, owned, &n32);
         std::vector<plugin::ScalarHandle> handles;
-        if (!u.stages.empty()) p = stage_args(u, j, p, handles);
+        std::vector<plugin::GRefMirror> mirrors;
+        if (!u.stages.empty()) p = stage_args(u, j, p, handles, mirrors);
         exec::DeviceKernel::run(reinterpret_cast<CUfunction>(u.function), p, exec::Partition{ 0, run, n }, cs, resolved_block(d, u, run));
     }
     if (g.dynamic && mask != nullptr)    // a stale sample that finished in this step is not swept: stale and live, as the old runner's
@@ -870,7 +880,8 @@ void launch_segmented(const eg_plan_s& plan) {
             if (!u.stages.empty()) {    // a split sweep: its one stage over the stage's own slots (a team stage is a grid over the batch, the kernel reads the active count)
                 const StageFacts& st = u.stages[0];
                 std::vector<plugin::ScalarHandle> handles;
-                std::vector<void*> sp = stage_args(u, K, p, handles);
+                std::vector<plugin::GRefMirror> mirrors;
+                std::vector<void*> sp = stage_args(u, K, p, handles, mirrors);
                 if (st.team) {
                     EG_DRIVER(cuLaunchKernel);
                     const std::int64_t per_block = static_cast<std::int64_t>(st.lanes) * st.warps;
