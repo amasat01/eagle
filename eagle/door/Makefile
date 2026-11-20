@@ -214,9 +214,15 @@ $(TEST): test/door_test.c $(LIB)
 REV_FIXTURE := $(OUT)/libfixture_reverse.so
 REV_TEST := $(OUT)/reverse_test
 
-$(REV_FIXTURE): test/fixture_reverse.c
+# With CUDA the fixture carries the device functions of test/fixture_reverse.cu (sm_61 fatbin), so the graph test records runs of DEVICE runners.
+$(OUT)/fixture_reverse.fatbin: test/fixture_reverse.cu | check-cuda
 	@mkdir -p $(OUT)
-	$(CC) $(DEPFLAGS) $(CFLAGS_C) -fPIC -shared -fvisibility=hidden -o $@ $<
+	$(NVCC) $(DEPFLAGS) -fatbin -arch=sm_61 -Wno-deprecated-gpu-targets -std=c++20 -ccbin $(CXX) -I$(ROOT) $< -o $@
+
+$(REV_FIXTURE): test/fixture_reverse.c $(if $(CUDA),$(OUT)/fixture_reverse.fatbin)
+	@mkdir -p $(OUT)
+	$(if $(CUDA),$(call embed,$(OUT)/fixture_reverse.fatbin,rev__image,$(OUT)/fixture_reverse_image.o))
+	$(CC) $(DEPFLAGS) $(CFLAGS_C) $(if $(CUDA),-DEG_REV_IMAGE) -fPIC -shared -fvisibility=hidden -o $@ $< $(if $(CUDA),$(OUT)/fixture_reverse_image.o)
 
 $(REV_TEST): test/reverse_test.c $(LIB)
 	$(CC) $(DEPFLAGS) $(CFLAGS_C) -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -lm -pthread

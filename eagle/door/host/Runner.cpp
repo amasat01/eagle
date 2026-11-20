@@ -374,8 +374,15 @@ void run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
 
 void run_from_start(eg_ctx& ctx, eg_runner_s* runner) {
     runner_reset(ctx, runner);
-    if (runner->record != nullptr) record_forward(ctx, *runner, nullptr);
-    else run_loop(ctx, runner, nullptr);
+    if (runner->record != nullptr) {
+        record_forward(ctx, *runner, nullptr);
+    } else if (runner->dev.ctx != nullptr) {
+        eg_run_report report{};
+        report.struct_size = sizeof(report);
+        device_run(ctx, runner, &report);
+    } else {
+        run_loop(ctx, runner, nullptr);
+    }
 }
 
 void runner_figures(eg_ctx& ctx, const eg_runner_s* runner, struct eg_runner_figures* out) {

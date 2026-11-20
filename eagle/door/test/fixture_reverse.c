@@ -305,17 +305,25 @@ static const struct eg_unit_derived d_fused_vjp = { .struct_size = sizeof(struct
                                                     .steps_slot = -1, .tape_on_slot = -1, .time0_slot = -1,
                                                     .fused_steps_slot = -1, .n_links = 0, .taped = NULL, .links = NULL };
 
-#define UNIT(var, name_, byte, entry, body_, launch_, finish_, derived_)                                              \
+#define UNIT_IMAGE(var, name_, byte, entry, body_, launch_, finish_, derived_, image_)                              \
     static const struct eg_unit_meta var = { .struct_size = sizeof(struct eg_unit_meta), .name = name_,             \
                                              .digest = DIGEST(byte), .pattern = EG_PATTERN_PURE,                    \
-                                             .scalar_type = EG_SCALAR_FLOAT64, .host_entry = entry,                 \
-                                             .device_image_format = EG_IMAGE_NONE, .body = &body_, .launch = &launch_, \
-                                             .finish = finish_, .derived = derived_ }
-UNIT(u_lin, "lin", 0xE0, "lin_host", lin_body, launch, &lin_finish, NULL);
-UNIT(u_tw1, "lin", 0xE1, "lin_tape1_host", tw1_body, launch, &twin_finish, &d_twin);
+                                             .scalar_type = EG_SCALAR_FLOAT64, .host_entry = entry, image_,         \
+                                             .body = &body_, .launch = &launch_, .finish = finish_, .derived = derived_ }
+#define UNIT(var, name_, byte, entry, body_, launch_, finish_, derived_) \
+    UNIT_IMAGE(var, name_, byte, entry, body_, launch_, finish_, derived_, .device_image_format = EG_IMAGE_NONE)
+/* With CUDA the step, its window-1 twin and its vjp carry the device functions of test/fixture_reverse.cu. */
+#ifdef EG_REV_IMAGE
+#define IMAGE(function) .device_image = "rev__image", .device_image_size = "rev__image_size", .device_function = function, \
+    .device_image_format = EG_IMAGE_FATBIN
+#else
+#define IMAGE(function) .device_image_format = EG_IMAGE_NONE
+#endif
+UNIT_IMAGE(u_lin, "lin", 0xE0, "lin_host", lin_body, launch, &lin_finish, NULL, IMAGE("lin"));
+UNIT_IMAGE(u_tw1, "lin", 0xE1, "lin_tape1_host", tw1_body, launch, &twin_finish, &d_twin, IMAGE("lin_tape1"));
 UNIT(u_tw3, "lin", 0xE3, "lin_tape3_host", tw3_body, launch, &twin_finish, &d_twin);
 UNIT(u_tw16, "lin", 0xE6, "lin_tape16_host", tw16_body, launch, &twin_finish, &d_twin);
-UNIT(u_vjp, "lin_vjp", 0xE4, "lin_vjp_host", vjp_body, launch, NULL, &d_vjp);
+UNIT_IMAGE(u_vjp, "lin_vjp", 0xE4, "lin_vjp_host", vjp_body, launch, NULL, &d_vjp, IMAGE("lin_vjp"));
 UNIT(u_lina, "lina", 0xE5, "lin_host", lina_body, launch_active, &lin_finish, NULL);
 UNIT(u_tw_of, "lin", 0xF0, "lin_tape3_host", tw3_body, launch, &twin_finish, &d_twin_of);
 UNIT(u_tw_rows, "lin", 0xF1, "lin_tape3_host", tw3_body, launch, &twin_finish, &d_twin_rows);

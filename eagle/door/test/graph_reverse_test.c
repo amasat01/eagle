@@ -528,8 +528,9 @@ static void device_refusal_rows(struct rig* r, const struct units* u) {
 
 /* ---- slice 2: forks, conditionals and loops (host) ---------------------------------------------------------------------- */
 
-static eg_plane* mk_i32(struct rig* r, struct tensor* t, int64_t n, int32_t* data) {
-    tensor_fill(t, n, data, kDLInt, 32);
+/* A one-dimensional plane of @p bits wide elements of type @p code over @p data: a host plane, or on a DEVICE context a device plane beside the host wrapper. */
+static eg_plane* mk_typed(struct rig* r, struct tensor* t, int64_t n, void* data, uint8_t code, uint8_t bits) {
+    tensor_fill(t, n, data, code, bits);
     t->managed.dl_tensor.device.device_type = kDLCPU;
     eg_plane* host = NULL;
     if (eg_plane_wrap(r->ctx, &t->managed, &host) != EG_OK) return NULL;
@@ -541,8 +542,8 @@ static eg_plane* mk_i32(struct rig* r, struct tensor* t, int64_t n, int32_t* dat
         d.struct_size = sizeof(d);
         d.kind = EG_MEM_DEVICE;
         d.ndim = 1;
-        d.dtype_code = kDLInt;
-        d.dtype_bits = 32;
+        d.dtype_code = code;
+        d.dtype_bits = bits;
         d.shape = shape;
         handle = NULL;
         if (eg_plane_new(r->ctx, &d, &handle) != EG_OK) return NULL;
@@ -551,6 +552,7 @@ static eg_plane* mk_i32(struct rig* r, struct tensor* t, int64_t n, int32_t* dat
     r->host[r->n_planes++] = r->device ? host : NULL;
     return handle;
 }
+static eg_plane* mk_i32(struct rig* r, struct tensor* t, int64_t n, int32_t* data) { return mk_typed(r, t, n, data, kDLInt, 32); }
 
 static eg_status cond_open(eg_ctx* ctx, eg_cond_kind kind, uint32_t flags, eg_plane* cell, int64_t index, int64_t max_iters) {
     struct eg_cond_desc d;
@@ -1514,20 +1516,28 @@ static int lin_make(struct rig* r, const struct run_units* ru, struct lin* l, in
     tensor_fill(&l->tt, LN, l->t, kDLFloat, 64);
     tensor_fill(&l->tT, LN, l->T, kDLFloat, 64);
     tensor_fill(&l->td, LN, l->done, kDLBool, 8);
-    struct tensor* ts[] = { &l->tx, &l->tt, &l->tT, &l->td };
-    eg_plane** ps[] = { &l->px, &l->pt, &l->pT, &l->pd };
-    for (int k = 0; k < 4; ++k) {
-        ts[k]->managed.dl_tensor.device.device_type = kDLCPU;
-        *ps[k] = NULL;
-        if (eg_plane_wrap(r->ctx, &ts[k]->managed, ps[k]) != EG_OK) return 0;
-        r->handle[r->n_planes] = *ps[k];
-        r->host[r->n_planes++] = NULL;
+    if (r->device) {    /* device planes beside their host arrays: the row copies up before a launch and down before it reads */
+        l->px = mk(r, &l->tx, LN, l->x);
+        l->pt = mk(r, &l->tt, LN, l->t);
+        l->pT = mk(r, &l->tT, LN, l->T);
+        l->pd = mk_typed(r, &l->td, LN, l->done, kDLBool, 8);
+        if (l->px == NULL || l->pt == NULL || l->pT == NULL || l->pd == NULL) return 0;
+    } else {
+        struct tensor* ts[] = { &l->tx, &l->tt, &l->tT, &l->td };
+        eg_plane** ps[] = { &l->px, &l->pt, &l->pT, &l->pd };
+        for (int k = 0; k < 4; ++k) {
+            ts[k]->managed.dl_tensor.device.device_type = kDLCPU;
+            *ps[k] = NULL;
+            if (eg_plane_wrap(r->ctx, &ts[k]->managed, ps[k]) != EG_OK) return 0;
+            r->handle[r->n_planes] = *ps[k];
+            r->host[r->n_planes++] = NULL;
+        }
     }
     struct eg_plan_desc pd;
     memset(&pd, 0, sizeof(pd));
     pd.struct_size = sizeof(pd);
     pd.unit = ru->lin;
-    pd.structure = EG_STRUCTURE_HOST_SERIAL;
+    pd.structure = r->device ? EG_STRUCTURE_DEVICE : EG_STRUCTURE_HOST_SERIAL;
     pd.policy = EG_REDUCE_COMPENSATED;
     pd.n_samples = LN;
     if (eg_plan_new(r->ctx, &pd, &l->plan) != EG_OK) return 0;
@@ -1602,23 +1612,36 @@ static void run_launch_row(struct rig* r, const struct units* u, const struct ru
         want_gw += xk;
     }
     eg_plane *in[] = { l.px, pw }, *gr0[] = { pgx[0], pgw[0] }, *gr1[] = { pgx[1], pgw[1] };
-    ok = ok && eg_graph_launch(ctx, g) == EG_OK && close_to(y, want_y, LN) && reverse(ctx, g, py, ps, 2, in, gr0) == EG_OK;
+    up(r);
+    ok = ok && eg_graph_launch(ctx, g) == EG_OK;
+    down(r);
+    ok = ok && close_to(y, want_y, LN) && reverse(ctx, g, py, ps, 2, in, gr0) == EG_OK;
+    down(r);
     verdict(r, ok && close_rel(gx[0], want_gx, LN, 1e-12) && close_rel(gw[0], &want_gw, 1, 1e-12),
             "eg_graph_reverse through a recorded run then a launch (y = w x_k): dJ/dx_0 = w a^k per sample and dJ/dw = sum x_k, the composed closed form");
     lin_rewind(&l);
-    ok = ok && eg_graph_launch(ctx, g) == EG_OK && close_to(y, want_y, LN) && reverse(ctx, g, py, ps, 2, in, gr1) == EG_OK;
+    up(r);
+    ok = ok && eg_graph_launch(ctx, g) == EG_OK;
+    down(r);
+    ok = ok && close_to(y, want_y, LN) && reverse(ctx, g, py, ps, 2, in, gr1) == EG_OK;
+    down(r);
     verdict(r, ok && memcmp(gx[0], gx[1], sizeof(gx[0])) == 0 && memcmp(gw[0], gw[1], sizeof(gw[0])) == 0,
             "a second eg_graph_launch restarts the run from the start of its batch: the second eg_graph_reverse gives the first one's gradients, bit for bit");
     eg_graph_free(ctx, g);
     eg_graph* plain = NULL;
+    const double xtol = r->device ? 1e-12 : 0.0;    /* the host's run is the closed form bit for bit; the device's step may fuse its multiply-add */
     lin_restart(&l, 7);
+    up(r);
     ok = ok && l.runner && eg_record_begin(ctx) == EG_OK && eg_run(ctx, l.runner, NULL) == EG_OK && eg_record_end(ctx, NULL, &plain) == EG_OK &&
          eg_graph_launch(ctx, plain) == EG_OK;
+    down(r);
     int ran_twice = ok;
-    for (int i = 0; ran_twice && i < LN; ++i) ran_twice = l.x[i] == want_xk[i];
+    for (int i = 0; ran_twice && i < LN; ++i) ran_twice = fabs(l.x[i] - want_xk[i]) <= xtol * (1.0 + fabs(want_xk[i]));
     lin_rewind(&l);
+    up(r);
     ran_twice = ran_twice && eg_graph_launch(ctx, plain) == EG_OK;
-    for (int i = 0; ran_twice && i < LN; ++i) ran_twice = l.x[i] == want_xk[i] && l.done[i];
+    down(r);
+    for (int i = 0; ran_twice && i < LN; ++i) ran_twice = fabs(l.x[i] - want_xk[i]) <= xtol * (1.0 + fabs(want_xk[i])) && l.done[i];
     verdict(r, ran_twice, "a plain graph with a recorded run runs the run again at its second launch (a replay is a restart)");
     eg_graph_free(ctx, plain);
     if (f) eg_plan_free(ctx, f);
@@ -1644,7 +1667,9 @@ static void phase_row(struct rig* r, const struct units* u, const struct run_uni
     ok = ok && f && eg_record_begin(ctx) == EG_OK && eg_run(ctx, a.runner, NULL) == EG_OK && eg_launch(ctx, f, NULL) == EG_OK &&
          eg_run(ctx, b.runner, NULL) == EG_OK && end_diff(ctx, 1, vjps, &g) == EG_OK;
     eg_plane *in[] = { a.px, pw }, *gr[] = { pgx, pgw };
+    up(r);
     ok = ok && eg_graph_launch(ctx, g) == EG_OK && reverse(ctx, g, b.px, ps, 2, in, gr) == EG_OK;
+    down(r);
     /* J(x1_i, w) through the whole graph, from the start of both batches */
     const double h = 0.5;
     for (int pass = 0; ok && pass <= LN; ++pass) {         /* passes 0 .. LN - 1: sample pass of x1; pass LN: w */
@@ -1656,7 +1681,9 @@ static void phase_row(struct rig* r, const struct units* u, const struct run_uni
             if (pass < LN) a.x[pass] += side == 0 ? h : -h;
             else wv += side == 0 ? 0.25 : -0.25;
             w[0] = wv;
+            up(r);
             ok = eg_graph_launch(ctx, g) == EG_OK;
+            down(r);
             for (int i = 0; i < LN; ++i) jp[side] += b.x[i];
             w[0] = 1.3;
         }
@@ -1713,11 +1740,8 @@ static void run_if_row(struct rig* r, const struct units* u, const struct run_un
 static void run_refusal_row(struct rig* r, const struct run_units* ru) {
     eg_ctx* ctx = r->ctx;
     struct lin plain, rec;
-    int32_t cell[1] = { 1 };
-    struct tensor tc;
     r->n_samples = LN;
     int ok = lin_make(r, ru, &plain, 7, 0) && lin_make(r, ru, &rec, 7, 1);
-    eg_plane* pc = mk_i32(r, &tc, 1, cell);
     eg_graph *none = NULL, *open = NULL;
     ok = ok && eg_record_begin(ctx) == EG_OK && eg_run(ctx, plain.runner, NULL) == EG_OK;
     verdict(r, ok && refused(end_diff(ctx, 0, NULL, &none), EG_NOT_WRITTEN, ctx, "needs EG_RUN_RECORD to be reversed") && eg_record_end(ctx, NULL, &open) == EG_OK,
@@ -1727,12 +1751,27 @@ static void run_refusal_row(struct rig* r, const struct run_units* ru) {
     verdict(r, ok && refused(end_diff(ctx, 0, NULL, &none), EG_BAD_REQUEST, ctx, "record the second run with a second runner") && eg_record_end(ctx, NULL, &open) == EG_OK,
             "eg_record_end with EG_RECORD_DIFF over one runner run twice: refused BAD_REQUEST, naming the way out");
     eg_graph_free(ctx, open);
+    lin_free(r, &plain);
+    lin_free(r, &rec);
+    release(r);
+    r->n_samples = 0;
+}
+
+/* A host recording keeps a run inside a WHILE and refuses it at the end of a DIFF recording. */
+static void run_while_row(struct rig* r, const struct run_units* ru) {
+    eg_ctx* ctx = r->ctx;
+    struct lin rec;
+    int32_t cell[1] = { 1 };
+    struct tensor tc;
+    r->n_samples = LN;
+    int ok = lin_make(r, ru, &rec, 7, 1);
+    eg_plane* pc = mk_i32(r, &tc, 1, cell);
+    eg_graph *none = NULL, *open = NULL;
     ok = ok && eg_record_begin(ctx) == EG_OK && cond_open(ctx, EG_COND_WHILE, 0, pc, 0, 3) == EG_OK && eg_run(ctx, rec.runner, NULL) == EG_OK &&
          eg_record_cond_end(ctx) == EG_OK;
     verdict(r, ok && refused(end_diff(ctx, 0, NULL, &none), EG_NOT_WRITTEN, ctx, "a phase count must be static") && eg_record_end(ctx, NULL, &open) == EG_OK,
             "eg_record_end with EG_RECORD_DIFF over a run inside a WHILE: refused NOT_WRITTEN with the static-count text");
     eg_graph_free(ctx, open);
-    lin_free(r, &plain);
     lin_free(r, &rec);
     release(r);
     r->n_samples = 0;
@@ -1742,13 +1781,119 @@ static void run_refusal_row(struct rig* r, const struct run_units* ru) {
 static void device_run_refusal_row(struct rig* r, const struct run_units* ru) {
     eg_ctx* ctx = r->ctx;
     struct lin l;
+    struct rig on_host = *r;    /* the runner of host planes on the device context */
+    on_host.device = 0;
+    on_host.n_planes = 0;
     r->n_samples = LN;
+    on_host.n_samples = LN;
     eg_graph *none = NULL, *open = NULL;
-    int ok = lin_make(r, ru, &l, 7, 1) && eg_record_begin(ctx) == EG_OK && eg_run(ctx, l.runner, NULL) == EG_OK;
+    int ok = lin_make(&on_host, ru, &l, 7, 1) && eg_record_begin(ctx) == EG_OK && eg_run(ctx, l.runner, NULL) == EG_OK;
     verdict(r, ok && refused(end_diff(ctx, 0, NULL, &none), EG_NOT_WRITTEN, ctx, "runs on the host in a device recording") && eg_record_end(ctx, NULL, &open) == EG_OK,
             "eg_record_end with EG_RECORD_DIFF over the run of a host runner in a device recording: refused NOT_WRITTEN by name");
     eg_graph_free(ctx, open);
+    lin_free(&on_host, &l);
+    release(&on_host);
+    r->n_samples = 0;
+}
+
+/* A run of a DEVICE runner is a step of the graph between two captures, so it cannot be a node inside a conditional arm, a fork branch or a WHILE:
+ * each is refused NOT_WRITTEN by name at the call, the recording left open and usable (every arm still needs a launch of its own). */
+static void device_run_scope_row(struct rig* r, const struct units* u, const struct run_units* ru) {
+    eg_ctx* ctx = r->ctx;
+    struct lin l;
+    double x[LN], w[1] = { 1.7 }, y1[LN], y2[LN];
+    int32_t flag[1] = { 1 };
+    struct tensor tx, tw, ty1, ty2, tf;
+    for (int i = 0; i < LN; ++i) x[i] = 1.0 + i;
+    r->n_samples = LN;
+    int ok = lin_make(r, ru, &l, 7, 1);
+    eg_plane *px = mk(r, &tx, LN, x), *pw = mk(r, &tw, 1, w), *py1 = mk(r, &ty1, LN, y1), *py2 = mk(r, &ty2, LN, y2), *pf = mk_i32(r, &tf, 1, flag);
+    eg_plane *s1[] = { px, pw, py1 }, *s2[] = { px, pw, py2 };
+    eg_plan *f1 = ok ? plan_with(r, u->scale, 3, s1, NULL) : NULL, *f2 = ok ? plan_with(r, u->scale, 3, s2, NULL) : NULL;
+    eg_graph* open = NULL;
+    static const char scope[] = "inside a conditional arm, a fork branch or a WHILE";
+    ok = ok && f1 && f2 && eg_record_begin(ctx) == EG_OK && cond_open(ctx, EG_COND_IF, 0, pf, 0, 0) == EG_OK;
+    verdict(r, ok && refused(eg_run(ctx, l.runner, NULL), EG_NOT_WRITTEN, ctx, scope) && eg_launch(ctx, f1, NULL) == EG_OK && eg_record_cond_end(ctx) == EG_OK &&
+                   eg_record_end(ctx, NULL, &open) == EG_OK,
+            "the run of a device runner inside an IF arm: refused NOT_WRITTEN by name, the recording left open");
+    eg_graph_free(ctx, open);
+    ok = ok && eg_record_begin(ctx) == EG_OK && eg_record_fork_begin(ctx) == EG_OK;
+    verdict(r, ok && refused(eg_run(ctx, l.runner, NULL), EG_NOT_WRITTEN, ctx, scope) && eg_launch(ctx, f1, NULL) == EG_OK && eg_record_fork_branch(ctx) == EG_OK &&
+                   eg_launch(ctx, f2, NULL) == EG_OK && eg_record_fork_end(ctx) == EG_OK && eg_record_end(ctx, NULL, &open) == EG_OK,
+            "the run of a device runner inside a fork branch: refused NOT_WRITTEN by name, the recording left open");
+    eg_graph_free(ctx, open);
+    ok = ok && eg_record_begin(ctx) == EG_OK && cond_open(ctx, EG_COND_WHILE, 0, pf, 0, 3) == EG_OK;
+    verdict(r, ok && refused(eg_run(ctx, l.runner, NULL), EG_NOT_WRITTEN, ctx, scope) && eg_launch(ctx, f1, NULL) == EG_OK && eg_record_cond_end(ctx) == EG_OK &&
+                   eg_record_end(ctx, NULL, &open) == EG_OK,
+            "the run of a device runner inside a WHILE: refused NOT_WRITTEN by name, the recording left open");
+    eg_graph_free(ctx, open);
+    if (f1) eg_plan_free(ctx, f1);
+    if (f2) eg_plan_free(ctx, f2);
     lin_free(r, &l);
+    release(r);
+    r->n_samples = 0;
+}
+
+/* Run a, launch y1 = w a, run b, launch y2 = w a: a graph of three captures and two runs. Its description is the recording order on two levels (the
+ * launches wait for run a, run b is free), and a plane rebound in the plans of both launches is re-applied in each capture. */
+static void device_run_segments_row(struct rig* r, const struct units* u, const struct run_units* ru) {
+    eg_ctx* ctx = r->ctx;
+    struct lin a, b;
+    double w[1] = { 1.7 }, x2[LN], y1[LN], y2[LN];
+    struct tensor tw, tx2, ty1, ty2;
+    r->n_samples = LN;
+    int ok = lin_make(r, ru, &a, 7, 0) && lin_make(r, ru, &b, 3, 0);
+    for (int i = 0; i < LN; ++i) x2[i] = 100.0 + i;
+    eg_plane *pw = mk(r, &tw, 1, w), *px2 = mk(r, &tx2, LN, x2), *py1 = mk(r, &ty1, LN, y1), *py2 = mk(r, &ty2, LN, y2);
+    eg_plane *s1[] = { a.px, pw, py1 }, *s2[] = { a.px, pw, py2 };
+    eg_plan *f1 = ok ? plan_with(r, u->scale, 3, s1, NULL) : NULL, *f2 = ok ? plan_with(r, u->scale, 3, s2, NULL) : NULL;
+    eg_graph* g = NULL;
+    ok = ok && f1 && f2 && eg_record_begin(ctx) == EG_OK && eg_run(ctx, a.runner, NULL) == EG_OK && eg_launch(ctx, f1, NULL) == EG_OK &&
+         eg_run(ctx, b.runner, NULL) == EG_OK && eg_launch(ctx, f2, NULL) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK;
+    struct eg_graph_description desc;
+    memset(&desc, 0, sizeof(desc));
+    desc.struct_size = sizeof(desc);
+    const eg_gnode_kind kinds[] = { EG_GNODE_RUN, EG_GNODE_LAUNCH, EG_GNODE_RUN, EG_GNODE_LAUNCH };
+    int described = ok && eg_graph_describe(ctx, g, &desc) == EG_OK && desc.n_nodes == 4 && desc.n_levels == 2;
+    for (int i = 0; described && i < 4; ++i) {
+        const struct eg_graph_node* n = (const struct eg_graph_node*)((const char*)desc.nodes + (size_t)i * desc.node_size);
+        described = n->kind == kinds[i] && n->parent == -1;
+    }
+    verdict(r, described, "eg_graph_describe of a device graph with two runs between launches: the four nodes in recording order (run, launch, run, launch), as for one capture");
+    up(r);
+    ok = ok && eg_graph_launch(ctx, g) == EG_OK;
+    down(r);
+    double want1[LN], want2[LN];
+    for (int i = 0; i < LN; ++i) {
+        double xk, dx;
+        lin_closed(a.x0[i], lin_steps(i, 7), &xk, &dx);
+        want1[i] = w[0] * xk;
+        want2[i] = w[0] * xk;
+    }
+    verdict(r, ok && close_rel(y1, want1, LN, 1e-12) && close_rel(y2, want2, LN, 1e-12),
+            "a device graph of run, launch, run, launch replays in order: both launches read the state the first run left");
+    struct eg_bind_desc rebind;
+    memset(&rebind, 0, sizeof(rebind));
+    rebind.struct_size = sizeof(rebind);
+    const int32_t slot_x = 0;
+    rebind.n_planes = 1;
+    rebind.plane_slots = &slot_x;
+    rebind.planes = &px2;
+    ok = ok && eg_bind(ctx, f1, &rebind) == EG_OK && eg_bind(ctx, f2, &rebind) == EG_OK;
+    lin_rewind(&a);
+    lin_rewind(&b);
+    up(r);
+    ok = ok && eg_graph_launch(ctx, g) == EG_OK;
+    down(r);
+    double wantx2[LN];
+    for (int i = 0; i < LN; ++i) wantx2[i] = w[0] * x2[i];
+    verdict(r, ok && close_rel(y1, wantx2, LN, 1e-12) && close_rel(y2, wantx2, LN, 1e-12),
+            "a plane rebound in the plans of two captures of one device graph: the next launch reads the new plane in both");
+    eg_graph_free(ctx, g);
+    if (f1) eg_plan_free(ctx, f1);
+    if (f2) eg_plan_free(ctx, f2);
+    lin_free(r, &a);
+    lin_free(r, &b);
     release(r);
     r->n_samples = 0;
 }
@@ -1757,13 +1902,16 @@ static void run_rows(struct rig* r, const struct units* u) {
     struct run_units ru = { load_run_unit(r, "lin", 0xE0), load_run_unit(r, "lin", 0xE1), load_run_unit(r, "lin_vjp", 0xE4) };
     verdict(r, ru.lin && ru.twin && ru.vjp, "the runner fixture's step, taping twin and step vjp load");
     if (!(ru.lin && ru.twin && ru.vjp)) return;
-    if (r->device) {    /* a device runner's run is not a host node: the device graph has no segment break at a run yet */
+    if (r->device) {
         device_run_refusal_row(r, &ru);
-        return;
+        device_run_scope_row(r, u, &ru);
+        device_run_segments_row(r, u, &ru);
+    } else {
+        run_if_row(r, u, &ru);
+        run_while_row(r, &ru);
     }
     run_launch_row(r, u, &ru);
     phase_row(r, u, &ru);
-    run_if_row(r, u, &ru);
     run_refusal_row(r, &ru);
 }
 

@@ -1090,6 +1090,10 @@ eg_status eg_gemm_free(eg_ctx* ctx, eg_gemm* gemm);
  * the step, and clears it. ``eg_reverse`` is not recorded on a device context (NOT_WRITTEN).
  * A recorded ``eg_run`` replays as a restart: at every ``eg_graph_launch``, plain or EG_RECORD_DIFF, ``eg_runner_reset`` and then the
  * run, so each launch runs the batch from its start and, for an EG_RUN_RECORD runner, keeps its own record.
+ * The ``eg_run`` of a DEVICE runner on a device context is not a host node: the capture ends there, and ``eg_graph_launch`` replays the graph as
+ * its captures and those runs in the order recorded, each run eagerly on the context's stream (it reads back and synchronizes, which a captured
+ * graph cannot). A graph with no such run is one capture. The description and the rebinding of a plan's arguments cover every capture.
+ * A run inside a conditional arm, a fork branch or a WHILE is refused NOT_WRITTEN, the recording left open: record it outside them.
  * Replaces: ``graph.Graph.build`` / ``pipeline.GraphPipeline`` and the
  * node-by-node host arms. Status: OK; BAD_REQUEST (already recording).
  */
@@ -1185,7 +1189,7 @@ struct eg_record_end_desc {
  *  be reversed", the same runner run twice BAD_REQUEST ending "record the second run with a second runner", a run inside a WHILE NOT_WRITTEN
  *  with "a phase count must be static: unroll the phases into the graph". The text after the
  *  call's name is the same on every target, for the caller to carry unchanged. A device recording refuses a call that runs on the
- *  host (a host plan, the copy or reduce of host planes) NOT_WRITTEN by name. Each replay saves what every conditional's test saw
+ *  host (a host plan, the copy or reduce of host planes, the run of a host runner) NOT_WRITTEN by name. Each replay saves what every conditional's test saw
  *  (``cell[cell_index]`` and the baseline element) and a leaf under an arm takes part in the reverse only if that arm ran, decided
  *  from the saved values with NEGATE applied, never from the live cells. A WHILE needs ``max_iters`` of 1 or more (0 is refused:
  *  the cap bounds the tape); the tape plans its body unrolled ``max_iters`` times, each copy running only if its iteration did.

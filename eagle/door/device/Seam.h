@@ -31,6 +31,9 @@ void device_loop_drop(eg_runner_s& runner);
 void device_sync(eg_ctx& ctx);
 void device_record_begin(eg_ctx& ctx);
 void device_record_launch(eg_ctx& ctx, eg_plan_s& plan);
+/** @brief eg_run of a DEVICE runner while recording: the capture ends and the run becomes a step of the graph that eg_graph_launch runs eagerly
+ *  (reset, then the run) between that capture and the next; refused NOT_WRITTEN inside a conditional arm, a fork branch or a WHILE. */
+void device_record_run(eg_ctx& ctx, eg_runner_s* runner);
 /** @brief eg_record_end on a device context; with @p diff (the tape of EG_RECORD_DIFF, planned by diff_plan over the recorded launches, which
  *  must be all it holds) the capture is made again with the snapshot copies in front of the launches that overwrite a plane. */
 void device_record_end(eg_ctx& ctx, const eg_record_end_desc* desc, eg_graph** out);
