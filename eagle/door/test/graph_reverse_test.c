@@ -2204,6 +2204,7 @@ static int step_case(struct rig* r, const struct units* u, const struct run_unit
     struct tensor ty, tw, tseed, tgx, tgt, tga, tgb, tz, twc;
     for (int i = 0; i < n; ++i) seed[i] = 1.0, y[i] = 0.0;
     r->n_samples = n;
+    int fd_ok = 0;    /* the row's verdict: set where the row decides it, returned after the cleanup */
     int ok = lin_planes(r, ru, &l, 7);
     for (int i = 0; i < n; ++i) l.x0[i] = l.x[i] = 1.0 + i / 8.0;
     eg_plane *py = mk(r, &ty, n, y), *pw = mk(r, &tw, 1, w), *ps = mk(r, &tseed, n, seed);
@@ -2236,7 +2237,8 @@ static int step_case(struct rig* r, const struct units* u, const struct run_unit
         const eg_derived_role roles[2] = { EG_DERIVED_TAPE, EG_DERIVED_STEP_VJP };
         eg_unit* const units[2] = { twin, ru->vjp };
         d.flags = EG_RUN_RECORD, d.n_derived = 2, d.derived_roles = roles, d.derived_units = units, d.window = window, d.step_graphs = list, d.n_step_graphs = 2;
-        verdict(r, eg_runner_new(ctx, &d, &refused_runner) == EG_NOT_WRITTEN && refused_runner == NULL && reason_has(ctx, "share a plane"), what);
+        fd_ok = eg_runner_new(ctx, &d, &refused_runner) == EG_NOT_WRITTEN && refused_runner == NULL && reason_has(ctx, "share a plane");
+        verdict(r, fd_ok, what);
         goto cleanup;
     }
     if (ok && (budget != 0 || two)) {
@@ -2271,7 +2273,7 @@ static int step_case(struct rig* r, const struct units* u, const struct run_unit
     fg.struct_size = sizeof(fg);
     ok = ok && eg_runner_figures(ctx, l.runner, &fg) == EG_OK && fg.reverse_bitwise == 1;
     *passes = fg.reverse_passes;
-    int fd_ok = ok;    /* central differences of the model: dJ/dx0 of every fourth sample, dJ/da and dJ/db */
+    fd_ok = ok;    /* central differences of the model: dJ/dx0 of every fourth sample, dJ/da and dJ/db */
     const double h = 1e-6;
     for (int i = 0; fd_ok && i < n; i += (n > 100 ? 61 : 4)) {
         static double xp[LNMAX], xm[LNMAX];
