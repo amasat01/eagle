@@ -563,11 +563,11 @@ void read_body(const eg_unit_meta& m, void* library, bool device_only, eg_unit_s
             refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' plane axes of slot " + std::to_string(pa.slot) +
                    " (a slot of the unit, one axis or more, with labels and extents)");
         SlotFacts& f = unit.slots[pa.slot];
-        if (f.role != EG_ROLE_PLANE_OUT
+        if (f.role != EG_ROLE_PLANE_OUT && f.role != EG_ROLE_PLANE_IN
             && f.role != EG_ROLE_WIDE_IN && f.role != EG_ROLE_LOOKUP)
             refuse(EG_NOT_WRITTEN,
                 "unit '" + unit.name + "': named plane axes on slot '" + f.name
-                    + "' (not a PLANE_OUT, WIDE_IN or LOOKUP slot) "
+                    + "' (not a PLANE_OUT, PLANE_IN, WIDE_IN or LOOKUP slot) "
                       "are not written");
         if (!f.axes.empty())
             refuse(EG_BAD_REQUEST,

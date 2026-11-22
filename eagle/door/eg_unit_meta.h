@@ -321,7 +321,7 @@ struct eg_unit_body {
     const struct eg_unit_dispatch* const* dispatches;
 };
 
-/** Named axes of a plane (LOOKUP, WIDE_IN or PLANE_OUT): the plane
+/** Named axes of a plane (LOOKUP, WIDE_IN, PLANE_IN or PLANE_OUT): the plane
  * binds as (*slot shape, *axes), last axis fastest. */
 struct eg_unit_plane_axes {
     uint32_t struct_size;
