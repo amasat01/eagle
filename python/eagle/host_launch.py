@@ -25,7 +25,7 @@ import math
 
 from .abi import DEVICE_CPU, check_aether_abi
 from .roles import check_launch_certified_pattern, classify_arg
-from .sidecar import PARAMS_SCHEMA_KEY, read_launch, read_params, read_plane_meta, validate_sidecar
+from .sidecar import PARAMS_SCHEMA_KEY, internal_roles, read_launch, read_params, read_plane_meta, validate_sidecar
 
 
 class GRefMirror(ctypes.Structure):
@@ -97,6 +97,7 @@ class HostPluginLibrary:
         # loader-specific gates. Family refusal precedes ABI-tag
         # complaints, since a descriptor at a host door is the wrong KIND.
         label = f"host plugin '{sidecar.get('kernel', '?')}'"
+        sidecar = internal_roles(sidecar, name=label)
         validate_sidecar(sidecar, name=label)
         #: The launch declaration, as :class:`eagle.loaded.LoadedKernel` carries it.
         (self.lane_space, self.block, self.plane_axes,

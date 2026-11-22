@@ -3520,7 +3520,7 @@ static void check_slot_kinds(eg_ctx* ctx) {
                 want_o[i] = (want_v[i] + want_v[M + i] + want_v[2 * M + i]) + m + (double)M;
             }
         ok = ok && memcmp(v, want_v, sizeof(v)) == 0 && memcmp(o, want_o, sizeof(o)) == 0;
-        check(ok, "vecs: rank-1 MUTABLE and VEC_IN, rank-2 MAT_IN and rank-0 OUT as mirrors, an int32 PER_SAMPLE, a "
+        check(ok, "vecs: rank-1 MUTABLE and VEC_IN, rank-2 MAT_IN and rank-0 OUT as mirrors, an int32 PLANE_IN, a "
                   "LOOKUP table read by element count and eagle's NSAMPLES equal the plain loop (bitwise, twice)");
         eg_plan_free(ctx, p);
     }

@@ -27,7 +27,7 @@
  *  - "countA", "countAa": finishing units with steps AUTO: each launch steps every live sample up to
  *    the int64 word eagle sets in slot 4 (countAa also reads the active set, slots 5 and 6).
  *  - "vecs": every plane role the door binds beyond the scalar ones: a rank-1 MUTABLE and VEC_IN, a rank-2
- *    MAT_IN, an int32 PER_SAMPLE, a LOOKUP table, the NSAMPLES count, a rank-0 OUT and a uniform.
+ *    MAT_IN, an int32 PLANE_IN, a LOOKUP table, the NSAMPLES count, a rank-0 OUT and a uniform.
  *  - "count1g": count1 with an active set over groups of 5 lanes (the map holds group indices).
  *  - "widemul": a WIDE_OUT and a WIDE_IN plane of three rows each beside a MUTABLE plane.
  *  - "cells": two cells of rows of 4 samples (a MIN and a MAX); "cellsum": a SUM cell, which the meta cannot complete; "keyed": a keyed
@@ -642,7 +642,7 @@ const uint64_t eagle_layout_sizes[5] = {
 #define SLOT(var, role_, name_) SLOT_OF(var, role_, EG_DTYPE_REAL, name_)
 
 SLOT(slot_y, EG_ROLE_MUTABLE, "y");
-SLOT(slot_x, EG_ROLE_PER_SAMPLE, "x");
+SLOT(slot_x, EG_ROLE_PLANE_IN, "x");
 SLOT(slot_a, EG_ROLE_UNIFORM, "a");
 SLOT(slot_b, EG_ROLE_UNIFORM, "b");
 
@@ -758,7 +758,7 @@ static const struct eg_unit_meta unit_split = {
 };
 
 SLOT(slot_k, EG_ROLE_MUTABLE, "k");
-SLOT(slot_limit, EG_ROLE_PER_SAMPLE, "limit");
+SLOT(slot_limit, EG_ROLE_PLANE_IN, "limit");
 SLOT_OF(slot_mask, EG_ROLE_TERMINATED, EG_DTYPE_BOOL, "mask");
 SLOT_OF(slot_finished, EG_ROLE_LOOKUP, EG_DTYPE_UINT32, "finished");
 
@@ -856,9 +856,9 @@ static const int64_t shape22[2] = { 2, 2 };
         .dtype = dtype_, .rank = rank_, .like_slot = -1, .n_gather = 0,        \
         .shape = shape_, .gather = NULL, .name = name_ }
 SLOT_R(slot_v, EG_ROLE_MUTABLE, EG_DTYPE_REAL, 1, shape3, "v");
-SLOT_R(slot_w, EG_ROLE_VEC_IN, EG_DTYPE_REAL, 1, shape3, "w");
-SLOT_R(slot_mm, EG_ROLE_MAT_IN, EG_DTYPE_REAL, 2, shape22, "mm");
-SLOT_R(slot_idx, EG_ROLE_PER_SAMPLE, EG_DTYPE_INT32, 0, NULL, "idx");
+SLOT_R(slot_w, EG_ROLE_PLANE_IN, EG_DTYPE_REAL, 1, shape3, "w");
+SLOT_R(slot_mm, EG_ROLE_PLANE_IN, EG_DTYPE_REAL, 2, shape22, "mm");
+SLOT_R(slot_idx, EG_ROLE_PLANE_IN, EG_DTYPE_INT32, 0, NULL, "idx");
 SLOT_R(slot_table, EG_ROLE_LOOKUP, EG_DTYPE_REAL, 0, NULL, "table");
 SLOT_R(slot_nn, EG_ROLE_NSAMPLES, EG_DTYPE_UINT32, 0, NULL, "nn");
 SLOT_R(slot_o, EG_ROLE_OUT, EG_DTYPE_REAL, 0, NULL, "o");
@@ -953,7 +953,7 @@ static const uint8_t keep_b[2] = { 0, 1 }, keep_a[2] = { 1, 0 };
 static const int64_t gath_shape[2] = { 2, 2 }, gath_extents[2] = { -1, 4 };
 #define GATH_SLOT(var, flags_, n_, pattern_)                                                                 \
     static const struct eg_unit_slot var = {                                                                 \
-        .struct_size = sizeof(struct eg_unit_slot), .flags = flags_, .role = EG_ROLE_MAT_IN,                 \
+        .struct_size = sizeof(struct eg_unit_slot), .flags = flags_, .role = EG_ROLE_PLANE_IN,                 \
         .dtype = EG_DTYPE_REAL, .rank = 2, .like_slot = -1, .n_gather = n_, .shape = gath_shape,            \
         .gather = pattern_, .name = "M" }
 GATH_SLOT(slot_gb, EG_SLOT_GATHER, 2, keep_b);
@@ -1267,7 +1267,7 @@ static const struct eg_unit_slot slot_cross_out = {
     .struct_size = sizeof(struct eg_unit_slot), .role = EG_ROLE_MUTABLE, .dtype = EG_DTYPE_REAL, .rank = 1,
     .like_slot = -1, .shape = vec_shape, .name = "cross" };
 static const struct eg_unit_slot slot_cross_in = {
-    .struct_size = sizeof(struct eg_unit_slot), .role = EG_ROLE_VEC_IN, .dtype = EG_DTYPE_REAL, .rank = 1,
+    .struct_size = sizeof(struct eg_unit_slot), .role = EG_ROLE_PLANE_IN, .dtype = EG_DTYPE_REAL, .rank = 1,
     .like_slot = -1, .shape = vec_shape, .name = "cross" };
 static const struct eg_unit_slot* const vecw_slots[] = { &slot_cross_out, &slot_x };
 static const struct eg_unit_slot* const vecr_slots[] = { &slot_y, &slot_cross_in };
@@ -1314,9 +1314,9 @@ static const struct eg_unit_meta unit_actrow = {
     .body = &actrow_body, .launch = &launch_actrow };
 
 static const int64_t scat_tbl_shape[] = { 8 }, scat_fault_shape[] = { 2 };
-SLOT_OF(slot_sidx, EG_ROLE_PER_SAMPLE, EG_DTYPE_INT32, "idx");
-SLOT_OF(slot_sjdx, EG_ROLE_PER_SAMPLE, EG_DTYPE_INT32, "jdx");
-SLOT(slot_sval, EG_ROLE_PER_SAMPLE, "val");
+SLOT_OF(slot_sidx, EG_ROLE_PLANE_IN, EG_DTYPE_INT32, "idx");
+SLOT_OF(slot_sjdx, EG_ROLE_PLANE_IN, EG_DTYPE_INT32, "jdx");
+SLOT(slot_sval, EG_ROLE_PLANE_IN, "val");
 SLOT(slot_sacc, EG_ROLE_ACCUM_OUT, "acc");
 static const struct eg_unit_slot slot_stbl = { .struct_size = sizeof(struct eg_unit_slot), .flags = EG_SLOT_SHARED, .role = EG_ROLE_LOOKUP, .dtype = EG_DTYPE_REAL,
                                               .rank = 1, .like_slot = -1, .shape = scat_tbl_shape, .name = "tbl" };

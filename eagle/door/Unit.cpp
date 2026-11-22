@@ -48,8 +48,8 @@ SlotFacts read_slot(const eg_unit_slot* in, const std::string& unit, int index) 
     const std::string named = what + " ('" + (s.name ? s.name : "?") + "')";
     if (s.flags & ~(EG_SLOT_PRIOR | EG_SLOT_PARAM_PLANE | EG_SLOT_GATHER | EG_SLOT_SHARED))
         refuse(EG_NOT_WRITTEN, named + ": unknown flag bits " + std::to_string(s.flags));
-    if ((s.flags & EG_SLOT_GATHER) && !((s.role == EG_ROLE_MAT_IN && s.rank == 2) || s.role == EG_ROLE_LOOKUP))
-        refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + named + " is GATHER but neither a rank-2 MAT_IN nor a LOOKUP");
+    if ((s.flags & EG_SLOT_GATHER) && !((s.role == EG_ROLE_PLANE_IN && s.rank == 2) || s.role == EG_ROLE_LOOKUP))
+        refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + named + " is GATHER but neither a rank-2 PLANE_IN nor a LOOKUP");
     if ((s.flags & EG_SLOT_GATHER) && (s.flags & (EG_SLOT_SHARED | EG_SLOT_PARAM_PLANE)))
         refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + named + " is GATHER (it varies along lane axes) and SHARED or PARAM_PLANE (it has none)");
     if ((s.flags & EG_SLOT_SHARED) && s.role != EG_ROLE_LOOKUP)
@@ -59,25 +59,33 @@ SlotFacts read_slot(const eg_unit_slot* in, const std::string& unit, int index) 
     if (s.n_gather < 0 || (s.n_gather > 0 && (s.gather == nullptr || !(s.flags & EG_SLOT_GATHER))))
         refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + named + " n_gather " + std::to_string(s.n_gather) +
                " without a gather pattern on a GATHER slot");
-    if (s.role < EG_ROLE_MUTABLE || s.role > EG_ROLE_OUT)
+    if (s.role < EG_ROLE_MUTABLE || s.role > EG_ROLE_EXTENT)
         refuse(EG_NOT_WRITTEN, named + ": unknown role " + std::to_string(s.role));
     if (s.dtype < EG_DTYPE_REAL || s.dtype > EG_DTYPE_BAND_PARTIAL)
         refuse(EG_NOT_WRITTEN, named + ": unknown dtype " + std::to_string(s.dtype));
-    if (s.rank < 0 || s.rank > 2 || (s.rank > 0 && s.shape == nullptr))
+    if (s.rank < 0 || (s.rank > 0 && s.shape == nullptr))
         refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + named + " rank " +
                std::to_string(s.rank));
-    const bool plane = s.role == EG_ROLE_MUTABLE || s.role == EG_ROLE_PER_SAMPLE || s.role == EG_ROLE_OUT ||
-                       s.role == EG_ROLE_VEC_IN || s.role == EG_ROLE_MAT_IN;
-    if (!plane && s.role != EG_ROLE_UNIFORM && s.role != EG_ROLE_TERMINATED && s.role != EG_ROLE_LOOKUP &&
-        s.role != EG_ROLE_ACCUM_OUT && s.role != EG_ROLE_NSAMPLES && s.role != EG_ROLE_WIDE_IN && s.role != EG_ROLE_WIDE_OUT)
-        refuse(EG_NOT_WRITTEN, named + ": role " + std::to_string(s.role) + " is not written yet (this build binds "
-               "MUTABLE, PER_SAMPLE, VEC_IN, MAT_IN, OUT, WIDE_IN, WIDE_OUT, ACCUM_OUT, LOOKUP, UNIFORM, NSAMPLES and TERMINATED)");
-    if (s.rank != 0 && !plane && !(s.flags & EG_SLOT_SHARED) && s.role != EG_ROLE_ACCUM_OUT && s.role != EG_ROLE_WIDE_OUT)
+    const bool plane = s.role == EG_ROLE_MUTABLE || s.role == EG_ROLE_PLANE_IN || s.role == EG_ROLE_OUT;
+    if (!plane && s.role != EG_ROLE_UNIFORM && s.role != EG_ROLE_TERMINATED
+        && s.role != EG_ROLE_LOOKUP && s.role != EG_ROLE_ACCUM_OUT
+        && s.role != EG_ROLE_NSAMPLES && s.role != EG_ROLE_EXTENT
+        && s.role != EG_ROLE_WIDE_IN && s.role != EG_ROLE_WIDE_OUT)
+        refuse(EG_NOT_WRITTEN,
+            named + ": role " + std::to_string(s.role)
+                + " is not written yet (this build binds "
+                  "MUTABLE, PLANE_IN, OUT, WIDE_IN, "
+                  "WIDE_OUT, ACCUM_OUT, LOOKUP, UNIFORM, NSAMPLES, EXTENT and "
+                  "TERMINATED)");
+    if (s.rank != 0 && !plane && !(s.flags & EG_SLOT_SHARED) && s.role != EG_ROLE_LOOKUP && s.role != EG_ROLE_ACCUM_OUT && s.role != EG_ROLE_WIDE_OUT)
         refuse(EG_NOT_WRITTEN, named + ": a slot of rank > 0 outside the plane roles is not written yet");
-    if (s.rank != 0 && s.role == EG_ROLE_PER_SAMPLE)
-        refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + named + " is PER_SAMPLE of rank > 0");
     if (s.role == EG_ROLE_NSAMPLES && s.dtype != EG_DTYPE_UINT32)
         refuse(EG_NOT_WRITTEN, named + ": an NSAMPLES slot of a dtype other than UINT32 is not written");
+    if (s.role == EG_ROLE_EXTENT && s.dtype != EG_DTYPE_INT64)
+        refuse(EG_NOT_WRITTEN,
+            named
+                + ": an EXTENT slot of a dtype other than INT64 is not "
+                  "written");
     if (s.role == EG_ROLE_TERMINATED && (s.dtype == EG_DTYPE_REAL || s.dtype == EG_DTYPE_BAND_PARTIAL))
         refuse(EG_NOT_WRITTEN, named + ": a TERMINATED mask of a floating dtype is not written (BOOL, INT32, UINT32 "
                "and INT64 are)");
@@ -94,8 +102,7 @@ SlotFacts read_slot(const eg_unit_slot* in, const std::string& unit, int index) 
             refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + named + " extent " + std::to_string(s.shape[i]));
         facts.shape.push_back(s.shape[i]);
     }
-    facts.mirror = s.role == EG_ROLE_OUT || s.role == EG_ROLE_VEC_IN || s.role == EG_ROLE_MAT_IN ||
-                   (s.role == EG_ROLE_MUTABLE && s.rank > 0);
+    facts.mirror = s.role == EG_ROLE_OUT || ((s.role == EG_ROLE_MUTABLE || s.role == EG_ROLE_PLANE_IN) && s.rank > 0);
     facts.gathered = (s.flags & EG_SLOT_GATHER) != 0;
     facts.shared = (s.flags & EG_SLOT_SHARED) != 0;
     facts.param_plane = (s.flags & EG_SLOT_PARAM_PLANE) != 0;
@@ -553,13 +560,39 @@ void read_body(const eg_unit_meta& m, void* library, bool device_only, eg_unit_s
             refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' plane axes of slot " + std::to_string(pa.slot) +
                    " (a slot of the unit, one axis or more, with labels and extents)");
         SlotFacts& f = unit.slots[pa.slot];
-        if (f.role != EG_ROLE_ACCUM_OUT && f.role != EG_ROLE_WIDE_OUT)
-            refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': named plane axes on slot '" + f.name + "' (not an ACCUM_OUT or WIDE_OUT slot) are not written");
+        if (f.role != EG_ROLE_ACCUM_OUT && f.role != EG_ROLE_WIDE_OUT
+            && f.role != EG_ROLE_WIDE_IN && f.role != EG_ROLE_LOOKUP)
+            refuse(EG_NOT_WRITTEN,
+                "unit '" + unit.name + "': named plane axes on slot '" + f.name
+                    + "' (not an ACCUM_OUT, WIDE_OUT, WIDE_IN or LOOKUP slot) "
+                      "are not written");
+        if (!f.axes.empty())
+            refuse(EG_BAD_REQUEST,
+                "meta that contradicts itself: unit '" + unit.name
+                    + "' states the axes of slot '" + f.name + "' twice");
         for (int a = 0; a < pa.n_axes; ++a) {
             SlotFacts::Axis axis;
             axis.extent = pa.extents[a];
-            for (int l = 0; pa.labels[a] != nullptr && launch.lane_labels != nullptr && l < launch.n_lane_axes; ++l)
+            axis.label  = pa.labels[a] != nullptr ? pa.labels[a] : "";
+            // a runtime axis named like a lane axis is that lane axis's extent; an axis that states its own extent never is
+            for (int l = 0; axis.extent < 0 && pa.labels[a] != nullptr && launch.lane_labels != nullptr && l < launch.n_lane_axes; ++l)
                 if (launch.lane_labels[l] != nullptr && std::strcmp(launch.lane_labels[l], pa.labels[a]) == 0) axis.lane = l;
+            if (pa.extent_slots != nullptr
+                && pa.extent_slots[a]
+                    >= 0) { // the argument that carries a runtime extent
+                const std::int32_t at = pa.extent_slots[a];
+                if (axis.extent >= 0
+                    || at >= static_cast<std::int32_t>(unit.slots.size())
+                    || unit.slots[at].role != EG_ROLE_EXTENT)
+                    refuse(EG_BAD_REQUEST,
+                        "meta that contradicts itself: unit '" + unit.name
+                            + "' axis " + std::to_string(a) + " of slot '"
+                            + f.name + "' names extent slot "
+                            + std::to_string(at)
+                            + " (a runtime axis, and an EXTENT slot of the "
+                              "unit)");
+                axis.extent_slot = at;
+            }
             f.axes.push_back(axis);
         }
     }
@@ -988,7 +1021,8 @@ void resolve_stages(eg_ctx& ctx, const eg_unit_load_desc& d, eg_unit_s& unit) {
             }
         }
         for (std::size_t k = 0; k < unit.slots.size(); ++k) {
-            bool joined = unit.slots[k].made || unit.slots[k].role == EG_ROLE_NSAMPLES;    // the sample count joins no stage slot of its own
+            bool joined = unit.slots[k].made || unit.slots[k].role == EG_ROLE_NSAMPLES
+                          || unit.slots[k].role == EG_ROLE_EXTENT;    // the sample count and an axis's extent join no stage slot of their own
             for (const StageFacts& st : unit.stages)
                 for (std::int32_t s : st.source_of) joined = joined || s == static_cast<std::int32_t>(k);
             for (const SplitCell& c : unit.split_cells) joined = joined || c.source == static_cast<std::int32_t>(k);
@@ -1301,9 +1335,6 @@ void unit_load(eg_ctx& ctx, const eg_unit_load_desc* desc, eg_unit** out) {
         try {
             read_unit(m, library, *unit);
             if (!unit->stages.empty()) resolve_stages(ctx, read_input(desc, "eg_unit_load_desc"), *unit);
-            for (const SlotFacts& s : unit->slots)
-                if (s.role == EG_ROLE_WIDE_OUT && !s.axes.empty() && s.keys_of < 0)
-                    refuse(EG_NOT_WRITTEN, "unit '" + unit->name + "': named plane axes on slot '" + s.name + "', which no KEYS stage writes, are not written");
             resolve_segmented(ctx, read_input(desc, "eg_unit_load_desc"), *unit);
             resolve_auto(ctx, read_input(desc, "eg_unit_load_desc"), *unit);
             ctx.units.insert(unit);

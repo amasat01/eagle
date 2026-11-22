@@ -4,7 +4,7 @@
  * The device fixture's meta: units over the one kernel of fixture_device.cu, whose fatbin (sm_61) the build
  * embeds as fixture__image / fixture__image_size.
  *
- *   axpy     y = fma(a, x, v[0]) + n * v[1]: MUTABLE y, PER_SAMPLE x, VEC_IN v (2 components), UNIFORM a,
+ *   axpy     y = fma(a, x, v[0]) + n * v[1]: MUTABLE y, PLANE_IN x, VEC_IN v (2 components), UNIFORM a,
  *            NSAMPLES n; no block stated (eagle's choice).
  *   axpy64   the same with launch.block 64.
  *   boxdev   the same with a device thread box (refused on DEVICE).
@@ -30,8 +30,8 @@
 
 static const int64_t v_shape[] = { 2 };
 SLOT(slot_y, EG_ROLE_MUTABLE, EG_DTYPE_REAL, 0, NULL, "y");
-SLOT(slot_x, EG_ROLE_PER_SAMPLE, EG_DTYPE_REAL, 0, NULL, "x");
-SLOT(slot_v, EG_ROLE_VEC_IN, EG_DTYPE_REAL, 1, v_shape, "v");
+SLOT(slot_x, EG_ROLE_PLANE_IN, EG_DTYPE_REAL, 0, NULL, "x");
+SLOT(slot_v, EG_ROLE_PLANE_IN, EG_DTYPE_REAL, 1, v_shape, "v");
 SLOT(slot_a, EG_ROLE_UNIFORM, EG_DTYPE_REAL, 0, NULL, "a");
 SLOT(slot_n, EG_ROLE_NSAMPLES, EG_DTYPE_UINT32, 0, NULL, "n");
 
@@ -154,7 +154,7 @@ static const struct eg_unit_launch launch_psum = {
 MADE_UNIT(unit_dprefixsum, "dprefixsum", 0xDB, "dprefixsum", psum_body, launch_psum);
 
 SLOT(slot_k, EG_ROLE_MUTABLE, EG_DTYPE_REAL, 0, NULL, "k");
-SLOT(slot_limit, EG_ROLE_PER_SAMPLE, EG_DTYPE_REAL, 0, NULL, "limit");
+SLOT(slot_limit, EG_ROLE_PLANE_IN, EG_DTYPE_REAL, 0, NULL, "limit");
 SLOT(slot_mask, EG_ROLE_TERMINATED, EG_DTYPE_BOOL, 0, NULL, "mask");
 SLOT(slot_finished, EG_ROLE_LOOKUP, EG_DTYPE_UINT32, 0, NULL, "finished");
 SLOT(slot_geom, EG_ROLE_LOOKUP, EG_DTYPE_REAL, 0, NULL, "geom");
@@ -320,9 +320,9 @@ AUTO_SET(heavy, 0x97);
 
 /* dscat / dscatp: the checked and unchecked builds of one data-indexed accumulate (slots idx, jdx, val, acc, tbl, fault; see fixture_device.cu). */
 static const int64_t scat_tbl_shape[] = { 8 }, scat_fault_shape[] = { 2 };
-SLOT(slot_sidx, EG_ROLE_PER_SAMPLE, EG_DTYPE_INT32, 0, NULL, "idx");
-SLOT(slot_sjdx, EG_ROLE_PER_SAMPLE, EG_DTYPE_INT32, 0, NULL, "jdx");
-SLOT(slot_sval, EG_ROLE_PER_SAMPLE, EG_DTYPE_REAL, 0, NULL, "val");
+SLOT(slot_sidx, EG_ROLE_PLANE_IN, EG_DTYPE_INT32, 0, NULL, "idx");
+SLOT(slot_sjdx, EG_ROLE_PLANE_IN, EG_DTYPE_INT32, 0, NULL, "jdx");
+SLOT(slot_sval, EG_ROLE_PLANE_IN, EG_DTYPE_REAL, 0, NULL, "val");
 SLOT(slot_sacc, EG_ROLE_ACCUM_OUT, EG_DTYPE_REAL, 0, NULL, "acc");
 static const struct eg_unit_slot slot_stbl = { .struct_size = sizeof(struct eg_unit_slot), .flags = EG_SLOT_SHARED, .role = EG_ROLE_LOOKUP, .dtype = EG_DTYPE_REAL,
                                                .rank = 1, .like_slot = -1, .shape = scat_tbl_shape, .name = "tbl" };

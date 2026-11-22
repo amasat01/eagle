@@ -97,8 +97,14 @@ struct SlotFacts {
     bool shared = false;                      ///< a LOOKUP with no lane axis: one value for every lane, bound flat
     bool param_plane = false;                 ///< a LOOKUP read at index 0 only (a parameter in a one-cell plane); validated, not acted on
     /** @brief One named axis of an ACCUM_OUT plane: a static extent, or -1 and the lane axis whose extent it shares. */
-    struct Axis { std::int64_t extent = -1; int lane = -1; };
-    std::vector<Axis> axes;                   ///< ACCUM_OUT: the plane's named axes (empty: any compact plane)
+    struct Axis {
+        std::string label;
+        std::int64_t extent      = -1;
+        int lane                 = -1;
+        std::int32_t extent_slot = -1;
+    };
+    std::vector<Axis> axes; ///< a plane with named axes: they follow its
+                            ///< payload extents (empty: any compact plane)
     bool made = false;                        ///< eagle's own plane (a companion): never bound by the caller
     bool cell = false;                        ///< a cell's slot: the caller binds the finished (1,) cell, the kernel reads eagle's rows
     std::int32_t keys_of = -1;                ///< a WIDE_OUT slot a KEYS stage writes (a block sum's output): the keyed record whose keys it holds, else -1

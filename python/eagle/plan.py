@@ -34,6 +34,7 @@ they cannot disagree about how a role packs.
 from __future__ import annotations
 
 import functools
+from types import SimpleNamespace
 from dataclasses import dataclass
 
 
@@ -50,6 +51,7 @@ from . import _plan_planes as _planes
 from . import exec as eexec
 from .abi import DEVICE_CPU, DEVICE_CUDA
 from .roles import INPUT_ROLES, OUTPUT_ROLES
+from .sidecar import internal_roles
 from ._plan_binding import BoundPlan, FUSED_STEPS_SLOT, _bind_plan, one_step_word
 from . import _lane_bind
 from ._plan_pack import _data_ptr, _integer_uniforms, _mutable_shapes, _pack_args
@@ -282,6 +284,25 @@ def _resolve_explicit_partitions(partitions):
     return tuple(parts), n_samples
 
 
+def _with_internal_roles(plugin):
+    """``plugin`` with the roles and lists of its declaration given this package's own names, when it states ``plane_in`` slots.
+
+    The plan-time declaration of a sidecar (``hawk.artifact.plan_view``) carries the sidecar's one read role and
+    ``slot_shapes``; :func:`eagle.sidecar.internal_roles` is the package's single rule for reading them."""
+    if not any(role == "plane_in" for role, _name in getattr(plugin, "arg_spec", ())):
+        return plugin
+    read = internal_roles(
+        {
+            "arg_spec": plugin.arg_spec,
+            "slot_shapes": getattr(plugin, "slot_shapes", None),
+            "arg_widths": getattr(plugin, "arg_widths", None),
+        },
+        name=getattr(plugin, "name", None) or getattr(plugin, "kernel", "<plugin>"),
+    )
+    read["arg_spec"] = tuple(tuple(pair) for pair in read["arg_spec"])
+    return SimpleNamespace(**{**vars(plugin), **read})
+
+
 def plan(
     plugin,
     *,
@@ -318,7 +339,7 @@ def plan(
     A plugin declaring ``.abi_tag == eagle.exec.ABI_TAG_V1`` (a legacy v1
     ``LoadedVector``/``LoadedPure``) carries no partition triple, so a
     partition count above 1 is refused naming "legacy"."""
-    plugin = _split.linked(plugin, "eagle.plan")
+    plugin = _split.linked(_with_internal_roles(plugin), "eagle.plan")
     # test seams: a placement check without a v2 plugin body, and the rank
     # structure's pre-gather arm
     access = (

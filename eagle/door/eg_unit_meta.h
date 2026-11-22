@@ -82,17 +82,16 @@ typedef int32_t eg_image_format;
 /** What a slot holds; decides how eagle binds it (contract Role, same order). */
 typedef int32_t eg_slot_role;
 #define EG_ROLE_MUTABLE 0     /**< a plane read and written in place */
-#define EG_ROLE_PER_SAMPLE 1  /**< one value per sample */
-#define EG_ROLE_VEC_IN 2      /**< a vector read in one piece */
+#define EG_ROLE_PLANE_IN 1   /**< a plane read per sample, whatever the rank of its value (the slot's shape says it) */
 #define EG_ROLE_LOOKUP 3      /**< a table indexed at run time; its length is the caller's */
 #define EG_ROLE_WIDE_OUT 4    /**< several values per sample out; runtime length: the caller's plane is any compact plane of one dimension or more, and its handle carries the trailing extent */
 #define EG_ROLE_UNIFORM 5     /**< one value for all samples, by value */
-#define EG_ROLE_MAT_IN 6      /**< a matrix read in one piece */
 #define EG_ROLE_ACCUM_OUT 7   /**< accumulated over samples; runtime length */
 #define EG_ROLE_TERMINATED 8  /**< the mask that marks a sample finished */
 #define EG_ROLE_WIDE_IN 9     /**< several values per sample in; runtime length: as EG_ROLE_WIDE_OUT, a read clamps to the trailing extent */
 #define EG_ROLE_NSAMPLES 10   /**< the sample count, by value; eagle passes it */
 #define EG_ROLE_OUT 11        /**< a plain output plane */
+#define EG_ROLE_EXTENT 12     /**< a runtime axis's extent, by value (INT64) */
 
 /** The element type ON THE WIRE, at its real width: the width the entry text
  *  binds, not the IR leaf's (what eg_bind checks a plane's dtype against; a
@@ -160,7 +159,7 @@ typedef int32_t eg_steps_regime;
                                           samples into that one cell; eg_reverse of such a slot is not written in this build and is
                                           refused by name */
 #define EG_SLOT_GATHER (1u << 2)      /**< compact along the lane axes ``gather`` keeps (m = the product of their extents):
-                                          a rank-2 MAT_IN is bound as (rows, cols, m); a LOOKUP, read flat by the kernel's
+                                          a rank-2 PLANE_IN is bound as (rows, cols, m); a LOOKUP, read flat by the kernel's
                                           index over the kept axes, holds product(shape) x m elements */
 #define EG_SLOT_SHARED (1u << 3)      /**< a parameter plane with NO lane axis: one value for every lane, bound flat (eg_bind sizes it by its shape, not by lanes) */
 
@@ -176,7 +175,7 @@ struct eg_unit_slot {
     uint32_t flags;           /**< EG_SLOT_*; read by eg_bind, eg_runner_new (PRIOR), eg_reverse (PARAM_PLANE) */
     eg_slot_role role;        /**< read by eg_bind (what may be passed, written, made) and eg_launch (packing) */
     eg_wire_dtype dtype;      /**< read by eg_bind (dtype check; a uniform's value width) and eg_launch (Real vs Int handles) */
-    int32_t rank;             /**< 0 scalar, 1 vector, 2 matrix: the per-sample component; eg_bind and eg_launch */
+    int32_t rank;             /**< the length of shape: the rank of the per-sample component; eg_bind and eg_launch */
     int32_t like_slot;        /**< an adjoint plane sized like this LOOKUP slot (eg_bind shape: the planes bound to the two slots have the same ndim and extents), -1: none */
     int32_t n_gather;         /**< entries of ``gather``: the launch's n_lane_axes for a GATHER slot of a launch with lane axes, else 0 */
     int32_t reserved0;
@@ -322,7 +321,8 @@ struct eg_unit_body {
     const struct eg_unit_dispatch* const* dispatches;
 };
 
-/** Named axes of a sink: the plane binds as (*slot shape, *axes). */
+/** Named axes of a plane (LOOKUP, WIDE_IN, WIDE_OUT or ACCUM_OUT): the plane
+ * binds as (*slot shape, *axes), last axis fastest. */
 struct eg_unit_plane_axes {
     uint32_t struct_size;
     int32_t slot;
@@ -330,6 +330,11 @@ struct eg_unit_plane_axes {
     int32_t reserved0;
     const char* const* labels;   /**< n_axes labels: a lane axis's label shares its extent; another is a free extent the caller states */
     const int64_t* extents;      /**< n_axes extents, -1: runtime */
+    const int32_t*
+        extent_slots; /**< n_axes slots, NULL: none; for a runtime axis the
+                         EG_ROLE_EXTENT slot eagle fills with that axis's extent
+                         at eg_bind, -1 for a static axis or a runtime axis that
+                         shares a lane axis's extent */
 };
 
 /** A thread box: each thread serves ``t`` samples ``stride`` apart; a launch of
@@ -425,7 +430,7 @@ typedef int32_t eg_link_what;
                                    on a refine unit, the stop step's index max(applied steps - 1, 0) (an integer type) */
 #define EG_WHAT_TAU 3         /**< the candidate or located time inside the stop step, in [0, h]; ``of_slot`` -1 (the time plane's real type) */
 #define EG_WHAT_TIME_STEP 4   /**< the length h of the ACCEPTED step, never a proposed next one, from primal slot ``of_slot`` (a UNIFORM,
-                                   which eagle fills into the plane, or a PER_SAMPLE plane); always bound per sample (the time plane's
+                                   which eagle fills into the plane, or a PLANE_IN plane); always bound per sample (the time plane's
                                    real type). A refine kernel with no step slot is refused at build time */
 #define EG_WHAT_GUARD 5       /**< guard ``of_slot``: the of_slot-th comparison of the primal's stop rule in operand order,
                                    below the primal's finish.n_events; zero at the crossing (the scalar type) */
@@ -436,7 +441,7 @@ typedef int32_t eg_link_what;
 
 /** In which form the unit holds it. */
 typedef int32_t eg_link_form;
-#define EG_FORM_VALUE 0       /**< the quantity itself, read or (an output slot) written; a PER_SAMPLE slot of a primal
+#define EG_FORM_VALUE 0       /**< the quantity itself, read or (an output slot) written; a PLANE_IN slot of a primal
                                    UNIFORM is a plane eagle fills with that value; on FUSED_VJP, the primal's TERMINATED
                                    slot is the window's entry flag, a plane eagle makes all zero */
 #define EG_FORM_DOT 1         /**< its derivative in the candidate time */

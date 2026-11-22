@@ -369,8 +369,8 @@ void refine_setup(RunRecord& r, const eg_unit_s& pu, eg_unit_s* newton, eg_unit_
             if (!in_range(l.of_slot, np)) refuse(EG_BAD_REQUEST, field(un, at + ".of_slot") + " is out of range");
             const std::int32_t prole = pu.slots[static_cast<std::size_t>(l.of_slot)].role;
             if (sf.role == EG_ROLE_UNIFORM && prole == EG_ROLE_UNIFORM) out = { RSlot::UNIFORM, l.of_slot };
-            else if (sf.role == EG_ROLE_PER_SAMPLE && prole == EG_ROLE_PER_SAMPLE) out = { RSlot::PLANE, l.of_slot };
-            else if (sf.role == EG_ROLE_PER_SAMPLE && prole == EG_ROLE_UNIFORM)
+            else if (sf.role == EG_ROLE_PLANE_IN && prole == EG_ROLE_PLANE_IN) out = { RSlot::PLANE, l.of_slot };
+            else if (sf.role == EG_ROLE_PLANE_IN && prole == EG_ROLE_UNIFORM)
                 out = { RSlot::BUF, buf(11, l.of_slot, 1, RBuf::UNIFORM_OF, l.of_slot) };
             else refuse(EG_BAD_REQUEST, field(un, at) + ": slot '" + sf.name + "' and primal slot " + std::to_string(l.of_slot) +
                         " differ in role");
@@ -379,7 +379,7 @@ void refine_setup(RunRecord& r, const eg_unit_s& pu, eg_unit_s* newton, eg_unit_
         if (l.what == EG_WHAT_TAPE_ROW) {
             const int ti = in_range(l.of_slot, np) ? taped_of[static_cast<std::size_t>(l.of_slot)] : -1;
             if (ti < 0) refuse(EG_BAD_REQUEST, field(un, at + ".of_slot") + " " + std::to_string(l.of_slot) + " is not a taped state");
-            if (sf.role != EG_ROLE_PER_SAMPLE) refuse(EG_BAD_REQUEST, field(un, at) + ": a tape row is a per-sample read");
+            if (sf.role != EG_ROLE_PLANE_IN) refuse(EG_BAD_REQUEST, field(un, at) + ": a tape row is a per-sample read");
             out = { RSlot::TAPED, ti };
             return true;
         }
@@ -403,10 +403,10 @@ void refine_setup(RunRecord& r, const eg_unit_s& pu, eg_unit_s* newton, eg_unit_
         RSlot& out = f->nslots[static_cast<std::size_t>(l.slot)];
         if (common(*newton, l, at, out)) continue;
         if (l.what == EG_WHAT_STEPS) {
-            if (sf.role != EG_ROLE_PER_SAMPLE || sf.dtype != EG_DTYPE_INT64) refuse(EG_BAD_REQUEST, field(nn, at) + ": a step plane is a per-sample int64 slot");
+            if (sf.role != EG_ROLE_PLANE_IN || sf.dtype != EG_DTYPE_INT64) refuse(EG_BAD_REQUEST, field(nn, at) + ": a step plane is a per-sample int64 slot");
             out = { RSlot::STEPS, -1 };
         } else if (l.what == EG_WHAT_TIME0) {
-            if (sf.role != EG_ROLE_PER_SAMPLE || l.of_slot != start_of)
+            if (sf.role != EG_ROLE_PLANE_IN || l.of_slot != start_of)
                 refuse(EG_BAD_REQUEST, field(nn, at) + ": the start copy is a per-sample read of the twin's time plane");
             out = { RSlot::TIME0, -1 };
         } else if (l.what == EG_WHAT_GUARD) {
@@ -427,21 +427,21 @@ void refine_setup(RunRecord& r, const eg_unit_s& pu, eg_unit_s* newton, eg_unit_
             which = buf(value ? 3 : 4, l.of_slot, s.rows, RBuf::NONE, -1);
             out = { RSlot::BUF, which };
         } else if (l.what == EG_WHAT_TAU && l.form == EG_FORM_SEED) {
-            if (sf.role != EG_ROLE_PER_SAMPLE || sf.dtype != EG_DTYPE_REAL) refuse(EG_BAD_REQUEST, field(nn, at) + ": the tau seed is a per-sample real slot");
+            if (sf.role != EG_ROLE_PLANE_IN || sf.dtype != EG_DTYPE_REAL) refuse(EG_BAD_REQUEST, field(nn, at) + ": the tau seed is a per-sample real slot");
             out = { RSlot::BUF, buf(6, 0, 1, RBuf::ONES, -1) };
         } else if (l.what == EG_WHAT_TAU) {   // (TAU, VALUE): the candidate time inside the stop step
-            if (sf.role != EG_ROLE_PER_SAMPLE || sf.dtype != EG_DTYPE_REAL) refuse(EG_BAD_REQUEST, field(nn, at) + ": the tau is a per-sample real slot");
+            if (sf.role != EG_ROLE_PLANE_IN || sf.dtype != EG_DTYPE_REAL) refuse(EG_BAD_REQUEST, field(nn, at) + ": the tau is a per-sample real slot");
             if (++tau_links > 1) refuse(EG_BAD_REQUEST, field(nn, at) + ": a second (TAU, VALUE) link");
             out = { RSlot::BUF, f->tau };
         } else if (l.what == EG_WHAT_TIME_STEP) {
-            if (sf.role != EG_ROLE_PER_SAMPLE || sf.dtype != EG_DTYPE_REAL || !in_range(l.of_slot, np))
+            if (sf.role != EG_ROLE_PLANE_IN || sf.dtype != EG_DTYPE_REAL || !in_range(l.of_slot, np))
                 refuse(EG_BAD_REQUEST, field(nn, at) + ": the time step is a per-sample real slot of a primal slot");
             if (++step_links > 1) refuse(EG_BAD_REQUEST, field(nn, at) + ": a second (TIME_STEP, VALUE) link");
             const std::int32_t prole = pu.slots[static_cast<std::size_t>(l.of_slot)].role;
             if (prole == EG_ROLE_UNIFORM) {
                 f->h = buf(7, 0, 1, RBuf::UNIFORM_OF, l.of_slot);
                 out = { RSlot::BUF, f->h };
-            } else if (prole == EG_ROLE_PER_SAMPLE) {
+            } else if (prole == EG_ROLE_PLANE_IN) {
                 f->h_primal = l.of_slot;
                 out = { RSlot::PLANE, l.of_slot };
             } else refuse(EG_BAD_REQUEST, field(nn, at + ".of_slot") + " is neither a parameter nor a per-sample plane");
@@ -490,11 +490,11 @@ void refine_setup(RunRecord& r, const eg_unit_s& pu, eg_unit_s* newton, eg_unit_
             int found = -1;
             for (std::size_t k = 0; k < f->states.size(); ++k)
                 if (f->states[k].primal == l.of_slot) found = static_cast<int>(k);
-            if (found < 0 || sf.role != EG_ROLE_PER_SAMPLE)
+            if (found < 0 || sf.role != EG_ROLE_PLANE_IN)
                 refuse(EG_BAD_REQUEST, field(gn, at) + ": the refined plane of primal state " + std::to_string(l.of_slot) + " is one the Newton writes, read per sample");
             out = { RSlot::BUF, f->states[static_cast<std::size_t>(found)].refined };
         } else if (l.what == EG_WHAT_GUARD && l.form == EG_FORM_ADJOINT_IN) {
-            if (sf.role != EG_ROLE_PER_SAMPLE || l.of_slot < 0 || l.of_slot >= guards)
+            if (sf.role != EG_ROLE_PLANE_IN || l.of_slot < 0 || l.of_slot >= guards)
                 refuse(EG_BAD_REQUEST, field(gn, at) + ": an event seed is a per-sample slot of an event of the Newton");
             f->seed[static_cast<std::size_t>(l.of_slot)] = buf(8, l.of_slot, 1, RBuf::NONE, -1);
             out = { RSlot::BUF, f->seed[static_cast<std::size_t>(l.of_slot)] };
@@ -542,13 +542,13 @@ void refine_setup(RunRecord& r, const eg_unit_s& pu, eg_unit_s* newton, eg_unit_
         const SlotFacts& sf = rvjp->slots[static_cast<std::size_t>(l.slot)];
         RSlot& out = f->vslots[static_cast<std::size_t>(l.slot)];
         if (common(*rvjp, l, at, out)) continue;
-        const bool per_sample_real = sf.role == EG_ROLE_PER_SAMPLE && sf.dtype == EG_DTYPE_REAL;
+        const bool per_sample_real = sf.role == EG_ROLE_PLANE_IN && sf.dtype == EG_DTYPE_REAL;
         const bool mutable_real = sf.role == EG_ROLE_MUTABLE && sf.dtype == EG_DTYPE_REAL;
         if (l.what == EG_WHAT_STEPS) {
-            if (sf.role != EG_ROLE_PER_SAMPLE || sf.dtype != EG_DTYPE_INT64) refuse(EG_BAD_REQUEST, field(rn, at) + ": a step plane is a per-sample int64 slot");
+            if (sf.role != EG_ROLE_PLANE_IN || sf.dtype != EG_DTYPE_INT64) refuse(EG_BAD_REQUEST, field(rn, at) + ": a step plane is a per-sample int64 slot");
             out = { RSlot::STEPS, -1 };
         } else if (l.what == EG_WHAT_TIME0 && l.form == EG_FORM_VALUE) {
-            if (sf.role != EG_ROLE_PER_SAMPLE || l.of_slot != start_of)
+            if (sf.role != EG_ROLE_PLANE_IN || l.of_slot != start_of)
                 refuse(EG_BAD_REQUEST, field(rn, at) + ": the start copy is a per-sample read of the twin's time plane");
             out = { RSlot::TIME0, -1 };
         } else if (l.what == EG_WHAT_TIME0) {   // (TIME0, GRAD): joins the time plane's gradient
@@ -561,13 +561,13 @@ void refine_setup(RunRecord& r, const eg_unit_s& pu, eg_unit_s* newton, eg_unit_
             if (!per_sample_real || !in_range(l.of_slot, np)) refuse(EG_BAD_REQUEST, field(rn, at) + ": the time step is a per-sample real slot of a primal slot");
             const std::int32_t prole = pu.slots[static_cast<std::size_t>(l.of_slot)].role;
             if (prole == EG_ROLE_UNIFORM) out = { RSlot::BUF, buf(7, 0, 1, RBuf::UNIFORM_OF, l.of_slot) };
-            else if (prole == EG_ROLE_PER_SAMPLE) out = { RSlot::PLANE, l.of_slot };
+            else if (prole == EG_ROLE_PLANE_IN) out = { RSlot::PLANE, l.of_slot };
             else refuse(EG_BAD_REQUEST, field(rn, at + ".of_slot") + " is neither a parameter nor a per-sample plane");
         } else if ((l.what == EG_WHAT_TIME_STEP || l.what == EG_WHAT_PRIMAL_SLOT) && l.form == EG_FORM_GRAD) {
             if (!mutable_real || !in_range(l.of_slot, np))
                 refuse(EG_BAD_REQUEST, field(rn, at) + ": a gradient is a MUTABLE real slot of a primal slot");
             const std::int32_t grole = pu.slots[static_cast<std::size_t>(l.of_slot)].role;
-            if (grole != EG_ROLE_UNIFORM && grole != EG_ROLE_PER_SAMPLE)
+            if (grole != EG_ROLE_UNIFORM && grole != EG_ROLE_PLANE_IN)
                 refuse(EG_NOT_WRITTEN, field(rn, at) + ": the gradient of a slot that is neither a parameter nor a per-sample plane is not written");
             if ((grole == EG_ROLE_UNIFORM) != (l.reduced == 1))
                 refuse(EG_BAD_REQUEST, field(rn, at + ".reduced") + " " + std::to_string(l.reduced) +
@@ -682,7 +682,7 @@ void record_new(eg_ctx& ctx, eg_runner_s& runner, const eg_runner_desc& d) {
                    "reverse: it must be emitted in the active-set form");
     const DerivedFacts& t = twin->derived;
     const char* tn = twin->name.c_str();
-    if (t.time0_slot != -1) check_slot(*twin, t.time0_slot, "time0_slot", EG_ROLE_PER_SAMPLE, -1);
+    if (t.time0_slot != -1) check_slot(*twin, t.time0_slot, "time0_slot", EG_ROLE_PLANE_IN, -1);
     if (fused) {
         check_slot(*twin, t.fused_steps_slot, "fused_steps_slot", EG_ROLE_LOOKUP, EG_DTYPE_INT64);
         if (runner.active) refuse(EG_NOT_WRITTEN, "the K-step twin with an active set is not written in this build of the door");
@@ -753,7 +753,7 @@ void record_new(eg_ctx& ctx, eg_runner_s& runner, const eg_runner_desc& d) {
             twin_of[static_cast<std::size_t>(l.slot)] = l.of_slot;
             continue;
         }
-        const bool filled = a.role == EG_ROLE_PER_SAMPLE && b.role == EG_ROLE_UNIFORM && a.dtype == b.dtype && a.dtype == EG_DTYPE_REAL;
+        const bool filled = a.role == EG_ROLE_PLANE_IN && b.role == EG_ROLE_UNIFORM && a.dtype == b.dtype && a.dtype == EG_DTYPE_REAL;
         if (!filled && (a.role != b.role || a.dtype != b.dtype || a.rank != b.rank || a.mirror != b.mirror))
             refuse(EG_BAD_REQUEST, field(tn, at) + ": twin slot '" + a.name + "' and primal slot '" + b.name +
                    "' differ in role, dtype or shape");
@@ -800,7 +800,7 @@ void record_new(eg_ctx& ctx, eg_runner_s& runner, const eg_runner_desc& d) {
             c.kind = Carried::START;
             c.of = twin_of[i];
             c.primal_slot = -1;
-        } else if (role == EG_ROLE_PER_SAMPLE && pu.slots[static_cast<std::size_t>(twin_of[i])].role == EG_ROLE_UNIFORM)
+        } else if (role == EG_ROLE_PLANE_IN && pu.slots[static_cast<std::size_t>(twin_of[i])].role == EG_ROLE_UNIFORM)
             c.kind = Carried::FILL;
         if (role == EG_ROLE_MUTABLE || role == EG_ROLE_TERMINATED) r->state.push_back(std::move(c));
         else r->reads.push_back(std::move(c));
@@ -842,7 +842,7 @@ void record_new(eg_ctx& ctx, eg_runner_s& runner, const eg_runner_desc& d) {
             if (l.of_slot != t.steps_slot && l.of_slot != -1)
                 refuse(EG_BAD_REQUEST, field(vn, at + ".of_slot") + " " + std::to_string(l.of_slot) +
                        " is neither the twin's steps_slot nor -1");
-            if (vs_.role != EG_ROLE_PER_SAMPLE || (vs_.dtype != EG_DTYPE_INT64 && vs_.dtype != EG_DTYPE_INT32))
+            if (vs_.role != EG_ROLE_PLANE_IN || (vs_.dtype != EG_DTYPE_INT64 && vs_.dtype != EG_DTYPE_INT32))
                 refuse(EG_BAD_REQUEST, field(vn, at) + ": a step plane is a per-sample int32 or int64 slot ('" + vs_.name + "')");
             if (fz) refuse(EG_NOT_WRITTEN, field(vn, at) + ": a step plane in a K-step vjp is not written in this build of the door");
             if (r->step_bytes != 0) refuse(EG_BAD_REQUEST, field(vn, at) + ": a second step plane");
@@ -874,7 +874,7 @@ void record_new(eg_ctx& ctx, eg_runner_s& runner, const eg_runner_desc& d) {
         VjpSlot& vs = out_slots[static_cast<std::size_t>(l.slot)];
         switch (l.what == EG_WHAT_TAPE_ROW || l.form == EG_FORM_ADJOINT_IN || l.form == EG_FORM_ADJOINT_OUT ? 1 : l.form == EG_FORM_VALUE ? 0 : 2) {
         case 0:   // (PRIMAL_SLOT, VALUE)
-            if (prole == EG_ROLE_UNIFORM && vjp->slots[static_cast<std::size_t>(l.slot)].role == EG_ROLE_PER_SAMPLE) {
+            if (prole == EG_ROLE_UNIFORM && vjp->slots[static_cast<std::size_t>(l.slot)].role == EG_ROLE_PLANE_IN) {
                 if (read < 0 || r->reads[static_cast<std::size_t>(read)].kind != Carried::FILL)
                     refuse(EG_BAD_REQUEST, field(vn, at + ".of_slot") + " " + std::to_string(l.of_slot) +
                            ": a plane filled with a parameter is one the taping twin reads too");

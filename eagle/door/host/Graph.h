@@ -21,7 +21,7 @@ namespace door {
 
 /** @brief Whether a slot of role @p r is read / written by its unit (MUTABLE is a write here: the reverse's view). */
 inline bool reads_role(std::int32_t r) {
-    return r == EG_ROLE_PER_SAMPLE || r == EG_ROLE_LOOKUP || r == EG_ROLE_VEC_IN || r == EG_ROLE_MAT_IN || r == EG_ROLE_WIDE_IN;
+    return r == EG_ROLE_PLANE_IN || r == EG_ROLE_LOOKUP || r == EG_ROLE_WIDE_IN;
 }
 inline bool writes_role(std::int32_t r) { return r == EG_ROLE_MUTABLE || r == EG_ROLE_WIDE_OUT || r == EG_ROLE_ACCUM_OUT || r == EG_ROLE_OUT; }
 

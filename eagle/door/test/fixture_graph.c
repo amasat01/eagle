@@ -202,15 +202,15 @@ const uint64_t eagle_layout_sizes[5] = { 40, sizeof(struct handle), 32, 4, 3 * s
                                              .role = role_, .dtype = EG_DTYPE_REAL, .rank = 0, .like_slot = -1,  \
                                              .n_gather = 0, .shape = NULL, .gather = NULL, .name = name_ }
 #define SLOT(var, role_, name_) SLOT_F(var, role_, name_, 0)
-SLOT(s_x, EG_ROLE_PER_SAMPLE, "x");
-SLOT(s_a, EG_ROLE_PER_SAMPLE, "a");
-SLOT(s_b, EG_ROLE_PER_SAMPLE, "b");
+SLOT(s_x, EG_ROLE_PLANE_IN, "x");
+SLOT(s_a, EG_ROLE_PLANE_IN, "a");
+SLOT(s_b, EG_ROLE_PLANE_IN, "b");
 SLOT_F(s_w, EG_ROLE_LOOKUP, "w", EG_SLOT_PARAM_PLANE | EG_SLOT_SHARED);
 SLOT(s_k, EG_ROLE_UNIFORM, "k");
 SLOT(s_y, EG_ROLE_OUT, "y");
 SLOT(s_o, EG_ROLE_OUT, "o");
-SLOT(s_bar_y, EG_ROLE_PER_SAMPLE, "bar_y");
-SLOT(s_bar_o, EG_ROLE_PER_SAMPLE, "bar_o");
+SLOT(s_bar_y, EG_ROLE_PLANE_IN, "bar_y");
+SLOT(s_bar_o, EG_ROLE_PLANE_IN, "bar_o");
 SLOT(s_bar_x, EG_ROLE_OUT, "bar_x");
 SLOT(s_bar_a, EG_ROLE_OUT, "bar_a");
 SLOT(s_bar_b, EG_ROLE_OUT, "bar_b");
@@ -218,7 +218,7 @@ SLOT(s_bar_w, EG_ROLE_OUT, "bar_w");
 SLOT(s_bar_k, EG_ROLE_OUT, "bar_k");
 static const struct eg_unit_slot s_c = { .struct_size = sizeof(struct eg_unit_slot), .flags = 0, .role = EG_ROLE_MUTABLE, .dtype = EG_DTYPE_INT32,
                                          .rank = 0, .like_slot = -1, .n_gather = 0, .shape = NULL, .gather = NULL, .name = "c" };
-static const struct eg_unit_slot s_n = { .struct_size = sizeof(struct eg_unit_slot), .flags = 0, .role = EG_ROLE_PER_SAMPLE, .dtype = EG_DTYPE_INT32,
+static const struct eg_unit_slot s_n = { .struct_size = sizeof(struct eg_unit_slot), .flags = 0, .role = EG_ROLE_PLANE_IN, .dtype = EG_DTYPE_INT32,
                                         .rank = 0, .like_slot = -1, .n_gather = 0, .shape = NULL, .gather = NULL, .name = "n" };
 static const struct eg_unit_slot s_cnt = { .struct_size = sizeof(struct eg_unit_slot), .flags = EG_SLOT_SHARED, .role = EG_ROLE_LOOKUP, .dtype = EG_DTYPE_UINT32,
                                            .rank = 0, .like_slot = -1, .n_gather = 0, .shape = NULL, .gather = NULL, .name = "c" };
@@ -234,8 +234,8 @@ static const int64_t width_shape[] = { 3 };
                                              .role = role_, .dtype = EG_DTYPE_REAL, .rank = 1, .like_slot = -1,  \
                                              .n_gather = 0, .shape = width_shape, .gather = NULL, .name = name_ }
 SLOT_V(s_v_out, EG_ROLE_OUT, "v");
-SLOT_V(s_v_in, EG_ROLE_VEC_IN, "v");
-SLOT_V(s_bar_v_in, EG_ROLE_VEC_IN, "bar_v");
+SLOT_V(s_v_in, EG_ROLE_PLANE_IN, "v");
+SLOT_V(s_bar_v_in, EG_ROLE_PLANE_IN, "bar_v");
 SLOT_V(s_bar_v_out, EG_ROLE_OUT, "bar_v");
 
 static const struct eg_unit_slot* const scale_slots[] = { &s_x, &s_w, &s_y };

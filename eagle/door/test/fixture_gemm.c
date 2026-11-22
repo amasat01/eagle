@@ -98,7 +98,7 @@ SLOT_OF(slot_dw, EG_ROLE_ACCUM_OUT, EG_DTYPE_REAL, "dw");
 SLOT_OF(slot_dx, EG_ROLE_ACCUM_OUT, EG_DTYPE_REAL, "dx");
 SLOT_OF(slot_count, EG_ROLE_LOOKUP, EG_DTYPE_UINT32, "index_count");
 SLOT_OF(slot_k, EG_ROLE_MUTABLE, EG_DTYPE_REAL, "k");
-SLOT_OF(slot_limit, EG_ROLE_PER_SAMPLE, EG_DTYPE_REAL, "limit");
+SLOT_OF(slot_limit, EG_ROLE_PLANE_IN, EG_DTYPE_REAL, "limit");
 SLOT_OF(slot_mask, EG_ROLE_TERMINATED, EG_DTYPE_BOOL, "mask");
 SLOT_OF(slot_finished, EG_ROLE_LOOKUP, EG_DTYPE_UINT32, "finished");
 static const struct eg_unit_slot slot_c_param_plane = { .struct_size = sizeof(struct eg_unit_slot), .role = EG_ROLE_ACCUM_OUT,

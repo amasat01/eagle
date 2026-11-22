@@ -7,11 +7,11 @@
  * old path's output. One table row describes each unit: its planes (slot = position, y first), where each
  * plane's values come from, the oracle outputs and the cases to run.
  *
- *   ss_bcast   y = x * a + p: PER_SAMPLE a and x, UNIFORM p; case A passes a as the number 2.0 spread by the
+ *   ss_bcast   y = x * a + p: PLANE_IN a and x, UNIFORM p; case A passes a as the number 2.0 spread by the
  *              caller, case B as a plane of 2.0.
  *   mat_apply  y = m @ v: rank-1 MUTABLE y, VEC_IN v and a rank-2 MAT_IN m (the old path binds m as the flat
  *              (9, n) plane; the door binds the same memory as (3, 3, n)).
- *   _wide_math y = real(idx * 3e9 // 3e9): an int32 PER_SAMPLE index plane reaching +-1e9, so a plane bound at
+ *   _wide_math y = real(idx * 3e9 // 3e9): an int32 PLANE_IN index plane reaching +-1e9, so a plane bound at
  *              another width reads other bits.
  *   _flat      y = x * 3 + lane.item over a caller-built index set: x, the uint32 index count and the int32
  *              index map (LOOKUP); the listed lanes are written, every other element stays 0.

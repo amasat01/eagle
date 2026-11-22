@@ -82,7 +82,9 @@ void sync_bindings(eg_ctx& ctx, const eg_plan_s& first, eg_plan_s& seg) {
     const eg_unit_s& su = *seg.unit;
     for (std::size_t i = 0; i < su.slots.size(); ++i) {
         const SlotFacts& sl = su.slots[i];
-        if (sl.made || sl.role == EG_ROLE_NSAMPLES || static_cast<std::int32_t>(i) == su.finish.counter_slot) continue;
+        if (sl.made || sl.role == EG_ROLE_NSAMPLES || sl.role == EG_ROLE_EXTENT
+            || static_cast<std::int32_t>(i) == su.finish.counter_slot)
+            continue;
         const eg_plan_s::Binding* from = nullptr;
         std::size_t at = 0;
         for (const SlotFacts& f : first.unit->slots) {

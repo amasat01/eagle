@@ -81,8 +81,7 @@ inline std::vector<Owned> collect(const eg_plan_s& plan, bool with_classify, boo
             const SlotFacts& sl = m.slots[j];
             const std::int32_t s = g.join[mi][j];
             if (s < 0 || s == g.class_slot || s == g.stale_slot || sl.gathered) continue;
-            const bool per_sample = sl.role == EG_ROLE_PER_SAMPLE || sl.role == EG_ROLE_VEC_IN || sl.role == EG_ROLE_MAT_IN ||
-                                    sl.role == EG_ROLE_OUT || sl.role == EG_ROLE_MUTABLE;
+            const bool per_sample = sl.role == EG_ROLE_PLANE_IN || sl.role == EG_ROLE_OUT || sl.role == EG_ROLE_MUTABLE;
             if (per_sample) add(s, sl.role == EG_ROLE_OUT || sl.role == EG_ROLE_MUTABLE);
         }
     }

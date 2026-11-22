@@ -373,6 +373,49 @@ def _joined(vocab) -> str:
     return ", ".join(sorted(vocab))
 
 
+#: The internal role of a ``plane_in`` slot by the rank of its value: this package never ran a plane of a deeper value.
+_PLANE_IN_BY_RANK = ("per_sample", "vec_in", "mat_in")
+
+
+def internal_roles(meta: dict, *, name: str) -> dict:
+    """``meta`` with the slots of its ``plane_in`` role given this package's own roles, from the rank of each slot's value.
+
+    This package is a transition package: it still tells a scalar, a vector and a matrix input apart by role, while a
+    sidecar now states one ``plane_in`` role and the value shape of every slot in ``slot_shapes``. This function is the one
+    reading rule that closes that gap: the ``arg_spec`` it returns carries ``per_sample`` / ``vec_in`` / ``mat_in``, and
+    the lists and widths the package reads (``per_sample``, ``vector_inputs``, ``matrix_inputs``, ``mat_shapes``,
+    ``vec_widths``) are derived from them, so every later site keeps working on the internal names. A sidecar with no
+    ``plane_in`` slot is returned as it is. A value of rank above two is refused by name."""
+    spec = meta.get("arg_spec", ())
+    if not any(entry[0] == "plane_in" for entry in spec):
+        return meta
+    shapes = meta.get("slot_shapes") or {}
+    widths = meta.get("arg_widths") or {}
+    by_role: dict = {role: [] for role in _PLANE_IN_BY_RANK}
+    arg_spec = []
+    for role, slot in spec:
+        if role == "plane_in":
+            if slot not in shapes:
+                raise ValueError(f"{name!r}: plane_in slot {slot!r} states no value shape in slot_shapes")
+            rank = len(shapes[slot])
+            if rank >= len(_PLANE_IN_BY_RANK):
+                raise ValueError(
+                    f"{name!r}: slot {slot!r} holds a value of rank {rank}; this package binds ranks 0 to 2 only"
+                )
+            role = _PLANE_IN_BY_RANK[rank]
+            by_role[role].append(slot)
+        arg_spec.append([role, slot])
+    return {
+        **meta,
+        "arg_spec": arg_spec,
+        "per_sample": by_role["per_sample"],
+        "vector_inputs": by_role["vec_in"],
+        "matrix_inputs": by_role["mat_in"],
+        "mat_shapes": {slot: list(shapes[slot]) for slot in by_role["mat_in"]},
+        "vec_widths": {slot: widths[slot] for slot in by_role["vec_in"] if slot in widths},
+    }
+
+
 def validate_sidecar(meta: dict, *, name: str) -> dict:
     """Validate a parsed sidecar against the schema-v1 contract; raise on
     any breach. Mirrors the C++ ``eagle::plugin::validate_sidecar`` check

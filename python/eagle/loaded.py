@@ -33,6 +33,7 @@ from .sidecar import (
     read_plane_meta,
     read_params,
     read_terminated_readonly,
+    internal_roles,
     validate_sidecar,
 )
 
@@ -57,7 +58,7 @@ class LoadedKernel(LaunchMixin):
         # The artifact's own id; the stem is the id by construction (the
         # code generator names every artifact file f"{id}{ext}").
         self.id = ptx_path.stem
-        self._meta = json.loads(ptx_path.with_suffix(".json").read_text())
+        self._meta = internal_roles(json.loads(ptx_path.with_suffix(".json").read_text()), name=ptx_path.name)
         # Reject a binary-ABI mismatch before binding any by-value struct.
         check_aether_abi(self._meta, kind=abi_kind, name=ptx_path.name)
         #: The artifact's own ABI generation, read by :meth:`_refuse_v2_door`
