@@ -89,7 +89,7 @@ DLDataType real_dtype(std::int32_t scalar) {
 }
 
 /** @brief True for the roles whose plane has a runtime row count (the handle's extent is the trailing one). */
-bool wide(const SlotFacts& s) { return s.role == EG_ROLE_WIDE_IN || s.role == EG_ROLE_WIDE_OUT; }
+bool wide(const SlotFacts& s) { return s.role == EG_ROLE_WIDE_IN || kept_out(s); }
 
 /** @brief True when @p t carries the element type slot @p s of a unit of @p scalar declares. */
 bool dtype_ok(const DLDataType& t, const SlotFacts& s, std::int32_t scalar) {
@@ -222,8 +222,7 @@ void check_plane(const eg_plan_s& plan, int slot, const eg_plane_s& plane) {
             refuse(EG_BAD_REQUEST, what + ": the index count is one cell, shape (1,)");
         if (slot == plan.unit->finish.steps_slot && (t.ndim != 1 || t.shape[0] != 1))
             refuse(EG_BAD_REQUEST, what + ": the steps word is one cell, shape (1,)");
-    } else if (s.role
-        == EG_ROLE_ACCUM_OUT) { // a cell: the finished (1,); else the caller's
+    } else if (zeroed_out(s)) { // a cell: the finished (1,); else the caller's
                                 // length, as (*payload, *named axes) the meta
                                 // states
         if (s.cell) {
@@ -241,7 +240,7 @@ void check_plane(const eg_plan_s& plan, int slot, const eg_plane_s& plane) {
         }
     }
     if (!compact(t)) refuse(EG_BAD_REQUEST, what + ": the plane is not contiguous");
-    const bool written = s.role == EG_ROLE_MUTABLE || s.role == EG_ROLE_OUT || s.role == EG_ROLE_WIDE_OUT || s.role == EG_ROLE_ACCUM_OUT ||
+    const bool written = s.role == EG_ROLE_MUTABLE || s.role == EG_ROLE_OUT || s.role == EG_ROLE_PLANE_OUT ||
                          slot == plan.unit->finish.mask_slot || slot == plan.unit->finish.steps_slot;
     if (written && (plane.tensor->flags & DLPACK_FLAG_BITMASK_READ_ONLY))
         refuse(EG_BAD_REQUEST, what + ": a read-only plane in a written slot");
@@ -810,7 +809,7 @@ void clear(eg_ctx& ctx, eg_plan_s* plan, std::int32_t n_slots, const std::int32_
         const SlotFacts& s = plan->unit->slots[slot];
         const std::string name = "slot " + std::to_string(slot) + " ('" + s.name + "')";
         if (s.made) refuse(EG_BAD_REQUEST, name + " is a companion or compensation plane: eagle clears it with its target, do not pass it");
-        if (s.role != EG_ROLE_MUTABLE && s.role != EG_ROLE_OUT && s.role != EG_ROLE_WIDE_OUT && s.role != EG_ROLE_ACCUM_OUT)
+        if (s.role != EG_ROLE_MUTABLE && s.role != EG_ROLE_OUT && s.role != EG_ROLE_PLANE_OUT)
             refuse(EG_BAD_REQUEST, name + " is not an output plane");
         if (plan->bindings[static_cast<std::size_t>(slot)].plane == nullptr) refuse(EG_BAD_REQUEST, name + " is unbound");
         if (seen[slot]) refuse(EG_BAD_REQUEST, name + " cleared twice in one call");
@@ -932,7 +931,7 @@ std::uint64_t bound_count(const eg_plan_s& plan, int slot, const DLTensor& t) {
     const SlotFacts& sf = plan.unit->slots[static_cast<std::size_t>(slot)];
     if (sf.mirror) return static_cast<std::uint64_t>(sf.gathered ? t.shape[t.ndim - 1] : plan.n_samples);
     if (sf.role == EG_ROLE_LOOKUP) return static_cast<std::uint64_t>(elements(t));
-    if (sf.role == EG_ROLE_ACCUM_OUT) return static_cast<std::uint64_t>(elements(t));    // an accumulate target is a flat plane of its own length, not of the lane count
+    if (zeroed_out(sf)) return static_cast<std::uint64_t>(elements(t));    // an accumulate target is a flat plane of its own length, not of the lane count
     if (sf.keys_of >= 0) return static_cast<std::uint64_t>(key_count(*plan.unit, plan.unit->keyed[static_cast<std::size_t>(sf.keys_of)], plan.n_samples));
     return static_cast<std::uint64_t>(wide(sf) ? t.shape[t.ndim - 1] : plan.n_samples);
 }

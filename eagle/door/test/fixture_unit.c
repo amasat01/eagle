@@ -10,7 +10,7 @@
  *    address).
  *  - "wait": the same slots; its entry marks y[1] = 1 on entry and returns
  *    once the test sets y[0] (or after a few seconds): it holds a context for a call to queue behind.
- *  - "scat", "scatp": acc[idx[i]] += val[i] * tbl[jdx[i]] with a data-indexed ACCUM_OUT write (acc) and table read (tbl of 8 cells); "scat" is the CHECKED build
+ *  - "scat", "scatp": acc[idx[i]] += val[i] * tbl[jdx[i]] with a data-indexed zeroed PLANE_OUT write (acc) and table read (tbl of 8 cells); "scat" is the CHECKED build
  *    (fault_slot 5, the checks written as the lowering emits them: an index outside its slot's length claims the cell with one atomic CAS and skips the
  *    lane), "scatp" the same unit built unchecked; "scat_badshape", "scat_badrole", "scat_badslot" state a fault_slot that is no 2-cell int64 LOOKUP.
  *  - "tick": adds 1 to its one LOOKUP cell (a plain, non-atomic increment): exact only when launches never overlap.
@@ -29,7 +29,7 @@
  *  - "vecs": every plane role the door binds beyond the scalar ones: a rank-1 MUTABLE and VEC_IN, a rank-2
  *    MAT_IN, an int32 PLANE_IN, a LOOKUP table, the NSAMPLES count, a rank-0 OUT and a uniform.
  *  - "count1g": count1 with an active set over groups of 5 lanes (the map holds group indices).
- *  - "widemul": a WIDE_OUT and a WIDE_IN plane of three rows each beside a MUTABLE plane.
+ *  - "widemul": a kept PLANE_OUT and a WIDE_IN plane of three rows each beside a MUTABLE plane.
  *  - "cells": two cells of rows of 4 samples (a MIN and a MAX); "cellsum": a SUM cell, which the meta cannot complete; "keyed": a keyed
  *    accumulate whose companion eagle makes and whose fold entry runs after each launch; "keyedbad": the same
  *    with no fold entry.
@@ -640,6 +640,12 @@ const uint64_t eagle_layout_sizes[5] = {
         .dtype = dtype_, .rank = 0, .like_slot = -1, .n_gather = 0,            \
         .shape = NULL, .gather = NULL, .name = name_ }
 #define SLOT(var, role_, name_) SLOT_OF(var, role_, EG_DTYPE_REAL, name_)
+/* a written plane the runtime zeroes before the run */
+#define ZSLOT_OF(var, dtype_, name_)                                           \
+    static const struct eg_unit_slot var = {                                   \
+        .struct_size = sizeof(struct eg_unit_slot), .flags = EG_SLOT_ZEROED,   \
+        .role = EG_ROLE_PLANE_OUT, .dtype = dtype_, .rank = 0, .like_slot = -1, \
+        .n_gather = 0, .shape = NULL, .gather = NULL, .name = name_ }
 
 SLOT(slot_y, EG_ROLE_MUTABLE, "y");
 SLOT(slot_x, EG_ROLE_PLANE_IN, "x");
@@ -929,8 +935,8 @@ static const struct eg_unit_meta unit_count1g = {
     .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "count1g_host", .device_image_format = EG_IMAGE_NONE,
     .body = &active_body, .launch = &launch_group, .finish = &finish1 };
 
-/* wide roles: slots wo (WIDE_OUT), wi (WIDE_IN), y (MUTABLE) */
-SLOT(slot_wo, EG_ROLE_WIDE_OUT, "wo");
+/* wide roles: slots wo (kept PLANE_OUT), wi (WIDE_IN), y (MUTABLE) */
+SLOT(slot_wo, EG_ROLE_PLANE_OUT, "wo");
 SLOT(slot_wi, EG_ROLE_WIDE_IN, "wi");
 static const struct eg_unit_slot* const wide_slots[] = { &slot_wo, &slot_wi, &slot_y };
 static const struct eg_unit_body wide_body = {
@@ -1040,13 +1046,13 @@ static const struct eg_unit_meta unit_shr = {
     .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "shr_host", .device_image_format = EG_IMAGE_NONE,
     .body = &shr_body, .launch = &launch };
 
-/* cells and companions: ACCUM_OUT slots, cell rows of 4 samples, a keyed accumulate over a lane-axis plane axis */
-SLOT_OF(slot_tot, EG_ROLE_ACCUM_OUT, EG_DTYPE_REAL, "tot");
-SLOT_OF(slot_tot_c, EG_ROLE_ACCUM_OUT, EG_DTYPE_REAL, "tot_comp");
-SLOT_OF(slot_mx, EG_ROLE_ACCUM_OUT, EG_DTYPE_REAL, "mx");
+/* cells and companions: zeroed PLANE_OUT slots, cell rows of 4 samples, a keyed accumulate over a lane-axis plane axis */
+ZSLOT_OF(slot_tot, EG_DTYPE_REAL, "tot");
+ZSLOT_OF(slot_tot_c, EG_DTYPE_REAL, "tot_comp");
+ZSLOT_OF(slot_mx, EG_DTYPE_REAL, "mx");
 SLOT_OF(slot_icount_ps, EG_ROLE_LOOKUP, EG_DTYPE_UINT32, "index_count");
-SLOT_OF(slot_acc, EG_ROLE_ACCUM_OUT, EG_DTYPE_REAL, "acc");
-SLOT_OF(slot_acc_c, EG_ROLE_ACCUM_OUT, EG_DTYPE_REAL, "acc_c");
+ZSLOT_OF(slot_acc, EG_DTYPE_REAL, "acc");
+ZSLOT_OF(slot_acc_c, EG_DTYPE_REAL, "acc_c");
 static const int32_t cell_tot_slots[] = { 0 }, cell_mx_slots[] = { 1 };
 static const struct eg_unit_cell cell_tot = { .struct_size = sizeof(struct eg_unit_cell), .op = EG_REDUCE_MIN, .internal = 0,
                                               .columns = 1, .slots = cell_tot_slots, .name = "tot" };
@@ -1317,7 +1323,7 @@ static const int64_t scat_tbl_shape[] = { 8 }, scat_fault_shape[] = { 2 };
 SLOT_OF(slot_sidx, EG_ROLE_PLANE_IN, EG_DTYPE_INT32, "idx");
 SLOT_OF(slot_sjdx, EG_ROLE_PLANE_IN, EG_DTYPE_INT32, "jdx");
 SLOT(slot_sval, EG_ROLE_PLANE_IN, "val");
-SLOT(slot_sacc, EG_ROLE_ACCUM_OUT, "acc");
+ZSLOT_OF(slot_sacc, EG_DTYPE_REAL, "acc");
 static const struct eg_unit_slot slot_stbl = { .struct_size = sizeof(struct eg_unit_slot), .flags = EG_SLOT_SHARED, .role = EG_ROLE_LOOKUP, .dtype = EG_DTYPE_REAL,
                                               .rank = 1, .like_slot = -1, .shape = scat_tbl_shape, .name = "tbl" };
 static const struct eg_unit_slot slot_sfault = { .struct_size = sizeof(struct eg_unit_slot), .flags = EG_SLOT_SHARED, .role = EG_ROLE_LOOKUP, .dtype = EG_DTYPE_INT64,

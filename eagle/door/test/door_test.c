@@ -2661,12 +2661,12 @@ static void check_checked_units(eg_ctx* ctx) {
           "in range: the checked unit's plane is bitwise the unchecked unit's");
 
     int64_t* seen = (int64_t*)dlsym(dlopen(library_path, RTLD_NOW | RTLD_NOLOAD), "fixture_acc_samples");
-    check(seen != NULL && *seen == SC_LEN && SC_LEN != SC_N, "an unchecked ACCUM_OUT unit whose plane (8 elements) is shorter than the lane count (16) sees the plane length in its handle");
+    check(seen != NULL && *seen == SC_LEN && SC_LEN != SC_N, "an unchecked zeroed PLANE_OUT unit whose plane (8 elements) is shorter than the lane count (16) sees the plane length in its handle");
     long long slot = -1, index = -1;
     scat_reset(&c, SC_N);
     c.idx[7] = 100;
     check(eg_launch(ctx, c.plan, NULL) == EG_FAULT && reason_has(ctx, "unit 'scat': slot 3 ('acc'): index 100 outside its 8 elements") && scat_guards_hold(&c),
-          "an ACCUM_OUT write index out of range: FAULT naming the unit, slot, index and length; the plane's guard bytes are unchanged");
+          "a zeroed PLANE_OUT write index out of range: FAULT naming the unit, slot, index and length; the plane's guard bytes are unchanged");
     scat_reset(&c, SC_N);
     c.jdx[3] = -4;
     check(eg_launch(ctx, c.plan, NULL) == EG_FAULT && scat_reported(ctx, &slot, &index) && slot == 4 && index == -4 && reason_has(ctx, "slot 4 ('tbl')") && scat_guards_hold(&c),
@@ -3911,7 +3911,7 @@ static void check_wide(eg_ctx* ctx) {
     static double wi[5 * M], wo[5 * M], want[5 * M], y[M], keep[5 * M];
     for (int i = 0; i < 5 * M; ++i) wi[i] = (double)(i % 13) * 0.5 - 3.0, keep[i] = -7.0;
     eg_unit* unit = NULL;
-    check(load(ctx, "widemul", 0x72, &unit) == EG_OK, "eg_unit_load widemul (WIDE_OUT, WIDE_IN)");
+    check(load(ctx, "widemul", 0x72, &unit) == EG_OK, "eg_unit_load widemul (kept PLANE_OUT, WIDE_IN)");
     if (unit == NULL) return;
     const eg_structure structures[2] = { EG_STRUCTURE_HOST_SERIAL, EG_STRUCTURE_HOST_TEAM };
     const int64_t rows[2] = { 3, 5 };    /* the rows are the caller's: the entry reads three */
@@ -3937,7 +3937,7 @@ static void check_wide(eg_ctx* ctx) {
                      eg_bind(ctx, p, &bd) == EG_OK && eg_launch(ctx, p, NULL) == EG_OK;
             for (int i = 0; ok && i < M; ++i) ok = y[i] == (double)M + 1000.0 * (double)M;
             check(ok && memcmp(wo, want, sizeof(wo)) == 0,
-                  "wide: WIDE_OUT = 2 * WIDE_IN + row over (rows, n) planes equal the plain loop (bitwise), both handles "
+                  "wide: a kept PLANE_OUT = 2 * WIDE_IN + row over (rows, n) planes equal the plain loop (bitwise), both handles "
                   "carry the trailing extent, rows past the entry's are untouched");
             eg_plan_free(ctx, p);
             eg_plane_free(ctx, pwo);
@@ -3958,14 +3958,14 @@ static void check_wide(eg_ctx* ctx) {
     b1.planes = &pbad;
     all = all && pbad && eg_bind(ctx, p, &b1) == EG_BAD_REQUEST && reason_has(ctx, "at least one dimension");
     eg_plane_free(ctx, pbad);
-    pbad = wrap_nd(ctx, &tb, wo, kDLFloat, 64, 2, 3, M, 0);              /* WIDE_OUT is written */
+    pbad = wrap_nd(ctx, &tb, wo, kDLFloat, 64, 2, 3, M, 0);              /* a kept PLANE_OUT is written */
     tb.managed.flags |= DLPACK_FLAG_BITMASK_READ_ONLY;
     const int32_t zero[1] = { 0 };
     b1.plane_slots = zero;
     b1.planes = &pbad;
     all = all && pbad && eg_bind(ctx, p, &b1) == EG_BAD_REQUEST && reason_has(ctx, "read-only");
     eg_plane_free(ctx, pbad);
-    check(all, "wide refusals: a plane without a dimension, a read-only WIDE_OUT, each BAD_REQUEST by name");
+    check(all, "wide refusals: a plane without a dimension, a read-only kept PLANE_OUT, each BAD_REQUEST by name");
     check(eg_plan_free(ctx, p) == EG_OK && eg_unit_free(ctx, unit) == EG_OK, "wide plan and unit freed");
 }
 

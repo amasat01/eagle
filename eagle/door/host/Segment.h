@@ -150,7 +150,7 @@ inline std::uint64_t run_unit(const eg_plan_s& plan, std::size_t mi, const eg_un
                 const int role = st.unit->slots[j].role;
                 plugin::ScalarHandle& h = handles[j];
                 h.data = static_cast<char*>(d.data) + d.byte_offset;
-                h.samples = static_cast<std::uint64_t>(role == EG_ROLE_LOOKUP ? elements(d) : role == EG_ROLE_WIDE_IN || role == EG_ROLE_WIDE_OUT ? d.shape[d.ndim - 1] : plan.n_samples);
+                h.samples = static_cast<std::uint64_t>(role == EG_ROLE_LOOKUP ? elements(d) : role == EG_ROLE_WIDE_IN || kept_out(st.unit->slots[j]) ? d.shape[d.ndim - 1] : plan.n_samples);
                 h.stride = 1;
                 h.deviceType = plugin::kEagleAbiDeviceCPU;
                 h.deviceId = 0;

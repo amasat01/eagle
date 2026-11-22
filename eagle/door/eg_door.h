@@ -823,7 +823,7 @@ eg_status eg_plan_free(eg_ctx* ctx, eg_plan* plan);
  * the map lists, in the order of the map and in any order, up to the count (refused BAD_REQUEST by name when the count
  * is above the map's length); each position at most once is the caller's promise, which is not scanned. A plan a
  * runner owns refuses the slots, and eg_runner_new refuses a plan that holds the caller's map or count.
- * The handle a kernel receives for an ACCUM_OUT slot states the element count of the plane bound there, whatever its rank (the target is a flat
+ * The handle a kernel receives for a PLANE_OUT slot that EG_SLOT_ZEROED marks states the element count of the plane bound there, whatever its rank (the target is a flat
  * plane of its own length, which a generated bounds check compares an index with), and not the sample count; the cell rows eagle makes state theirs.
  * Replaces: ``Plan.bind``, ``_plan_binding.BoundPlan``, ``_plan_pack``,
  * ``marshal``, ``_lane_bind`` (team grids, chunk counts), ``_cell_rows``.
@@ -1463,7 +1463,7 @@ struct eg_graph_reverse_desc {
 /** Reverse the graph's LAST ``eg_graph_launch``, eagerly on the host. The sum over samples of a shared parameter's gradient (a
  *  reduced GRAD link) is always the compensated pair in sample order, on the host and on a device: the same bits on every run, every
  *  thread count and both targets, so there is no policy member and such a gradient is bitwise. A gradient is not bitwise when a
- *  cross-sample scatter-add feeds it: a vjp slot of role ACCUM_OUT taints the adjoint it writes, and the taint passes through every
+ *  cross-sample scatter-add feeds it: a vjp slot that is a zeroed PLANE_OUT taints the adjoint it writes, and the taint passes through every
  *  earlier leaf that reads a tainted adjoint, through arms and WHILE copies; ``bitwise[i]`` is then 0, and under EG_REVERSE_STRICT
  *  the call is refused by name (the input and the launch ordinal of the tainting vjp) before any gradient is written. An input
  *  that is not a float plane is refused by name. Leaves run in reverse order (see ``eg_record_end``); a

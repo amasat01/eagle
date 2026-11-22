@@ -46,7 +46,7 @@ namespace plugin {
 // never heard of accum_out") because this register did not carry it — so the
 // register and its own producer described different vocabularies. Its ABI is the
 // same plain scalar handle ``wide_in``/``wide_out`` ride; what it NAMES is the
-// cross-sample accumulate plane (``AccumWrite``), which is exactly the surface
+// cross-sample accumulate plane (an ``Update`` of the operation ``add``), which is exactly the surface
 // This classifies and places, so it must be nameable.
 //
 // The same finding's other half: ``wide_in``/``wide_out`` were in this register but

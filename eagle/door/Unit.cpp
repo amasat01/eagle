@@ -46,7 +46,7 @@ SlotFacts read_slot(const eg_unit_slot* in, const std::string& unit, int index) 
     const std::string what = "unit '" + unit + "' slot " + std::to_string(index);
     const eg_unit_slot s = read_record(in, absent, what);
     const std::string named = what + " ('" + (s.name ? s.name : "?") + "')";
-    if (s.flags & ~(EG_SLOT_PRIOR | EG_SLOT_PARAM_PLANE | EG_SLOT_GATHER | EG_SLOT_SHARED))
+    if (s.flags & ~(EG_SLOT_PRIOR | EG_SLOT_PARAM_PLANE | EG_SLOT_GATHER | EG_SLOT_SHARED | EG_SLOT_ZEROED))
         refuse(EG_NOT_WRITTEN, named + ": unknown flag bits " + std::to_string(s.flags));
     if ((s.flags & EG_SLOT_GATHER) && !((s.role == EG_ROLE_PLANE_IN && s.rank == 2) || s.role == EG_ROLE_LOOKUP))
         refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + named + " is GATHER but neither a rank-2 PLANE_IN nor a LOOKUP");
@@ -68,17 +68,19 @@ SlotFacts read_slot(const eg_unit_slot* in, const std::string& unit, int index) 
                std::to_string(s.rank));
     const bool plane = s.role == EG_ROLE_MUTABLE || s.role == EG_ROLE_PLANE_IN || s.role == EG_ROLE_OUT;
     if (!plane && s.role != EG_ROLE_UNIFORM && s.role != EG_ROLE_TERMINATED
-        && s.role != EG_ROLE_LOOKUP && s.role != EG_ROLE_ACCUM_OUT
+        && s.role != EG_ROLE_LOOKUP && s.role != EG_ROLE_PLANE_OUT
         && s.role != EG_ROLE_NSAMPLES && s.role != EG_ROLE_EXTENT
-        && s.role != EG_ROLE_WIDE_IN && s.role != EG_ROLE_WIDE_OUT)
+        && s.role != EG_ROLE_WIDE_IN)
         refuse(EG_NOT_WRITTEN,
             named + ": role " + std::to_string(s.role)
                 + " is not written yet (this build binds "
                   "MUTABLE, PLANE_IN, OUT, WIDE_IN, "
-                  "WIDE_OUT, ACCUM_OUT, LOOKUP, UNIFORM, NSAMPLES, EXTENT and "
+                  "PLANE_OUT, LOOKUP, UNIFORM, NSAMPLES, EXTENT and "
                   "TERMINATED)");
-    if (s.rank != 0 && !plane && !(s.flags & EG_SLOT_SHARED) && s.role != EG_ROLE_LOOKUP && s.role != EG_ROLE_ACCUM_OUT && s.role != EG_ROLE_WIDE_OUT)
+    if (s.rank != 0 && !plane && !(s.flags & EG_SLOT_SHARED) && s.role != EG_ROLE_LOOKUP && s.role != EG_ROLE_PLANE_OUT)
         refuse(EG_NOT_WRITTEN, named + ": a slot of rank > 0 outside the plane roles is not written yet");
+    if ((s.flags & EG_SLOT_ZEROED) && s.role != EG_ROLE_PLANE_OUT)
+        refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + named + " states EG_SLOT_ZEROED, which only a PLANE_OUT slot may");
     if (s.role == EG_ROLE_NSAMPLES && s.dtype != EG_DTYPE_UINT32)
         refuse(EG_NOT_WRITTEN, named + ": an NSAMPLES slot of a dtype other than UINT32 is not written");
     if (s.role == EG_ROLE_EXTENT && s.dtype != EG_DTYPE_INT64)
@@ -106,6 +108,7 @@ SlotFacts read_slot(const eg_unit_slot* in, const std::string& unit, int index) 
     facts.gathered = (s.flags & EG_SLOT_GATHER) != 0;
     facts.shared = (s.flags & EG_SLOT_SHARED) != 0;
     facts.param_plane = (s.flags & EG_SLOT_PARAM_PLANE) != 0;
+    facts.zeroed = (s.flags & EG_SLOT_ZEROED) != 0;
     if (facts.gathered) facts.keep.assign(s.gather, s.gather + s.n_gather);
     return facts;
 }
@@ -186,8 +189,8 @@ void read_made(const eg_unit_body& body, void* library, bool device_only, eg_uni
     const std::string who = "meta that contradicts itself: unit '" + unit.name + "' ";
     const std::int32_t n = static_cast<std::int32_t>(unit.slots.size());
     const auto accum = [&](std::int32_t slot, const char* what) -> SlotFacts& {
-        if (slot < 0 || slot >= n || unit.slots[slot].role != EG_ROLE_ACCUM_OUT || unit.slots[slot].dtype != EG_DTYPE_REAL)
-            refuse(EG_BAD_REQUEST, who + what + " slot " + std::to_string(slot) + " is not a float ACCUM_OUT slot");
+        if (slot < 0 || slot >= n || !zeroed_out(unit.slots[slot]) || unit.slots[slot].dtype != EG_DTYPE_REAL)
+            refuse(EG_BAD_REQUEST, who + what + " slot " + std::to_string(slot) + " is not a float zeroed PLANE_OUT slot");
         return unit.slots[slot];
     };
     if (body.n_companions < 0 || (body.n_companions > 0 && body.companions == nullptr) || body.n_cells < 0 ||
@@ -560,11 +563,11 @@ void read_body(const eg_unit_meta& m, void* library, bool device_only, eg_unit_s
             refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' plane axes of slot " + std::to_string(pa.slot) +
                    " (a slot of the unit, one axis or more, with labels and extents)");
         SlotFacts& f = unit.slots[pa.slot];
-        if (f.role != EG_ROLE_ACCUM_OUT && f.role != EG_ROLE_WIDE_OUT
+        if (f.role != EG_ROLE_PLANE_OUT
             && f.role != EG_ROLE_WIDE_IN && f.role != EG_ROLE_LOOKUP)
             refuse(EG_NOT_WRITTEN,
                 "unit '" + unit.name + "': named plane axes on slot '" + f.name
-                    + "' (not an ACCUM_OUT, WIDE_OUT, WIDE_IN or LOOKUP slot) "
+                    + "' (not a PLANE_OUT, WIDE_IN or LOOKUP slot) "
                       "are not written");
         if (!f.axes.empty())
             refuse(EG_BAD_REQUEST,
@@ -749,7 +752,7 @@ void read_gemm(const eg_unit_meta& m, eg_unit_s& unit) {
         plane_slot(c.a_slot, "a");
         plane_slot(c.b_slot, "b");
         const SlotFacts& out = plane_slot(c.c_slot, "c");
-        if (out.role != EG_ROLE_MUTABLE && out.role != EG_ROLE_OUT && out.role != EG_ROLE_WIDE_OUT && out.role != EG_ROLE_ACCUM_OUT)
+        if (out.role != EG_ROLE_MUTABLE && out.role != EG_ROLE_OUT && out.role != EG_ROLE_PLANE_OUT)
             refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + at + " c_slot " + std::to_string(c.c_slot) + " ('" + out.name + "') is not a written role");
         const std::int64_t extents[6] = { c.a_rows, c.a_cols, c.b_rows, c.b_cols, c.c_rows, c.c_cols };
         for (std::int64_t e : extents) {
@@ -1009,12 +1012,12 @@ void resolve_stages(eg_ctx& ctx, const eg_unit_load_desc& d, eg_unit_s& unit) {
                 }
             }
         }
-        for (const StageFacts& st : unit.stages) {    // a block sum's output: the WIDE_OUT slot a KEYS stage writes holds that stage's keys (when the source slot is itself a WIDE_OUT)
+        for (const StageFacts& st : unit.stages) {    // a block sum's output: the kept PLANE_OUT slot a KEYS stage writes holds that stage's keys (when the source slot is itself kept)
             if (st.grid != EG_GRID_KEYS) continue;
             for (std::size_t j = 0; j < st.unit->slots.size(); ++j) {
-                if (st.source_of[j] < 0 || st.unit->slots[j].role != EG_ROLE_WIDE_OUT) continue;
+                if (st.source_of[j] < 0 || !kept_out(st.unit->slots[j])) continue;
                 SlotFacts& src = unit.slots[static_cast<std::size_t>(st.source_of[j])];
-                if (src.role != EG_ROLE_WIDE_OUT) continue;    // a block sum's output is a WIDE_OUT of the source too; an ACCUM_OUT the stage writes by index is not
+                if (!kept_out(src)) continue;    // a block sum's output is a kept plane of the source too; a zeroed plane the stage writes by index is not
                 if (src.keys_of >= 0 && src.keys_of != st.keyed)
                     refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': slot '" + src.name + "' is written by KEYS stages of two keyed records, which is not written");
                 src.keys_of = st.keyed;

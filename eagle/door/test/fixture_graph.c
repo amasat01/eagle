@@ -9,11 +9,11 @@
  *   6 uscale  y = k * x        (k a by-value uniform)                                7 uscale_vjp (reduced GRAD of the uniform)
  *  10 fan     v[c] = (c + 1) x  (a width-3 vector plane out)                         11 fan_vjp
  *  12 norm2   o = sum_c v[c]^2  (the vector plane in)                                13 norm2_vjp
- *  15 scale_scatter_vjp   scale's vjp with bar_x an ACCUM_OUT slot: a cross-sample scatter-add feeds the gradient of x
+ *  15 scale_scatter_vjp   scale's vjp with bar_x a zeroed PLANE_OUT slot: a cross-sample scatter-add feeds the gradient of x
  *  14 tick    c[i] -= 1          (an int32 per-sample counter plane in place; a loop's stop, no gradient)
  *   8 scale_tape_vjp   scale's vjp reading a tape row (a link a graph vjp does not take)
  *   9 scale_open_vjp   scale's vjp with a slot no link names
- *  18 scale_vjp_comp  scale's vjp whose bar_w is an ACCUM_OUT slot summed over samples with Kahan compensation: a companion plane eagle makes, folded after the launch
+ *  18 scale_vjp_comp  scale's vjp whose bar_w is a zeroed PLANE_OUT slot summed over samples with Kahan compensation: a companion plane eagle makes, folded after the launch
  *  19 cscale  y = (c + 1) * x  (c a uint32 one-cell plane: a WHILE's counter)             20 cscale_vjp (c bound by a VALUE link: no adjoint)
  *  16 iscale  y = n * x        (n an int32 per-sample plane read by the kernel)          17 iscale_vjp (n bound by a VALUE link: no adjoint)
  *
@@ -71,7 +71,7 @@ void scale_host(void* const* params, int64_t base, int64_t count, int64_t n) {
     (void)n;
     for (int64_t i = base; i < base + count; ++i) H(2)[i] = H(1)[0] * H(0)[i];
 }
-/* slots: x, w, bar_y, bar_x, bar_w (ACCUM_OUT: the running Kahan sum), bar_w_c (its companion: the running compensation). One call sums its samples in order. */
+/* slots: x, w, bar_y, bar_x, bar_w (zeroed PLANE_OUT: the running Kahan sum), bar_w_c (its companion: the running compensation). One call sums its samples in order. */
 void scale_vjp_comp_host(void* const* params, int64_t base, int64_t count, int64_t n) {
     (void)n;
     double sum = H(4)[0], c = H(5)[0];
@@ -222,11 +222,11 @@ static const struct eg_unit_slot s_n = { .struct_size = sizeof(struct eg_unit_sl
                                         .rank = 0, .like_slot = -1, .n_gather = 0, .shape = NULL, .gather = NULL, .name = "n" };
 static const struct eg_unit_slot s_cnt = { .struct_size = sizeof(struct eg_unit_slot), .flags = EG_SLOT_SHARED, .role = EG_ROLE_LOOKUP, .dtype = EG_DTYPE_UINT32,
                                            .rank = 0, .like_slot = -1, .n_gather = 0, .shape = NULL, .gather = NULL, .name = "c" };
-static const struct eg_unit_slot s_bar_w_acc = { .struct_size = sizeof(struct eg_unit_slot), .flags = 0, .role = EG_ROLE_ACCUM_OUT, .dtype = EG_DTYPE_REAL,
+static const struct eg_unit_slot s_bar_w_acc = { .struct_size = sizeof(struct eg_unit_slot), .flags = EG_SLOT_ZEROED, .role = EG_ROLE_PLANE_OUT, .dtype = EG_DTYPE_REAL,
                                                  .rank = 0, .like_slot = -1, .n_gather = 0, .shape = NULL, .gather = NULL, .name = "bar_w" };
-static const struct eg_unit_slot s_bar_w_c = { .struct_size = sizeof(struct eg_unit_slot), .flags = 0, .role = EG_ROLE_ACCUM_OUT, .dtype = EG_DTYPE_REAL,
+static const struct eg_unit_slot s_bar_w_c = { .struct_size = sizeof(struct eg_unit_slot), .flags = EG_SLOT_ZEROED, .role = EG_ROLE_PLANE_OUT, .dtype = EG_DTYPE_REAL,
                                                .rank = 0, .like_slot = -1, .n_gather = 0, .shape = NULL, .gather = NULL, .name = "bar_w_c" };
-static const struct eg_unit_slot s_bar_x_acc = { .struct_size = sizeof(struct eg_unit_slot), .flags = 0, .role = EG_ROLE_ACCUM_OUT, .dtype = EG_DTYPE_REAL,
+static const struct eg_unit_slot s_bar_x_acc = { .struct_size = sizeof(struct eg_unit_slot), .flags = EG_SLOT_ZEROED, .role = EG_ROLE_PLANE_OUT, .dtype = EG_DTYPE_REAL,
                                                  .rank = 0, .like_slot = -1, .n_gather = 0, .shape = NULL, .gather = NULL, .name = "bar_x" };
 static const int64_t width_shape[] = { 3 };
 #define SLOT_V(var, role_, name_)                                                                                 \

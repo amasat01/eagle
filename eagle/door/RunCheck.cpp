@@ -307,7 +307,7 @@ std::vector<Owned> owned_planes(const eg_runner_s& runner) {
             const std::int32_t role = p->unit->slots[s].role;
             if (p->bindings[s].plane != nullptr && !p->unit->slots[s].gathered &&    // a gathered matrix's columns are not lanes
                 (role == EG_ROLE_MUTABLE || role == EG_ROLE_PLANE_IN || role == EG_ROLE_TERMINATED || role == EG_ROLE_OUT ||
-                 role == EG_ROLE_WIDE_IN || role == EG_ROLE_WIDE_OUT))
+                 role == EG_ROLE_WIDE_IN || kept_out(p->unit->slots[s])))
                 add(p->bindings[s].plane);
         }
     return out;

@@ -333,7 +333,7 @@ extern "C" __global__ void sga(ScalarHandle k, ScalarHandle limit, ScalarHandle 
     segStep(k, limit, mask, finished, i, l >= 6.0 ? 2.0 : 1.0);
 }
 
-// dscat / dscatp: acc[idx[i]] += val[i] * tbl[jdx[i]] with a data-indexed ACCUM_OUT write (acc) and table read (tbl). dscat is the CHECKED build: an
+// dscat / dscatp: acc[idx[i]] += val[i] * tbl[jdx[i]] with a data-indexed zeroed PLANE_OUT write (acc) and table read (tbl). dscat is the CHECKED build: an
 // index outside its slot's length skips the lane and claims the fault cell with one atomic compare-and-swap of cell 0 (the slot), the winner writing
 // cell 1 (the index), as the lowering will emit it; dscatp is the same unit built unchecked.
 __device__ inline void scat_claim(ScalarHandle fault, long long slot, long long index) {

@@ -771,7 +771,7 @@ void record_new(eg_ctx& ctx, eg_runner_s& runner, const eg_runner_desc& d) {
         if (twin->finish.present && s == twin->finish.counter_slot) continue;
         if (twin_of[i] == -1)
             refuse(EG_BAD_REQUEST, field(tn, "links") + ": twin slot " + std::to_string(i) + " ('" + twin->slots[i].name + "') has no link");
-        if (role == EG_ROLE_OUT || role == EG_ROLE_ACCUM_OUT || role == EG_ROLE_LOOKUP)
+        if (role == EG_ROLE_OUT || zeroed_out(twin->slots[i]) || role == EG_ROLE_LOOKUP)
             refuse(EG_NOT_WRITTEN, "unit '" + twin->name + "': twin slot '" + twin->slots[i].name +
                    "' (an output or lookup beyond the finish counter) under record is not written in this build of the door");
     }

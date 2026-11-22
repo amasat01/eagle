@@ -52,6 +52,7 @@ from .dtypes import _SCRATCH, scratch_dtype
 from . import _stream
 from . import arrays
 from .roles import OUTPUT_ROLES
+from .sidecar import internal_plugin
 
 #: The vocabulary of the launch and team fields this runtime implements: the team grids with their extra keys (a keyed
 #: ``record`` or a ``plane`` name), the grid of a team that names none, the team plane dtypes and the ``launch.local_source``
@@ -94,6 +95,8 @@ def linked(plugin, door: str):
             f"{[e['kernel'] for e in side['stages']]}, but this plugin does not carry the plugin of "
             f"{missing}; take the plugins of the bundle from hawk.artifact.plugins(bundle)")
     with _LINKING:
+        for stage_plugin in by_name.values():
+            internal_plugin(stage_plugin)
         _link(by_name, {nm: p.sidecar for nm, p in by_name.items()})
     return plugin
 

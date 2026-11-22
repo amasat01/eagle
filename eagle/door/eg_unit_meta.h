@@ -84,11 +84,10 @@ typedef int32_t eg_slot_role;
 #define EG_ROLE_MUTABLE 0     /**< a plane read and written in place */
 #define EG_ROLE_PLANE_IN 1   /**< a plane read per sample, whatever the rank of its value (the slot's shape says it) */
 #define EG_ROLE_LOOKUP 3      /**< a table indexed at run time; its length is the caller's */
-#define EG_ROLE_WIDE_OUT 4    /**< several values per sample out; runtime length: the caller's plane is any compact plane of one dimension or more, and its handle carries the trailing extent */
+#define EG_ROLE_PLANE_OUT 4   /**< a plane the unit writes; runtime length. Without EG_SLOT_ZEROED the caller's plane is any compact plane of one dimension or more and its handle carries the trailing extent; with it the plane is an accumulate target (see EG_SLOT_ZEROED) */
 #define EG_ROLE_UNIFORM 5     /**< one value for all samples, by value */
-#define EG_ROLE_ACCUM_OUT 7   /**< accumulated over samples; runtime length */
 #define EG_ROLE_TERMINATED 8  /**< the mask that marks a sample finished */
-#define EG_ROLE_WIDE_IN 9     /**< several values per sample in; runtime length: as EG_ROLE_WIDE_OUT, a read clamps to the trailing extent */
+#define EG_ROLE_WIDE_IN 9     /**< several values per sample in; runtime length: as a PLANE_OUT slot that is not zeroed, a read clamps to the trailing extent */
 #define EG_ROLE_NSAMPLES 10   /**< the sample count, by value; eagle passes it */
 #define EG_ROLE_OUT 11        /**< a plain output plane */
 #define EG_ROLE_EXTENT 12     /**< a runtime axis's extent, by value (INT64) */
@@ -162,6 +161,7 @@ typedef int32_t eg_steps_regime;
                                           a rank-2 PLANE_IN is bound as (rows, cols, m); a LOOKUP, read flat by the kernel's
                                           index over the kept axes, holds product(shape) x m elements */
 #define EG_SLOT_SHARED (1u << 3)      /**< a parameter plane with NO lane axis: one value for every lane, bound flat (eg_bind sizes it by its shape, not by lanes) */
+#define EG_SLOT_ZEROED (1u << 4)     /**< a PLANE_OUT slot the runtime zeroes before the run and folds nothing else into: an accumulate target, addressed by key, so its handle counts the plane's own elements, whatever the lane count; refused on any other role */
 
 #define EG_FINISH_ENTRY_COUNTS (1u << 0) /**< the fast entries count samples finished on entry: the runner zeroes the counter, it does not count the mask */
 
@@ -321,7 +321,7 @@ struct eg_unit_body {
     const struct eg_unit_dispatch* const* dispatches;
 };
 
-/** Named axes of a plane (LOOKUP, WIDE_IN, WIDE_OUT or ACCUM_OUT): the plane
+/** Named axes of a plane (LOOKUP, WIDE_IN or PLANE_OUT): the plane
  * binds as (*slot shape, *axes), last axis fastest. */
 struct eg_unit_plane_axes {
     uint32_t struct_size;

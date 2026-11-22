@@ -27,7 +27,7 @@ from types import MappingProxyType
 import numpy as np
 
 from .. import FINISHED_PLANE, _cell_rows
-from ..sidecar import prior_reads
+from ..sidecar import internal_roles, prior_reads
 from .._active_set import COUNT_PLANE, MAP_PLANE
 
 __all__ = ["ACTIVE_PLANES", "FLOAT_MODES", "INPUT_ROLES", "OUTPUT_ROLES", "ModeError", "Signature", "call_mode", "promote"]
@@ -97,9 +97,10 @@ class Signature:
         """Of ``kernel`` (described here, beside ``primals`` for a derivative), or of a unit given as its ``description``
         (hawk's document of a stage): a unit is bound as it is, never differentiated."""
         unit = description is not None
-        self.description = description = description if unit else describe_kernel(kernel, primals=primals)
+        description = description if unit else describe_kernel(kernel, primals=primals)
         self.name = label or (description["kernel"] if unit else kernel.name)
-        self.arg_spec = tuple(tuple(pair) for pair in (description["arg_spec"] if unit else kernel.arg_spec))
+        self.description = description = internal_roles(description, name=self.name)
+        self.arg_spec = tuple(tuple(pair) for pair in description["arg_spec"])
         self.role = {name: role for role, name in self.arg_spec}
         self._ir = slot_types(description)
         #: reductions over samples ``{cell: op}``: the kernel writes rows (and a

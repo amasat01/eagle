@@ -850,8 +850,8 @@ void launch_split(const eg_plan_s& plan) {
                 const int role = su.slots[j].role;
                 plugin::ScalarHandle& h = handles[j];
                 h.data = static_cast<char*>(t.data) + t.byte_offset;
-                h.samples = static_cast<std::uint64_t>(role == EG_ROLE_LOOKUP || role == EG_ROLE_ACCUM_OUT ? elements(t)
-                                                       : role == EG_ROLE_WIDE_IN || role == EG_ROLE_WIDE_OUT ? t.shape[t.ndim - 1] : plan.n_samples);
+                h.samples = static_cast<std::uint64_t>(role == EG_ROLE_LOOKUP || zeroed_out(su.slots[j]) ? elements(t)
+                                                       : role == EG_ROLE_WIDE_IN || kept_out(su.slots[j]) ? t.shape[t.ndim - 1] : plan.n_samples);
                 h.stride = 1;
                 h.deviceType = plugin::kEagleAbiDeviceCUDA;
                 h.deviceId = 0;
@@ -1023,7 +1023,7 @@ void launch_segmented(const eg_plan_s& plan) {
             const int role = sf.role;
             plugin::ScalarHandle& h = handles[j];
             h.data = static_cast<char*>(t.data) + t.byte_offset;
-            h.samples = static_cast<std::uint64_t>(role == EG_ROLE_LOOKUP || role == EG_ROLE_ACCUM_OUT ? elements(t) : role == EG_ROLE_WIDE_IN || role == EG_ROLE_WIDE_OUT ? t.shape[t.ndim - 1] : n);
+            h.samples = static_cast<std::uint64_t>(role == EG_ROLE_LOOKUP || zeroed_out(sf) ? elements(t) : role == EG_ROLE_WIDE_IN || kept_out(sf) ? t.shape[t.ndim - 1] : n);
             h.stride = 1;
             h.deviceType = plugin::kEagleAbiDeviceCUDA;
             h.deviceId = 0;

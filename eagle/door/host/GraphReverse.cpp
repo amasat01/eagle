@@ -92,7 +92,7 @@ std::vector<VjpLink> link_vjp(const GraphDiff& d, const DiffNode& node, const eg
                 if (!is(node.reads)) refuse(EG_BAD_REQUEST, where + ": GRAD of '" + ps.name + "', which the launch does not read");
                 k.kind = VjpLink::GRAD;
                 k.reduced = l.reduced != 0;
-                k.scatter = vjp.slots[static_cast<std::size_t>(l.slot)].role == EG_ROLE_ACCUM_OUT;
+                k.scatter = zeroed_out(vjp.slots[static_cast<std::size_t>(l.slot)]);
                 if (k.reduced && elements(tensor(*d.planes[static_cast<std::size_t>(k.plane)])) != 1)
                     refuse(EG_BAD_REQUEST, where + ": a reduced gradient is the sum over samples into a one-element plane; '" + ps.name + "' is not one");
             }

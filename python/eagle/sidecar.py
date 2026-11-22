@@ -378,20 +378,24 @@ _PLANE_IN_BY_RANK = ("per_sample", "vec_in", "mat_in")
 
 
 def internal_roles(meta: dict, *, name: str) -> dict:
-    """``meta`` with the slots of its ``plane_in`` role given this package's own roles, from the rank of each slot's value.
+    """``meta`` with its slots given this package's own roles, from the value shape and the zeroing fact of each slot.
 
-    This package is a transition package: it still tells a scalar, a vector and a matrix input apart by role, while a
-    sidecar now states one ``plane_in`` role and the value shape of every slot in ``slot_shapes``. This function is the one
-    reading rule that closes that gap: the ``arg_spec`` it returns carries ``per_sample`` / ``vec_in`` / ``mat_in``, and
-    the lists and widths the package reads (``per_sample``, ``vector_inputs``, ``matrix_inputs``, ``mat_shapes``,
-    ``vec_widths``) are derived from them, so every later site keeps working on the internal names. A sidecar with no
-    ``plane_in`` slot is returned as it is. A value of rank above two is refused by name."""
-    spec = meta.get("arg_spec", ())
-    if not any(entry[0] == "plane_in" for entry in spec):
+    This package is a transition package: it still tells a scalar, a vector and a matrix input apart by role, and the
+    planes the run zeroes from the planes it leaves alone, while a sidecar now states one ``plane_in`` role with the value
+    shape of every slot in ``slot_shapes``, and one ``plane_out`` role with the planes the run zeroes in
+    ``zeroed_outputs``. This function is the one reading rule that closes that gap: the ``arg_spec`` it returns carries
+    ``per_sample`` / ``vec_in`` / ``mat_in`` and ``wide_out`` / ``accum_out``, and the lists and widths the package reads
+    (``per_sample``, ``vector_inputs``, ``matrix_inputs``, ``mat_shapes``, ``vec_widths``, ``wide_outputs``,
+    ``accum_outputs``) are derived from them, so every later site keeps working on the internal names. A sidecar that
+    already carries those lists is returned as it is; one that carries none gets them, empty when it binds no plane.
+    A value of rank above two is refused by name."""
+    if "vector_inputs" in meta:
         return meta
+    spec = meta.get("arg_spec", ())
     shapes = meta.get("slot_shapes") or {}
     widths = meta.get("arg_widths") or {}
-    by_role: dict = {role: [] for role in _PLANE_IN_BY_RANK}
+    zeroed = set(meta.get("zeroed_outputs") or ())
+    by_role: dict = {role: [] for role in (*_PLANE_IN_BY_RANK, "wide_out", "accum_out")}
     arg_spec = []
     for role, slot in spec:
         if role == "plane_in":
@@ -404,6 +408,9 @@ def internal_roles(meta: dict, *, name: str) -> dict:
                 )
             role = _PLANE_IN_BY_RANK[rank]
             by_role[role].append(slot)
+        elif role == "plane_out":
+            role = "accum_out" if slot in zeroed else "wide_out"
+            by_role[role].append(slot)
         arg_spec.append([role, slot])
     return {
         **meta,
@@ -413,7 +420,31 @@ def internal_roles(meta: dict, *, name: str) -> dict:
         "matrix_inputs": by_role["mat_in"],
         "mat_shapes": {slot: list(shapes[slot]) for slot in by_role["mat_in"]},
         "vec_widths": {slot: widths[slot] for slot in by_role["vec_in"] if slot in widths},
+        "wide_outputs": by_role["wide_out"],
+        "accum_outputs": by_role["accum_out"],
     }
+
+
+def internal_plugin(plugin):
+    """``plugin``, a hawk declaration of one unit, with its roles and lists given this package's own names, in place.
+
+    The rule is :func:`internal_roles`, read over the slots the declaration states; a plugin that already carries the
+    lists (a loaded kernel, or one read before) is left as it is, so reading twice changes nothing."""
+    if hasattr(plugin, "vector_inputs"):
+        return plugin
+    meta = {
+        "arg_spec": plugin.arg_spec,
+        "slot_shapes": getattr(plugin, "slot_shapes", None),
+        "arg_widths": getattr(plugin, "arg_widths", None),
+        "zeroed_outputs": getattr(plugin, "zeroed_outputs", None),
+    }
+    read = internal_roles(meta, name=getattr(plugin, "name", None) or getattr(plugin, "kernel", "<plugin>"))
+    if read is meta:
+        return plugin
+    changed = {key: value for key, value in read.items() if key not in meta or key == "arg_spec"}
+    changed["arg_spec"] = tuple(tuple(pair) for pair in changed["arg_spec"])
+    vars(plugin).update(changed)
+    return plugin
 
 
 def validate_sidecar(meta: dict, *, name: str) -> dict:

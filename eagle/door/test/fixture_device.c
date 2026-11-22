@@ -28,6 +28,12 @@
                                              .dtype = dtype_, .rank = rank_, .like_slot = -1,             \
                                              .shape = shape_, .name = name_ }
 
+/* a written plane the runtime zeroes before the run */
+#define ZSLOT(var, dtype_, rank_, shape_, name_)                                                            \
+    static const struct eg_unit_slot var = { .struct_size = sizeof(struct eg_unit_slot), .flags = EG_SLOT_ZEROED, \
+                                             .role = EG_ROLE_PLANE_OUT, .dtype = dtype_, .rank = rank_,    \
+                                             .like_slot = -1, .shape = shape_, .name = name_ }
+
 static const int64_t v_shape[] = { 2 };
 SLOT(slot_y, EG_ROLE_MUTABLE, EG_DTYPE_REAL, 0, NULL, "y");
 SLOT(slot_x, EG_ROLE_PLANE_IN, EG_DTYPE_REAL, 0, NULL, "x");
@@ -67,8 +73,8 @@ UNIT(unit_banded, "banded", 0xC4, EG_SCALAR_BANDED, "fixture", "axpy", launch_an
 UNIT(unit_nofn, "nofn", 0xC5, EG_SCALAR_FLOAT64, "fixture", "missing", launch_any);
 UNIT(unit_noimg, "noimg", 0xC6, EG_SCALAR_FLOAT64, "absent", "axpy", launch_any);
 
-/* cells and a companion: ACCUM_OUT slots, cell rows of 4 samples, a keyed accumulate over the lane axis "key" */
-#define ACC(var, name_) SLOT(var, EG_ROLE_ACCUM_OUT, EG_DTYPE_REAL, 0, NULL, name_)
+/* cells and a companion: zeroed PLANE_OUT slots, cell rows of 4 samples, a keyed accumulate over the lane axis "key" */
+#define ACC(var, name_) ZSLOT(var, EG_DTYPE_REAL, 0, NULL, name_)
 ACC(slot_tot, "tot");
 ACC(slot_mx, "mx");
 ACC(slot_acc, "acc");
@@ -323,7 +329,7 @@ static const int64_t scat_tbl_shape[] = { 8 }, scat_fault_shape[] = { 2 };
 SLOT(slot_sidx, EG_ROLE_PLANE_IN, EG_DTYPE_INT32, 0, NULL, "idx");
 SLOT(slot_sjdx, EG_ROLE_PLANE_IN, EG_DTYPE_INT32, 0, NULL, "jdx");
 SLOT(slot_sval, EG_ROLE_PLANE_IN, EG_DTYPE_REAL, 0, NULL, "val");
-SLOT(slot_sacc, EG_ROLE_ACCUM_OUT, EG_DTYPE_REAL, 0, NULL, "acc");
+ZSLOT(slot_sacc, EG_DTYPE_REAL, 0, NULL, "acc");
 static const struct eg_unit_slot slot_stbl = { .struct_size = sizeof(struct eg_unit_slot), .flags = EG_SLOT_SHARED, .role = EG_ROLE_LOOKUP, .dtype = EG_DTYPE_REAL,
                                                .rank = 1, .like_slot = -1, .shape = scat_tbl_shape, .name = "tbl" };
 static const struct eg_unit_slot slot_sfault = { .struct_size = sizeof(struct eg_unit_slot), .flags = EG_SLOT_SHARED, .role = EG_ROLE_LOOKUP, .dtype = EG_DTYPE_INT64,

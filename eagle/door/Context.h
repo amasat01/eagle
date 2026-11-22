@@ -96,7 +96,7 @@ struct SlotFacts {
     std::vector<std::uint8_t> keep;           ///< gathered: 1 for each lane axis the matrix varies along (empty: m unchecked)
     bool shared = false;                      ///< a LOOKUP with no lane axis: one value for every lane, bound flat
     bool param_plane = false;                 ///< a LOOKUP read at index 0 only (a parameter in a one-cell plane); validated, not acted on
-    /** @brief One named axis of an ACCUM_OUT plane: a static extent, or -1 and the lane axis whose extent it shares. */
+    /** @brief One named axis of a zeroed PLANE_OUT plane: a static extent, or -1 and the lane axis whose extent it shares. */
     struct Axis {
         std::string label;
         std::int64_t extent      = -1;
@@ -107,11 +107,17 @@ struct SlotFacts {
                             ///< payload extents (empty: any compact plane)
     bool made = false;                        ///< eagle's own plane (a companion): never bound by the caller
     bool cell = false;                        ///< a cell's slot: the caller binds the finished (1,) cell, the kernel reads eagle's rows
-    std::int32_t keys_of = -1;                ///< a WIDE_OUT slot a KEYS stage writes (a block sum's output): the keyed record whose keys it holds, else -1
+    bool zeroed = false;                      ///< a PLANE_OUT slot the runtime zeroes before the run: an accumulate target
+    std::int32_t keys_of = -1;                ///< a kept PLANE_OUT slot a KEYS stage writes (a block sum's output): the keyed record whose keys it holds, else -1
     std::int32_t like = -1;                   ///< a plane sized like the bound plane of this LOOKUP slot (its ndim and extents), else -1
     bool optional_made = false;               ///< eagle makes the plane unless the caller binds one (the AUTO mix counters)
     std::int64_t min_elements = 0;            ///< a caller's plane of an optional_made slot holds at least this many elements
 };
+
+/** @brief A written plane the runtime zeroes before the run (an accumulate target). */
+inline bool zeroed_out(const SlotFacts& s) { return s.role == EG_ROLE_PLANE_OUT && s.zeroed; }
+/** @brief A written plane the caller's own values stay in (a store target). */
+inline bool kept_out(const SlotFacts& s) { return s.role == EG_ROLE_PLANE_OUT && !s.zeroed; }
 
 /** @brief A compensation companion eagle makes beside the target the caller binds, and the fold it runs after each launch. */
 struct CompanionFacts {

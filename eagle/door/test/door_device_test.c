@@ -847,7 +847,7 @@ static void checked_units_device(eg_ctx* ctx, const char* dev_lib) {
     const eg_status bad = eg_launch(ctx, c.plan, NULL);
     dscat_down(&c);
     check(bad == EG_FAULT && reason_has(ctx, "unit 'dscat': slot 3 ('acc'): index 100 outside its 8 elements") && dscat_guards_hold(&c),
-          "an ACCUM_OUT write index out of range on the device: FAULT naming unit, slot, index and length; the guard bytes are unchanged");
+          "a zeroed PLANE_OUT write index out of range on the device: FAULT naming unit, slot, index and length; the guard bytes are unchanged");
     dscat_reset(&c);
     dscat_reset(&u);
     c.jdx[1] = 9;

@@ -3,7 +3,7 @@
 /*
  * A hand-written unit library for the gemm record: units whose meta states matrix products (eg_unit_gemm) and whose
  * host entry computes the SAME products with plain loops over the same record, so a host plan is the oracle of a
- * DEVICE plan. Planes are LOOKUP (inputs) and ACCUM_OUT (outputs) slots, each a dense row-major (rows, cols + slack)
+ * DEVICE plan. Planes are LOOKUP (inputs) and zeroed PLANE_OUT (outputs) slots, each a dense row-major (rows, cols + slack)
  * view; the loop works out its row stride the way the door states it.
  *
  *  - "<w>_<shape>" (w: f32, f64): one forward product C = op(A) op(B) of (3, 5) x (5, 4): sq (4x4x4), rect, ta, tb,
@@ -87,22 +87,27 @@ REFERENCE(float, reference_f32)
 #define SLOT_OF(var, role_, dtype_, name_)                                                                     \
     static const struct eg_unit_slot var = { .struct_size = sizeof(struct eg_unit_slot), .role = role_,        \
                                              .dtype = dtype_, .like_slot = -1, .name = name_ }
+/* a written plane the runtime zeroes before the run */
+#define ZSLOT_OF(var, dtype_, name_)                                                                           \
+    static const struct eg_unit_slot var = { .struct_size = sizeof(struct eg_unit_slot), .flags = EG_SLOT_ZEROED, \
+                                             .role = EG_ROLE_PLANE_OUT, .dtype = dtype_, .like_slot = -1,      \
+                                             .name = name_ }
 SLOT_OF(slot_a, EG_ROLE_LOOKUP, EG_DTYPE_REAL, "a");
 SLOT_OF(slot_b, EG_ROLE_LOOKUP, EG_DTYPE_REAL, "b");
-SLOT_OF(slot_c, EG_ROLE_ACCUM_OUT, EG_DTYPE_REAL, "c");
-SLOT_OF(slot_ci, EG_ROLE_ACCUM_OUT, EG_DTYPE_INT32, "c_int");
+ZSLOT_OF(slot_c, EG_DTYPE_REAL, "c");
+ZSLOT_OF(slot_ci, EG_DTYPE_INT32, "c_int");
 SLOT_OF(slot_w, EG_ROLE_LOOKUP, EG_DTYPE_REAL, "w");
 SLOT_OF(slot_x, EG_ROLE_LOOKUP, EG_DTYPE_REAL, "x");
 SLOT_OF(slot_dy, EG_ROLE_LOOKUP, EG_DTYPE_REAL, "dy");
-SLOT_OF(slot_dw, EG_ROLE_ACCUM_OUT, EG_DTYPE_REAL, "dw");
-SLOT_OF(slot_dx, EG_ROLE_ACCUM_OUT, EG_DTYPE_REAL, "dx");
+ZSLOT_OF(slot_dw, EG_DTYPE_REAL, "dw");
+ZSLOT_OF(slot_dx, EG_DTYPE_REAL, "dx");
 SLOT_OF(slot_count, EG_ROLE_LOOKUP, EG_DTYPE_UINT32, "index_count");
 SLOT_OF(slot_k, EG_ROLE_MUTABLE, EG_DTYPE_REAL, "k");
 SLOT_OF(slot_limit, EG_ROLE_PLANE_IN, EG_DTYPE_REAL, "limit");
 SLOT_OF(slot_mask, EG_ROLE_TERMINATED, EG_DTYPE_BOOL, "mask");
 SLOT_OF(slot_finished, EG_ROLE_LOOKUP, EG_DTYPE_UINT32, "finished");
-static const struct eg_unit_slot slot_c_param_plane = { .struct_size = sizeof(struct eg_unit_slot), .role = EG_ROLE_ACCUM_OUT,
-    .dtype = EG_DTYPE_REAL, .like_slot = -1, .flags = EG_SLOT_PARAM_PLANE, .name = "c" };
+static const struct eg_unit_slot slot_c_param_plane = { .struct_size = sizeof(struct eg_unit_slot), .role = EG_ROLE_PLANE_OUT,
+    .dtype = EG_DTYPE_REAL, .like_slot = -1, .flags = EG_SLOT_PARAM_PLANE | EG_SLOT_ZEROED, .name = "c" };
 
 static const struct eg_unit_slot* const slots_abc[] = { &slot_a, &slot_b, &slot_c };
 static const struct eg_unit_slot* const slots_param_plane[] = { &slot_a, &slot_b, &slot_c_param_plane };

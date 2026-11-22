@@ -23,7 +23,7 @@ namespace door {
 inline bool reads_role(std::int32_t r) {
     return r == EG_ROLE_PLANE_IN || r == EG_ROLE_LOOKUP || r == EG_ROLE_WIDE_IN;
 }
-inline bool writes_role(std::int32_t r) { return r == EG_ROLE_MUTABLE || r == EG_ROLE_WIDE_OUT || r == EG_ROLE_ACCUM_OUT || r == EG_ROLE_OUT; }
+inline bool writes_role(std::int32_t r) { return r == EG_ROLE_MUTABLE || r == EG_ROLE_PLANE_OUT || r == EG_ROLE_OUT; }
 
 /** @brief One recorded call, or one conditional with an arm list per arm. */
 struct Node {
@@ -78,7 +78,7 @@ struct VjpLink {
     int primal = -1;                            ///< the launch's slot it names
     int plane = -1;                             ///< index in GraphDiff::planes (not for a uniform)
     bool reduced = false;                       ///< GRAD: summed over samples into a one-cell plane
-    bool scatter = false;                       ///< GRAD: the vjp slot is an ACCUM_OUT, a cross-sample scatter-add
+    bool scatter = false;                       ///< GRAD: the vjp slot is a zeroed PLANE_OUT, a cross-sample scatter-add
 };
 
 /** @brief How a host call's declared plane is seen by its vjp: its index in GraphDiff::planes (-1: untracked, it has no value or adjoint the vjp needs) and its declared access. */
