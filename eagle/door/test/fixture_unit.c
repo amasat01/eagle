@@ -1469,6 +1469,19 @@ static const int32_t grp_axes_out[] = { 2 };
     static const struct eg_unit_group var = { .struct_size = sizeof(struct eg_unit_group), .membership = membership_, .phases = phases_,       \
         .n_axes = n_axes_, .key_slot = key_, .n_scratch = n_scratch_, .count = count_, .max_size = max_, .scratch_bytes = bytes_,              \
         .axes = axes_, .scratch = scratch_ }
+/* the slots the unit assumes distinct: x and y; x and key (both read); a UNIFORM slot (refused); slots out of order (refused) */
+static const int32_t grp_distinct_xy[] = { 0, 2 };
+static const int32_t grp_distinct_xk[] = { 0, 1 };
+static const int32_t grp_distinct_u[] = { 0, 3 };
+static const int32_t grp_distinct_unordered[] = { 2, 0 };
+#define GRP_RECORD_DISTINCT(var, slots_, n_)                                                                                                       \
+    static const struct eg_unit_group var = { .struct_size = sizeof(struct eg_unit_group), .membership = EG_GROUP_COUNT, .phases = 2,            \
+        .n_axes = 0, .key_slot = -1, .n_scratch = 2, .count = 8, .max_size = 8, .scratch_bytes = 160, .axes = NULL, .scratch = grp_list_t8m3,   \
+        .distinct_slots = slots_, .n_distinct = n_ }
+GRP_RECORD_DISTINCT(grp_rec_distinct_xy, grp_distinct_xy, 2);
+GRP_RECORD_DISTINCT(grp_rec_distinct_xk, grp_distinct_xk, 2);
+GRP_RECORD_DISTINCT(grp_rec_distinct_u, grp_distinct_u, 2);
+GRP_RECORD_DISTINCT(grp_rec_distinct_unordered, grp_distinct_unordered, 2);
 /* accepted: one per membership kind */
 GRP_RECORD(grp_rec_count, EG_GROUP_COUNT, 2, 0, NULL, -1, 8, 8, 160, 2, grp_list_t8m3);
 GRP_RECORD(grp_rec_axes, EG_GROUP_AXES, 2, 1, grp_axes_col, -1, 0, 4, 32, 1, grp_list_t4);
@@ -1519,6 +1532,10 @@ GRP_UNIT(unit_grp_twice, "grp_twice", 0x53, grp_launch_flat, grp_rec_twice);
 GRP_UNIT(unit_grp_bad_dtype, "grp_bad_dtype", 0x54, grp_launch_flat, grp_rec_bad_dtype);
 GRP_UNIT(unit_grp_bound, "grp_bound", 0x55, grp_launch_grid, grp_rec_bound);
 GRP_UNIT(unit_grp_boxed, "grp_boxed", 0x56, grp_launch_boxed, grp_rec_count);
+GRP_UNIT_RUN(unit_grp_distinct, "grp_distinct", 0x57, "grp_count_host", grp_launch_flat, grp_rec_distinct_xy);
+GRP_UNIT_RUN(unit_grp_distinct_reads, "grp_distinct_reads", 0x58, "grp_count_host", grp_launch_flat, grp_rec_distinct_xk);
+GRP_UNIT(unit_grp_distinct_uniform, "grp_distinct_uniform", 0x59, grp_launch_flat, grp_rec_distinct_u);
+GRP_UNIT(unit_grp_distinct_unordered, "grp_distinct_unordered", 0x5a, grp_launch_flat, grp_rec_distinct_unordered);
 
 static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &unit_tick, &unit_spans, &unit_prefixsum, &unit_widesum, &unit_mix2, &unit_split, &unit_count1,
                                                     &unit_count3, &unit_count1a, &unit_count3a, &unit_countA, &unit_countAa, &unit_vecs, &unit_count1i,
@@ -1535,7 +1552,8 @@ static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &uni
                                                     &unit_grp_count, &unit_grp_axes, &unit_grp_axes_rt, &unit_grp_key, &unit_grp_key_open, &unit_grp_unknown,
                                                     &unit_grp_count0, &unit_grp_no_axis, &unit_grp_axis_out, &unit_grp_key_range, &unit_grp_key_uniform,
                                                     &unit_grp_key_real, &unit_grp_bytes, &unit_grp_total, &unit_grp_larger, &unit_grp_phases0, &unit_grp_alien,
-                                                    &unit_grp_unbounded, &unit_grp_twice, &unit_grp_bad_dtype, &unit_grp_bound, &unit_grp_boxed };
+                                                    &unit_grp_unbounded, &unit_grp_twice, &unit_grp_bad_dtype, &unit_grp_bound, &unit_grp_boxed, &unit_grp_distinct, &unit_grp_distinct_reads,
+                                                    &unit_grp_distinct_uniform, &unit_grp_distinct_unordered };
 
 static const struct eg_library_meta library = {
     .struct_size = sizeof(struct eg_library_meta),

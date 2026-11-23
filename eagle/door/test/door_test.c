@@ -6196,6 +6196,60 @@ static void check_group_launch(eg_ctx* ctx) {
     }
 }
 
+/* A group unit's record states the planes it assumes distinct memory (its host text reaches them through restrict pointers). A bind that
+   gives two of them, one written, the same or overlapping memory is refused BAD_REQUEST naming the kernel and both parameters; disjoint
+   slices of one array pass and the launch writes right values; two planes that are only read may share memory. */
+static eg_status distinct_bind(eg_ctx* ctx, eg_unit* unit, double* x, int64_t nx, double* y, int64_t ny, int32_t* key) {
+    struct tensor tx, tk, ty;
+    eg_plan* p = NULL;
+    eg_plane* px = wrap(ctx, &tx, x, nx, kDLFloat, 64);
+    eg_plane* pk = wrap(ctx, &tk, key, 16, kDLInt, 32);
+    eg_plane* py = wrap(ctx, &ty, y, ny, kDLFloat, 64);
+    const double u = 0.0;
+    eg_status s = px && pk && py ? plan(ctx, unit, EG_STRUCTURE_HOST_SERIAL, 16, 0, NULL, NULL, &p) : EG_FAULT;
+    if (s == EG_OK) {
+        const int32_t plane_slots[3] = { 0, 1, 2 }, uniform_slots[1] = { 3 };
+        eg_plane* const planes[3] = { px, pk, py };
+        const void* const values[1] = { &u };
+        struct eg_bind_desc d;
+        memset(&d, 0, sizeof(d));
+        d.struct_size = sizeof(d);
+        d.n_planes = 3;
+        d.n_uniforms = 1;
+        d.plane_slots = plane_slots;
+        d.planes = planes;
+        d.uniform_slots = uniform_slots;
+        d.uniform_values = values;
+        s = eg_bind(ctx, p, &d);
+    }
+    eg_plane_free(ctx, px);
+    eg_plane_free(ctx, pk);
+    eg_plane_free(ctx, py);
+    eg_plan_free(ctx, p);    /* the planes' tensors live in this frame: the plan releases them before it returns */
+    return s;
+}
+
+static void check_group_distinct(eg_ctx* ctx) {
+    eg_unit *unit = NULL, *reads = NULL;
+    check(load(ctx, "grp_distinct", 0x57, &unit) == EG_OK && load(ctx, "grp_distinct_reads", 0x58, &reads) == EG_OK,
+          "group distinct: the units that state distinct planes load");
+    if (unit == NULL || reads == NULL) return;
+    double buf[40];
+    int32_t own_key[16] = { 0 };
+    for (int k = 0; k < 40; ++k) buf[k] = 0.0;
+    check(distinct_bind(ctx, unit, buf, 16, buf, 16, own_key) == EG_BAD_REQUEST &&
+              reason_has(ctx, "kernel 'grp_distinct': 'x' and 'y' are the same memory; this kernel needs distinct arrays for them"),
+          "group distinct: one array bound to a read and a written plane is refused BAD_REQUEST naming the kernel and both parameters");
+    check(distinct_bind(ctx, unit, buf, 16, buf + 8, 16, own_key) == EG_BAD_REQUEST && reason_has(ctx, "are the same memory"),
+          "group distinct: two overlapping slices of one array are refused the same way");
+    check(distinct_bind(ctx, unit, buf, 16, buf + 16, 16, own_key) == EG_OK,
+          "group distinct: two adjacent slices of one array that do not overlap pass");
+    check(distinct_bind(ctx, reads, buf, 16, buf + 16, 16, (int32_t*)buf) == EG_OK,
+          "group distinct: two planes that are only read may share one array");
+    eg_unit_free(ctx, unit);
+    eg_unit_free(ctx, reads);
+}
+
 /* Every inconsistent group record is refused at load by name: an unknown membership, a count below 1, AXES naming none or an axis the launch
    does not have or a bound that is not the spanned lanes, KEY naming a slot that is not a rank-0 integer plane of the unit, a scratch whose bytes
    are not elements x width or that is larger than the bound or has no bound or a type a scratch never holds, a scratch declared twice, a total
@@ -6219,6 +6273,8 @@ static void check_group_refusals(eg_ctx* ctx) {
         { "grp_phases0", 0x50, EG_BAD_REQUEST, "phases 0 (>= 1)", "a phase count below 1" },
         { "grp_alien", 0x51, EG_BAD_REQUEST, "key_slot 1, an operand of membership KEY", "an operand of another membership" },
         { "grp_boxed", 0x56, EG_NOT_WRITTEN, "a group on a unit with a thread box is not written", "a group on a unit with a thread box" },
+        { "grp_distinct_uniform", 0x59, EG_BAD_REQUEST, "distinct_slots[1] 3 is not a plane slot", "a distinct slot that is a UNIFORM" },
+        { "grp_distinct_unordered", 0x5a, EG_BAD_REQUEST, "distinct_slots[1] 0 is not a plane slot above the one before it", "distinct slots out of order" },
     };
     for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); ++i) {
         eg_unit* unit = NULL;
@@ -6283,6 +6339,7 @@ int main(int argc, char** argv) {
     check_plane_axes_refusals(ctx);
     check_group_accepted(ctx);
     check_group_launch(ctx);
+    check_group_distinct(ctx);
     check_group_refusals(ctx);
     check_gather_table(ctx);
     check_shared(ctx);

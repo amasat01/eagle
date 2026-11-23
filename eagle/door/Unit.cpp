@@ -993,6 +993,25 @@ void read_group(const eg_unit_meta& m, eg_unit_s& unit)
     f.scratch_bytes = g.scratch_bytes;
     if (g.membership == EG_GROUP_AXES)
         f.axes.assign(g.axes, g.axes + g.n_axes);
+    if (g.n_distinct < 0 || (g.n_distinct > 0 && g.distinct_slots == nullptr))
+        refuse(EG_BAD_REQUEST,
+            bad + "n_distinct " + std::to_string(g.n_distinct)
+                + " without slots");
+    std::int32_t previous = -1;
+    for (std::int32_t i = 0; i < g.n_distinct; ++i) {
+        const std::int32_t slot = g.distinct_slots[i];
+        const bool plane        = slot >= 0
+            && slot < static_cast<std::int32_t>(unit.slots.size())
+            && unit.slots[static_cast<std::size_t>(slot)].role
+                != EG_ROLE_UNIFORM;
+        if (!plane || slot <= previous)
+            refuse(EG_BAD_REQUEST,
+                bad + "distinct_slots[" + std::to_string(i) + "] "
+                    + std::to_string(slot)
+                    + " is not a plane slot above the one before it");
+        previous = slot;
+        f.distinct.push_back(slot);
+    }
 }
 
 /** @brief Check the unit-level members and resolve the host entry. */

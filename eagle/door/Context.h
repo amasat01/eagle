@@ -218,6 +218,8 @@ struct GroupFacts {
         = 0; ///< the bytes of all scratch planes of one group
     std::vector<std::int32_t> axes; ///< AXES: the lane axes that span a group
     std::vector<GroupScratchFacts> scratch;
+    std::vector<std::int32_t>
+        distinct; ///< the slots the unit assumes are distinct memory, ascending
 };
 
 /** @brief A team plane of a split unit (eg_unit_team_plane), copied at eg_unit_load. */

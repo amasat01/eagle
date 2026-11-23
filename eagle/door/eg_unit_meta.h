@@ -476,6 +476,15 @@ struct eg_unit_group {
                             axes, in the order they span the group, else NULL */
     const struct eg_unit_group_scratch* const*
         scratch; /**< ``n_scratch`` planes with distinct names, NULL when 0 */
+    const int32_t* distinct_slots; /**< the slots of the planes the unit's host
+                         text reaches through restrict pointers, so it assumes
+                         them distinct memory: ``n_distinct`` ascending slot
+                         indices of PLANE_IN or written (MUTABLE, PLANE_OUT,
+                         OUT) plane slots, NULL when 0. ``eg_bind`` refuses a
+                         call that binds overlapping memory to two of them when
+                         one is written. Absent (an older record): none */
+    int32_t n_distinct;            /**< the length of ``distinct_slots`` */
+    int32_t reserved1;
 };
 
 /* ---- derived units ------------------------------------------------------- */
