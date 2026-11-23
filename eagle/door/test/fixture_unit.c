@@ -1349,6 +1349,50 @@ static const struct eg_unit_meta unit_scat_badindex = { .struct_size = sizeof(st
     .fault_slot = 5 };
 SCAT_UNIT(unit_scat_badslot, "scat_badslot", 0x75, "scat_host", scat_body, 1, 9);
 
+/* Named plane axes on a slot of each role that admits them (PLANE_OUT, PLANE_IN, WIDE_IN, LOOKUP), with static extents 2, 3, 4, 5; and the
+ * records the loader refuses: axes on a slot of another role, a record that contradicts itself, a slot that states its axes twice. */
+SLOT(slot_axo, EG_ROLE_PLANE_OUT, "axo");
+SLOT(slot_axi, EG_ROLE_PLANE_IN, "axi");
+SLOT(slot_axw, EG_ROLE_WIDE_IN, "axw");
+SLOT(slot_axt, EG_ROLE_LOOKUP, "axt");
+static const struct eg_unit_slot* const ax_slots[] = { &slot_axo, &slot_axi, &slot_axw, &slot_axt };
+static const struct eg_unit_body ax_body = { .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = 4, .slots = ax_slots };
+static const char* const ax_labels[] = { "cols" };
+static const int64_t ax_extents[4][1] = { { 2 }, { 3 }, { 4 }, { 5 } };
+#define AX_RECORD(var, slot_, n_axes_, labels_, extents_)                                                              \
+    static const struct eg_unit_plane_axes var = { .struct_size = sizeof(struct eg_unit_plane_axes), .slot = slot_,    \
+        .n_axes = n_axes_, .labels = labels_, .extents = extents_ }
+AX_RECORD(ax_rec0, 0, 1, ax_labels, ax_extents[0]);
+AX_RECORD(ax_rec1, 1, 1, ax_labels, ax_extents[1]);
+AX_RECORD(ax_rec2, 2, 1, ax_labels, ax_extents[2]);
+AX_RECORD(ax_rec3, 3, 1, ax_labels, ax_extents[3]);
+AX_RECORD(ax_rec_uniform, 2, 1, ax_labels, ax_extents[0]);          /* slot 2 of the plain axpb body is a UNIFORM */
+AX_RECORD(ax_rec_badslot, 9, 1, ax_labels, ax_extents[0]);
+AX_RECORD(ax_rec_noaxis, 0, 0, ax_labels, ax_extents[0]);
+AX_RECORD(ax_rec_nolabels, 0, 1, NULL, ax_extents[0]);
+AX_RECORD(ax_rec_noextents, 0, 1, ax_labels, NULL);
+static const struct eg_unit_plane_axes* const ax_all_list[] = { &ax_rec0, &ax_rec1, &ax_rec2, &ax_rec3 };
+static const struct eg_unit_plane_axes* const ax_uniform_list[] = { &ax_rec_uniform };
+static const struct eg_unit_plane_axes* const ax_badslot_list[] = { &ax_rec_badslot };
+static const struct eg_unit_plane_axes* const ax_noaxis_list[] = { &ax_rec_noaxis };
+static const struct eg_unit_plane_axes* const ax_nolabels_list[] = { &ax_rec_nolabels };
+static const struct eg_unit_plane_axes* const ax_noextents_list[] = { &ax_rec_noextents };
+static const struct eg_unit_plane_axes* const ax_twice_list[] = { &ax_rec0, &ax_rec0 };
+#define AX_UNIT(var, name_, byte, body_, list_, n_)                                                                    \
+    static const struct eg_unit_launch launch_##var = { .struct_size = sizeof(struct eg_unit_launch), .n_lane_axes = 0, \
+        .active_map_slot = -1, .active_count_slot = -1, .index_map_slot = -1, .index_count_slot = -1,                  \
+        .n_plane_axes = n_, .group = 1, .plane_axes = list_ };                                                         \
+    static const struct eg_unit_meta var = { .struct_size = sizeof(struct eg_unit_meta), .name = name_,                \
+        .digest = DIGEST(byte), .pattern = EG_PATTERN_PURE, .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "axpb_host", \
+        .device_image_format = EG_IMAGE_NONE, .body = &body_, .launch = &launch_##var }
+AX_UNIT(unit_ax_all, "ax_all", 0xF3, ax_body, ax_all_list, 4);
+AX_UNIT(unit_ax_uniform, "ax_uniform", 0xF4, body, ax_uniform_list, 1);
+AX_UNIT(unit_ax_badslot, "ax_badslot", 0xF5, ax_body, ax_badslot_list, 1);
+AX_UNIT(unit_ax_noaxis, "ax_noaxis", 0xF6, ax_body, ax_noaxis_list, 1);
+AX_UNIT(unit_ax_nolabels, "ax_nolabels", 0xF7, ax_body, ax_nolabels_list, 1);
+AX_UNIT(unit_ax_noextents, "ax_noextents", 0xF8, ax_body, ax_noextents_list, 1);
+AX_UNIT(unit_ax_twice, "ax_twice", 0xF9, ax_body, ax_twice_list, 2);
+
 static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &unit_tick, &unit_spans, &unit_prefixsum, &unit_widesum, &unit_mix2, &unit_split, &unit_count1,
                                                     &unit_count3, &unit_count1a, &unit_count3a, &unit_countA, &unit_countAa, &unit_vecs, &unit_count1i,
                                                     &unit_count1ia, &unit_count1e, &unit_lanes, &unit_prefix, &unit_count1g, &unit_widemul,
@@ -1358,7 +1402,9 @@ static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &uni
                                                     &unit_sga_cls, &unit_sga_k0, &unit_sga_k1, &unit_sga_rare, &unit_sga_even, &unit_sga_scalar, &unit_sga_heavy,
                                                     &unit_auto_nocls, &unit_auto_nobr, &unit_auto_sweep, &unit_auto_nocost, &unit_auto_group, &unit_auto_steps, &unit_auto_k3,
                                                     &unit_vecw, &unit_vecr, &unit_vecsplit, &unit_actrow, &unit_gathl, &unit_gathls, &unit_scat, &unit_scatp,
-                                                    &unit_scat_badshape, &unit_scat_badrole, &unit_scat_badslot, &unit_scat_badindex };
+                                                    &unit_scat_badshape, &unit_scat_badrole, &unit_scat_badslot, &unit_scat_badindex,
+                                                    &unit_ax_all, &unit_ax_uniform, &unit_ax_badslot, &unit_ax_noaxis, &unit_ax_nolabels,
+                                                    &unit_ax_noextents, &unit_ax_twice };
 
 static const struct eg_library_meta library = {
     .struct_size = sizeof(struct eg_library_meta),

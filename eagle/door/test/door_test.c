@@ -6019,6 +6019,65 @@ static void check_cell_rows(eg_ctx* ctx) {
     eg_unit_free(ctx, unit);
 }
 
+/* ---- named plane axes ------------------------------------------------------------ */
+
+/* A unit that states named axes (static extents 2, 3, 4, 5) on a PLANE_OUT, a PLANE_IN, a WIDE_IN and a LOOKUP slot loads, and eg_bind
+   holds each plane to its slot's stated extent: the exact plane binds, one of another extent is refused naming the stated one. */
+static void check_plane_axes_roles(eg_ctx* ctx) {
+    static const char* const roles[4] = { "PLANE_OUT", "PLANE_IN", "WIDE_IN", "LOOKUP" };
+    static double data[8];
+    eg_unit* unit = NULL;
+    eg_plan* p = NULL;
+    const int loaded = load(ctx, "ax_all", 0xF3, &unit) == EG_OK && plan(ctx, unit, EG_STRUCTURE_HOST_TEAM, 8, 0, NULL, NULL, &p) == EG_OK;
+    check(loaded, "plane axes: a unit stating axes on a PLANE_OUT, a PLANE_IN, a WIDE_IN and a LOOKUP slot loads and plans");
+    for (int slot = 0; loaded && slot < 4; ++slot) {
+        struct tensor tgood, tbad;
+        char want[64];
+        snprintf(want, sizeof(want), "the unit's named axis has %d", slot + 2);
+        eg_plane *good = wrap(ctx, &tgood, data, slot + 2, kDLFloat, 64), *bad = wrap(ctx, &tbad, data, slot + 3, kDLFloat, 64);
+        const int32_t slots[1] = { slot };
+        struct eg_bind_desc bd;
+        memset(&bd, 0, sizeof(bd));
+        bd.struct_size = sizeof(bd);
+        bd.n_planes = 1;
+        bd.plane_slots = slots;
+        eg_plane* planes[1] = { bad };
+        bd.planes = planes;
+        const int refused = bad && eg_bind(ctx, p, &bd) == EG_BAD_REQUEST && reason_has(ctx, want);
+        planes[0] = good;
+        const int accepted = good && eg_bind(ctx, p, &bd) == EG_OK;
+        char name[160];
+        snprintf(name, sizeof(name), "plane axes: a %s slot binds a plane of its stated extent %d and refuses one of %d, naming the stated extent",
+                 roles[slot], slot + 2, slot + 3);
+        check(refused && accepted, name);
+        eg_plane_free(ctx, good);
+        eg_plane_free(ctx, bad);
+    }
+    eg_plan_free(ctx, p);
+    eg_unit_free(ctx, unit);
+}
+
+/* Axes stated on a slot of another role are refused NOT_WRITTEN naming the slot; a record that contradicts itself (a slot the unit does
+   not have, no axis, no labels, no extents) and a slot that states its axes twice are refused BAD_REQUEST by name. */
+static void check_plane_axes_refusals(eg_ctx* ctx) {
+    static const struct { const char* name; uint8_t byte; eg_status status; const char* stem; const char* what; } rows[] = {
+        { "ax_uniform", 0xF4, EG_NOT_WRITTEN, "named plane axes on slot 'a'", "axes on a UNIFORM slot" },
+        { "ax_badslot", 0xF5, EG_BAD_REQUEST, "plane axes of slot 9", "axes of a slot the unit does not have" },
+        { "ax_noaxis", 0xF6, EG_BAD_REQUEST, "plane axes of slot 0", "a record of no axis" },
+        { "ax_nolabels", 0xF7, EG_BAD_REQUEST, "plane axes of slot 0", "a record without labels" },
+        { "ax_noextents", 0xF8, EG_BAD_REQUEST, "plane axes of slot 0", "a record without extents" },
+        { "ax_twice", 0xF9, EG_BAD_REQUEST, "states the axes of slot 'axo' twice", "a slot that states its axes twice" },
+    };
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); ++i) {
+        eg_unit* unit = NULL;
+        char name[160];
+        snprintf(name, sizeof(name), "plane axes: %s is refused at load with %s by name", rows[i].what,
+                 rows[i].status == EG_NOT_WRITTEN ? "NOT_WRITTEN" : "BAD_REQUEST");
+        check(load(ctx, rows[i].name, rows[i].byte, &unit) == rows[i].status && reason_has(ctx, rows[i].stem), name);
+        eg_unit_free(ctx, unit);
+    }
+}
+
 int main(int argc, char** argv) {
     if (argc != 5) {
         fprintf(stderr, "usage: %s <fixture> <wrong size> <no size block> <v1 tag>\n", argv[0]);
@@ -6069,6 +6128,8 @@ int main(int argc, char** argv) {
     check_wide_flat(ctx);
     check_gather(ctx);
     check_gather_columns(ctx);
+    check_plane_axes_roles(ctx);
+    check_plane_axes_refusals(ctx);
     check_gather_table(ctx);
     check_shared(ctx);
     check_box(ctx);
