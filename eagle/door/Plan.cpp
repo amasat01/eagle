@@ -342,30 +342,50 @@ bool gemm_routable(const eg_unit_s& unit, std::size_t n_parts) {
            unit.index_map_slot < 0 && unit.index_count_slot < 0 && unit.active_map_slot < 0;
 }
 
-/** @brief The bytes a plane occupies, as [first, one past the last): compact planes only (the shapes bind checks accept). */
-std::pair<std::uintptr_t, std::uintptr_t> plane_bytes(const DLTensor& t) {
-    const auto first = reinterpret_cast<std::uintptr_t>(static_cast<const char*>(t.data) + t.byte_offset);
-    const std::uintptr_t item = static_cast<std::uintptr_t>(t.dtype.bits) * t.dtype.lanes / 8;
+/** @brief The bytes a plane occupies, as [first, one past the last): compact
+ * planes only (the shapes bind checks accept). */
+std::pair<std::uintptr_t, std::uintptr_t> plane_bytes(const DLTensor& t)
+{
+    const auto first = reinterpret_cast<std::uintptr_t>(
+        static_cast<const char*>(t.data) + t.byte_offset);
+    const std::uintptr_t item
+        = static_cast<std::uintptr_t>(t.dtype.bits) * t.dtype.lanes / 8;
     return { first, first + static_cast<std::uintptr_t>(elements(t)) * item };
 }
 
-/** @brief Refuse a bind that gives two planes of the group's distinct set overlapping memory when one of them is written: the unit's
- *  host text reaches those planes through restrict pointers, which promise they are distinct. Checked when either slot of a pair is
- *  bound by this call, so the pair is checked once whichever is bound last. Two planes that are only read may share memory. */
+/** @brief Refuse a bind that gives two planes of the group's distinct set
+ * overlapping memory when one of them is written: the unit's host text reaches
+ * those planes through restrict pointers, which promise they are distinct.
+ * Checked when either slot of a pair is bound by this call, so the pair is
+ * checked once whichever is bound last. Two planes that are only read may share
+ * memory. */
 void check_distinct(const eg_plan_s& plan, const std::vector<bool>& seen,
-                    const std::function<const eg_plane_s*(int)>& bound_plane) {
+    const std::function<const eg_plane_s*(int)>& bound_plane)
+{
     const std::vector<std::int32_t>& slots = plan.unit->group_record.distinct;
     for (std::size_t i = 0; i < slots.size(); ++i) {
         for (std::size_t j = i + 1; j < slots.size(); ++j) {
-            const SlotFacts &a = plan.unit->slots[static_cast<std::size_t>(slots[i])], &b = plan.unit->slots[static_cast<std::size_t>(slots[j])];
-            const bool writes = a.role != EG_ROLE_PLANE_IN || b.role != EG_ROLE_PLANE_IN;
-            const eg_plane_s *pa = bound_plane(slots[i]), *pb = bound_plane(slots[j]);
-            if (!writes || pa == nullptr || pb == nullptr || (!seen[static_cast<std::size_t>(slots[i])] && !seen[static_cast<std::size_t>(slots[j])]))
+            const SlotFacts &a
+                = plan.unit->slots[static_cast<std::size_t>(slots[i])],
+                &b = plan.unit->slots[static_cast<std::size_t>(slots[j])];
+            const bool writes
+                = a.role != EG_ROLE_PLANE_IN || b.role != EG_ROLE_PLANE_IN;
+            const eg_plane_s *pa = bound_plane(slots[i]),
+                             *pb = bound_plane(slots[j]);
+            if (!writes || pa == nullptr || pb == nullptr
+                || (!seen[static_cast<std::size_t>(slots[i])]
+                    && !seen[static_cast<std::size_t>(slots[j])]))
                 continue;
-            const auto ra = plane_bytes(pa->tensor->dl_tensor), rb = plane_bytes(pb->tensor->dl_tensor);
+            const auto ra = plane_bytes(pa->tensor->dl_tensor),
+                       rb = plane_bytes(pb->tensor->dl_tensor);
             if (ra.first < rb.second && rb.first < ra.second)
-                refuse(EG_BAD_REQUEST, "kernel '" + plan.unit->name + "': '" + a.name + "' and '" + b.name +
-                       "' are the same memory; this kernel needs distinct arrays for them; to update a value in place, declare one parameter that the kernel both reads and writes");
+                refuse(EG_BAD_REQUEST,
+                    "kernel '" + plan.unit->name + "': '" + a.name + "' and '"
+                        + b.name
+                        + "' are the same memory; this kernel needs distinct "
+                          "arrays for them; to update a value in place, "
+                          "declare one parameter that the kernel both reads "
+                          "and writes");
         }
     }
 }
