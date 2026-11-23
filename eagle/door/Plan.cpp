@@ -30,15 +30,40 @@ std::vector<exec::Partition> split_evenly(std::int64_t range, std::int64_t parts
     return out;
 }
 
+/** @brief The groups of a launch over @p n lanes of a unit with a group: the unit's entry runs a range of GROUPS, a group wholly in one
+ *  call. A COUNT group takes @p count consecutive lanes (the last may be partial); an AXES group takes the lanes along the spanned
+ *  lane axes, the other axes tell the groups apart, so the launch must hold a whole number of them. */
+std::int64_t group_count(const eg_unit_s& unit, std::int64_t n) {
+    const GroupFacts& g = unit.group_record;
+    if (g.membership == EG_GROUP_KEY)
+        refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': a unit with a group by key is not launched by this backend yet");
+    if (g.membership == EG_GROUP_COUNT) return (n + g.count - 1) / g.count;
+    std::int64_t fixed = 1;    // the lanes of the static axes: a run-time axis takes the launch's n over them
+    for (std::int64_t e : unit.lane_extents) fixed *= e > 0 ? e : 1;
+    if (n % fixed != 0)
+        refuse(EG_BAD_REQUEST, "unit '" + unit.name + "': n_samples " + std::to_string(n) + " is not a whole number of the " +
+               std::to_string(fixed) + " lanes its static lane axes hold");
+    std::int64_t size = 1;
+    for (std::int32_t axis : g.axes) {
+        const std::int64_t e = unit.lane_extents[static_cast<std::size_t>(axis)];
+        size *= e > 0 ? e : n / fixed;
+    }
+    return size > 0 ? n / size : 0;
+}
+
 /** @brief The partitions of @p d: the whole range, an even split of it, or the caller's, checked to stay inside
- *  the range without overlap. The range is the samples [0, n), or for a thread box the threads
- *  [0, ceil(n / (t * stride)) * stride): each thread owns whole boxes, so no partition splits one. */
+ *  the range without overlap. The range is the samples [0, n), for a thread box the threads
+ *  [0, ceil(n / (t * stride)) * stride): each thread owns whole boxes, so no partition splits one, and for a unit with a group
+ *  the groups [0, group_count). */
 std::vector<exec::Partition> read_partitions(const eg_plan_desc& d) {
     const std::int64_t n = d.n_samples;
     const bool device = d.structure == EG_STRUCTURE_DEVICE;
     const std::int64_t box_t = device ? d.unit->dev_box_t : d.unit->box_t, box_stride = device ? d.unit->dev_box_stride : d.unit->box_stride;
-    const std::int64_t range = box_t > 0 ? (n + box_t * box_stride - 1) / (box_t * box_stride) * box_stride : n;
-    const std::string range_text = box_t > 0 ? "the thread range [0, " + std::to_string(range) + ") of unit '" + d.unit->name + "' (" +
+    const bool grouped = d.unit->group_record.present;
+    const std::int64_t range = grouped ? group_count(*d.unit, n)
+                               : box_t > 0 ? (n + box_t * box_stride - 1) / (box_t * box_stride) * box_stride : n;
+    const std::string range_text = grouped ? "the groups [0, " + std::to_string(range) + ") of unit '" + d.unit->name + "'"
+                                   : box_t > 0 ? "the thread range [0, " + std::to_string(range) + ") of unit '" + d.unit->name + "' (" +
                                                    std::to_string(box_t) + " lanes per thread, stride " + std::to_string(box_stride) + ")"
                                              : "the range [0, " + std::to_string(n) + ")";
     if ((d.flags & EG_PLAN_SPLIT_EVENLY) != 0) {
@@ -457,7 +482,7 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
     if ((d.flags & ~EG_PLAN_SPLIT_EVENLY) != 0)
         refuse(EG_BAD_REQUEST, "eg_plan_desc.flags: unknown bits " + std::to_string(d.flags & ~EG_PLAN_SPLIT_EVENLY));
     check_handle(ctx.units, d.unit, "eg_plan_desc.unit");
-    if (d.unit->group_record.present)
+    if (d.unit->group_record.present && d.structure == EG_STRUCTURE_DEVICE)
         refuse(EG_NOT_WRITTEN,
             "unit '" + d.unit->name
                 + "': a unit with a group is not launched by this backend yet");

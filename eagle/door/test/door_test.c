@@ -6081,25 +6081,117 @@ static void check_plane_axes_refusals(eg_ctx* ctx) {
 /* ---- groups ----------------------------------------------------------------------- */
 
 /* A unit that states a group loads once per membership kind (COUNT with two scratch planes, AXES over a lane axis of static and of run-time
-   extent, KEY with and without a stated bound), and a plan of it is refused NOT_WRITTEN naming the unit: no backend launches a group yet. */
+   extent, KEY with and without a stated bound). A COUNT or AXES unit launches on the host: its entry is called over a range of GROUPS and
+   every lane is written by its own group (see check_group_launch); a KEY unit is refused at the plan, NOT_WRITTEN, naming the unit. */
 static void check_group_accepted(eg_ctx* ctx) {
-    static const struct { const char* name; uint8_t byte; const char* what; } rows[] = {
-        { "grp_count", 0x41, "COUNT of 8 lanes with two scratch planes" },
-        { "grp_axes", 0x42, "AXES over a lane axis of extent 4 with a scratch plane" },
-        { "grp_axes_rt", 0x43, "AXES over a run-time lane axis, no scratch" },
-        { "grp_key", 0x44, "KEY with a stated bound of 16 and a scratch plane" },
-        { "grp_key_open", 0x45, "KEY with no stated bound, no scratch" },
+    static const struct { const char* name; uint8_t byte; const char* what; int keyed; } rows[] = {
+        { "grp_count", 0x41, "COUNT of 8 lanes with two scratch planes", 0 },
+        { "grp_axes", 0x42, "AXES over a lane axis of extent 4 with a scratch plane", 0 },
+        { "grp_axes_rt", 0x43, "AXES over a run-time lane axis, no scratch", 0 },
+        { "grp_key", 0x44, "KEY with a stated bound of 16 and a scratch plane", 1 },
+        { "grp_key_open", 0x45, "KEY with no stated bound, no scratch", 1 },
     };
     for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); ++i) {
         eg_unit* unit = NULL;
         eg_plan* p = NULL;
-        char name[160], stem[64];
+        char name[160], stem[96];
         snprintf(name, sizeof(name), "group: a unit with membership %s loads", rows[i].what);
         const int loaded = load(ctx, rows[i].name, rows[i].byte, &unit) == EG_OK && unit != NULL;
         check(loaded, name);
-        snprintf(name, sizeof(name), "group: a plan of the %s unit is refused NOT_WRITTEN, naming the unit and that no backend launches a group yet", rows[i].name);
-        snprintf(stem, sizeof(stem), "unit '%s': a unit with a group is not launched", rows[i].name);
-        check(loaded && plan(ctx, unit, EG_STRUCTURE_HOST_SERIAL, 8, 0, NULL, NULL, &p) == EG_NOT_WRITTEN && p == NULL && reason_has(ctx, stem), name);
+        if (rows[i].keyed) {
+            snprintf(name, sizeof(name), "group: a launch of the %s unit is refused NOT_WRITTEN, naming the unit and the key", rows[i].name);
+            snprintf(stem, sizeof(stem), "unit '%s': a unit with a group by key is not launched", rows[i].name);
+            check(loaded && plan(ctx, unit, EG_STRUCTURE_HOST_SERIAL, 8, 0, NULL, NULL, &p) == EG_NOT_WRITTEN && p == NULL && reason_has(ctx, stem), name);
+        }
+        eg_unit_free(ctx, unit);
+    }
+}
+
+/* Launch a group unit over n lanes on `structure`, the groups in `n_parts` partitions (0: the whole range), into y (the plane the fixture
+   entries write); returns the launch status. */
+static eg_status group_run(eg_ctx* ctx, eg_unit* unit, eg_structure structure, int64_t n, int64_t n_parts, const int64_t* base,
+                           const int64_t* count, double* x, int32_t* key, double* y) {
+    struct tensor tx, tk, ty;
+    eg_plane* px = wrap(ctx, &tx, x, n, kDLFloat, 64);
+    eg_plane* pk = wrap(ctx, &tk, key, n, kDLInt, 32);
+    eg_plane* py = wrap(ctx, &ty, y, n, kDLFloat, 64);
+    const double u = 0.0;
+    eg_plan* p = NULL;
+    uint64_t tiles = 0;
+    eg_status s = px && pk && py ? plan(ctx, unit, structure, n, n_parts, base, count, &p) : EG_FAULT;
+    if (s == EG_OK) {
+        const int32_t plane_slots[3] = { 0, 1, 2 }, uniform_slots[1] = { 3 };
+        eg_plane* const planes[3] = { px, pk, py };
+        const void* const values[1] = { &u };
+        struct eg_bind_desc d;
+        memset(&d, 0, sizeof(d));
+        d.struct_size = sizeof(d);
+        d.n_planes = 3;
+        d.n_uniforms = 1;
+        d.plane_slots = plane_slots;
+        d.planes = planes;
+        d.uniform_slots = uniform_slots;
+        d.uniform_values = values;
+        s = eg_bind(ctx, p, &d);
+    }
+    if (s == EG_OK) s = eg_launch(ctx, p, &tiles);
+    eg_plane_free(ctx, px);
+    eg_plane_free(ctx, pk);
+    eg_plane_free(ctx, py);
+    eg_plan_free(ctx, p);
+    return s;
+}
+
+/* The accepted group units RUN: the entry is called over groups, the runtime computes the groups from the launch's lanes (a partial last
+   group of a COUNT unit, a leading or a trailing spanned axis) and every lane holds the value of its own group. Oracle: the value each
+   lane must hold, computed here from the lane's position (1000 * its group + its group's lanes); a launch whose lanes the static axes do
+   not divide, and a partition past the groups, are refused BAD_REQUEST by name. */
+static void check_group_launch(eg_ctx* ctx) {
+    static const struct { const char* name; uint8_t byte; int64_t n; int kind; } rows[] = {
+        { "grp_count", 0x41, 24, 0 }, { "grp_count", 0x41, 19, 0 }, { "grp_count", 0x41, 5, 0 },
+        { "grp_axes", 0x42, 24, 1 },  { "grp_axes_rt", 0x43, 24, 2 },
+    };
+    const eg_structure structures[2] = { EG_STRUCTURE_HOST_SERIAL, EG_STRUCTURE_HOST_TEAM };
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); ++i) {
+        eg_unit* unit = NULL;
+        const int64_t n = rows[i].n;
+        const int loaded = load(ctx, rows[i].name, rows[i].byte, &unit) == EG_OK;
+        for (int s = 0; loaded && s < 2; ++s) {
+            double x[32] = { 0 }, y[32];
+            int32_t key[32] = { 0 };
+            int ok = 1;
+            for (int64_t l = 0; l < n; ++l) y[l] = -1.0;
+            ok = group_run(ctx, unit, structures[s], n, 0, NULL, NULL, x, key, y) == EG_OK;
+            for (int64_t l = 0; ok && l < n; ++l) {
+                const double want = rows[i].kind == 0 ? 1000.0 * (double)(l / 8) + (double)(n - l / 8 * 8 < 8 ? n - l / 8 * 8 : 8)
+                                    : rows[i].kind == 1 ? 1000.0 * (double)(l / 4) + 4.0
+                                                        : 1000.0 * (double)(l % 4) + (double)(n / 4);
+                ok = y[l] == want;
+            }
+            char what[160];
+            snprintf(what, sizeof(what), "group: %s over %lld lanes on structure %d writes every lane from its own group", rows[i].name,
+                     (long long)n, s);
+            check(ok, what);
+        }
+        if (loaded && rows[i].kind == 0 && n == 24) {
+            /* the groups in two partitions: the range the partitions share is the 3 groups, not the 24 lanes */
+            double x[32] = { 0 }, y[32];
+            int32_t key[32] = { 0 };
+            const int64_t base[2] = { 0, 1 }, count[2] = { 1, 2 }, past[1] = { 3 }, one[1] = { 1 };
+            for (int l = 0; l < 32; ++l) y[l] = -1.0;
+            int ok = group_run(ctx, unit, EG_STRUCTURE_HOST_TEAM, n, 2, base, count, x, key, y) == EG_OK;
+            for (int64_t l = 0; ok && l < n; ++l) ok = y[l] == 1000.0 * (double)(l / 8) + 8.0;
+            check(ok, "group: two partitions of the groups of grp_count together write every lane");
+            check(group_run(ctx, unit, EG_STRUCTURE_HOST_TEAM, n, 1, past, one, x, key, y) == EG_BAD_REQUEST && reason_has(ctx, "the groups [0, 3)"),
+                  "group: a partition past the groups is refused BAD_REQUEST, naming the range of groups");
+        }
+        if (loaded && rows[i].kind == 1) {
+            double x[32] = { 0 }, y[32] = { 0 };
+            int32_t key[32] = { 0 };
+            check(group_run(ctx, unit, EG_STRUCTURE_HOST_SERIAL, 18, 0, NULL, NULL, x, key, y) == EG_BAD_REQUEST &&
+                      reason_has(ctx, "is not a whole number of the 4 lanes its static lane axes hold"),
+                  "group: a launch of lanes the static lane axes do not divide is refused BAD_REQUEST by name");
+        }
         eg_unit_free(ctx, unit);
     }
 }
@@ -6190,6 +6282,7 @@ int main(int argc, char** argv) {
     check_plane_axes_roles(ctx);
     check_plane_axes_refusals(ctx);
     check_group_accepted(ctx);
+    check_group_launch(ctx);
     check_group_refusals(ctx);
     check_gather_table(ctx);
     check_shared(ctx);

@@ -122,6 +122,9 @@ EG_FIXTURE_EXPORT void lanes_host(void* const* params, int64_t base, int64_t cou
 EG_FIXTURE_EXPORT void prefix_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void vecs_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void count1g_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void grp_count_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void grp_cols_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void grp_rows_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void widemul_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void gath_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void boxed_host(void* const* params, int64_t base, int64_t count, int64_t n);
@@ -155,6 +158,35 @@ void axpb_host(void* const* params, int64_t base, int64_t count, int64_t n) {
     const double b = *(const double*)params[3];
     (void)n;
     for (int64_t i = base; i < base + count; ++i) y[i] = a * x[i] + AXPB_B_FACTOR * b;
+}
+
+/* The entries of the group units: the call's range is a range of groups, and lane l of group g gets 1000 * g + the number of lanes of
+ * its group, so a test reads from the plane which group ran each lane and what size it was given. The slots are x, key, y, u. */
+static double* grp_out(void* const* params) { return (double*)((const struct fixture_handle*)params[2])->data; }
+
+/* Groups of 8 consecutive lanes; the last may be partial. */
+void grp_count_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    double* y = grp_out(params);
+    for (int64_t g = base; g < base + count; ++g) {
+        const int64_t first = g * 8, size = n - first < 8 ? n - first : 8;
+        for (int64_t r = 0; r < size; ++r) y[first + r] = 1000.0 * (double)g + (double)size;
+    }
+}
+
+/* One group per row of a grid of 4 columns: the lanes along the trailing axis, which are consecutive. */
+void grp_cols_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    double* y = grp_out(params);
+    (void)n;
+    for (int64_t g = base; g < base + count; ++g)
+        for (int64_t r = 0; r < 4; ++r) y[g * 4 + r] = 1000.0 * (double)g + 4.0;
+}
+
+/* One group per column of a grid of 4 columns: the lanes along the leading axis, 4 apart. */
+void grp_rows_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    double* y = grp_out(params);
+    const int64_t rows = n / 4;
+    for (int64_t g = base; g < base + count; ++g)
+        for (int64_t r = 0; r < rows; ++r) y[g + r * 4] = 1000.0 * (double)g + (double)rows;
 }
 
 /* The width of the "cross" vector the "vecsplit" stages pass. */
@@ -1460,13 +1492,14 @@ GRP_RECORD(grp_rec_unbounded, EG_GROUP_KEY, 1, 0, NULL, 1, 0, -1, 64, 1, grp_lis
 GRP_RECORD(grp_rec_twice, EG_GROUP_COUNT, 1, 0, NULL, -1, 8, 8, 128, 2, grp_list_twice);
 GRP_RECORD(grp_rec_bad_dtype, EG_GROUP_COUNT, 1, 0, NULL, -1, 8, 8, 32, 1, grp_list_u8);
 GRP_RECORD(grp_rec_bound, EG_GROUP_AXES, 1, 1, grp_axes_col, -1, 0, 5, 0, 0, NULL);
-#define GRP_UNIT(var, name_, byte, launch_, group_)                                                                                               \
+#define GRP_UNIT_RUN(var, name_, byte, entry_, launch_, group_)                                                                                   \
     static const struct eg_unit_meta var = { .struct_size = sizeof(struct eg_unit_meta), .name = name_, .digest = DIGEST(byte),                  \
-        .pattern = EG_PATTERN_PURE, .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "axpb_host", .device_image_format = EG_IMAGE_NONE,           \
+        .pattern = EG_PATTERN_PURE, .scalar_type = EG_SCALAR_FLOAT64, .host_entry = entry_, .device_image_format = EG_IMAGE_NONE,                \
         .body = &grp_body, .launch = &launch_, .group = &group_ }
-GRP_UNIT(unit_grp_count, "grp_count", 0x41, grp_launch_flat, grp_rec_count);
-GRP_UNIT(unit_grp_axes, "grp_axes", 0x42, grp_launch_grid, grp_rec_axes);
-GRP_UNIT(unit_grp_axes_rt, "grp_axes_rt", 0x43, grp_launch_grid, grp_rec_axes_rt);
+#define GRP_UNIT(var, name_, byte, launch_, group_) GRP_UNIT_RUN(var, name_, byte, "axpb_host", launch_, group_)
+GRP_UNIT_RUN(unit_grp_count, "grp_count", 0x41, "grp_count_host", grp_launch_flat, grp_rec_count);
+GRP_UNIT_RUN(unit_grp_axes, "grp_axes", 0x42, "grp_cols_host", grp_launch_grid, grp_rec_axes);
+GRP_UNIT_RUN(unit_grp_axes_rt, "grp_axes_rt", 0x43, "grp_rows_host", grp_launch_grid, grp_rec_axes_rt);
 GRP_UNIT(unit_grp_key, "grp_key", 0x44, grp_launch_flat, grp_rec_key);
 GRP_UNIT(unit_grp_key_open, "grp_key_open", 0x45, grp_launch_flat, grp_rec_key_open);
 GRP_UNIT(unit_grp_unknown, "grp_unknown", 0x46, grp_launch_flat, grp_rec_unknown);

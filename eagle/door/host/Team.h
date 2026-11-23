@@ -25,6 +25,13 @@ inline int team_threads(const eg_ctx& ctx) {
     return env > 0 ? env : exec::detail::host_default_threads();
 }
 
+/** @brief The bytes of working set one group of @p unit has, which sizes the tiles a team splits the groups into: the scratch of the
+ *  group and the planes its lanes touch (a scalar each). */
+inline std::size_t group_bytes(const eg_unit_s& unit) {
+    const GroupFacts& g = unit.group_record;
+    return static_cast<std::size_t>(g.scratch_bytes + std::max<std::int64_t>(g.max_size, 1) * 8);
+}
+
 /** @brief Run @p plan once over the samples [@p base, @p end) of its set (an active set's live slots, or positions of an index set). */
 inline void run_prefix(const eg_plan_s& plan, int threads, std::int64_t end, std::int64_t base = 0) {
     const exec::Partition part{ base, end - base, plan.n_samples };
@@ -195,7 +202,8 @@ inline std::uint64_t run_plan(const eg_plan_s& plan, int threads) {
             exec::HostTeam::run_serial(plan.unit->host_entry, plan.params.data(), part);
             tiles += part.count > 0 ? 1 : 0;
         } else {
-            tiles += exec::HostTeam::run_team(plan.unit->host_entry, plan.params.data(), part, threads);
+            tiles += exec::HostTeam::run_team(plan.unit->host_entry, plan.params.data(), part, threads,
+                                              plan.unit->group_record.present ? group_bytes(*plan.unit) : 0);
         }
     }
     std::int64_t lo = plan.n_samples, hi = 0;    // the span of the partitions: the rows a launch wrote lie in it
