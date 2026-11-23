@@ -766,6 +766,235 @@ void read_gemm(const eg_unit_meta& m, eg_unit_s& unit) {
     f.present = true;
 }
 
+/** @brief The bytes of one scalar of a group's scratch plane of wire type @p
+ * dtype in a unit of @p scalar_type; 0 for a type a scratch plane never holds.
+ */
+std::int64_t scratch_width(std::int32_t dtype, std::int32_t scalar_type)
+{
+    switch (dtype) {
+    case EG_DTYPE_REAL:
+        return scalar_type == EG_SCALAR_FLOAT32 ? 4 : 8;
+    case EG_DTYPE_INT64:
+        return 8;
+    case EG_DTYPE_INT32:
+        return 4;
+    case EG_DTYPE_BOOL:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/** @brief The product of @p extents, 1 for none; refuses a product that does
+ * not fit 64 bits. */
+std::int64_t extent_product(
+    const std::vector<std::int64_t>& extents, const std::string& what)
+{
+    std::int64_t product = 1;
+    for (std::int64_t e : extents)
+        if (__builtin_mul_overflow(product, e, &product))
+            refuse(EG_BAD_REQUEST,
+                "meta that contradicts itself: " + what
+                    + " has extents whose product does not fit 64 bits");
+    return product;
+}
+
+/** @brief Check the membership of the group record @p g against the unit's
+ * launch and slots, and return the size bound of a group (-1: not stated). */
+std::int64_t check_membership(
+    const eg_unit_group& g, const eg_unit_s& unit, const std::string& who)
+{
+    const std::string bad = "meta that contradicts itself: " + who + " ";
+    if (g.membership != EG_GROUP_COUNT && g.count != 0)
+        refuse(EG_BAD_REQUEST,
+            bad + "states count " + std::to_string(g.count)
+                + ", an operand of membership COUNT");
+    if (g.membership != EG_GROUP_AXES && g.n_axes != 0)
+        refuse(
+            EG_BAD_REQUEST, bad + "states axes, an operand of membership AXES");
+    if (g.membership != EG_GROUP_KEY && g.key_slot != -1)
+        refuse(EG_BAD_REQUEST,
+            bad + "states key_slot " + std::to_string(g.key_slot)
+                + ", an operand of membership KEY");
+    if (g.membership == EG_GROUP_COUNT) {
+        if (g.count < 1)
+            refuse(EG_BAD_REQUEST,
+                bad + "membership COUNT takes count >= 1, got "
+                    + std::to_string(g.count));
+        if (g.max_size != g.count)
+            refuse(EG_BAD_REQUEST,
+                bad + "max_size " + std::to_string(g.max_size)
+                    + " is not the count " + std::to_string(g.count)
+                    + " of membership COUNT");
+        return g.count;
+    }
+    if (g.membership == EG_GROUP_AXES) {
+        const std::int32_t n_lane_axes
+            = static_cast<std::int32_t>(unit.lane_extents.size());
+        if (g.n_axes < 1 || g.axes == nullptr)
+            refuse(EG_BAD_REQUEST,
+                bad + "membership AXES names no lane axis (n_axes "
+                    + std::to_string(g.n_axes) + ")");
+        std::vector<std::int64_t> spanned;
+        bool runtime = false;
+        for (std::int32_t i = 0; i < g.n_axes; ++i) {
+            const std::int32_t axis = g.axes[i];
+            if (axis < 0 || axis >= n_lane_axes)
+                refuse(EG_BAD_REQUEST,
+                    bad + "membership AXES names the lane axis "
+                        + std::to_string(axis)
+                        + ", which the launch does not have (it has "
+                        + std::to_string(n_lane_axes) + ")");
+            for (std::int32_t j = 0; j < i; ++j)
+                if (g.axes[j] == axis)
+                    refuse(EG_BAD_REQUEST,
+                        bad + "membership AXES names the lane axis "
+                            + std::to_string(axis) + " twice");
+            const std::int64_t extent
+                = unit.lane_extents[static_cast<std::size_t>(axis)];
+            if (extent < 0)
+                runtime = true;
+            else
+                spanned.push_back(extent);
+        }
+        const std::int64_t bound = runtime ? -1 : extent_product(spanned, who);
+        if (g.max_size != bound)
+            refuse(EG_BAD_REQUEST,
+                bad + "max_size " + std::to_string(g.max_size) + " is not the "
+                    + std::to_string(bound) + " lanes the spanned axes give");
+        return bound;
+    }
+    const std::int32_t n_slots = static_cast<std::int32_t>(unit.slots.size());
+    if (g.key_slot < 0 || g.key_slot >= n_slots)
+        refuse(EG_BAD_REQUEST,
+            bad + "membership KEY names key_slot " + std::to_string(g.key_slot)
+                + ", outside the " + std::to_string(n_slots)
+                + " slots of the unit");
+    const SlotFacts& key = unit.slots[static_cast<std::size_t>(g.key_slot)];
+    if (key.role != EG_ROLE_PLANE_IN || key.rank != 0
+        || (key.dtype != EG_DTYPE_INT32 && key.dtype != EG_DTYPE_INT64))
+        refuse(EG_BAD_REQUEST,
+            bad + "membership KEY names key_slot " + std::to_string(g.key_slot)
+                + " ('" + key.name
+                + "'), which is not a rank-0 integer PLANE_IN slot");
+    if (g.max_size < 1 && g.max_size != -1)
+        refuse(EG_BAD_REQUEST,
+            bad + "max_size " + std::to_string(g.max_size)
+                + " (>= 1, or -1: not stated)");
+    return g.max_size;
+}
+
+/** @brief Copy the group record (eg_unit_group) and check it against the unit's
+ * launch and slots; eg_plan_new refuses a unit that has one. */
+void read_group(const eg_unit_meta& m, eg_unit_s& unit)
+{
+    if (m.group == nullptr)
+        return;
+    const std::string who = "unit '" + unit.name + "' group";
+    const std::string bad = "meta that contradicts itself: " + who + " ";
+    eg_unit_group absent{ };
+    absent.key_slot       = -1;
+    absent.max_size       = -1;
+    const eg_unit_group g = read_record(m.group, absent, who);
+    const char* held      = !unit.stages.empty() ? "stages"
+        : unit.derived.present                   ? "a derived role"
+        : unit.gemm.present                      ? "a gemm record"
+        : unit.finish.present                    ? "a finish record"
+        : !unit.dispatches.empty()               ? "dispatch groups"
+        : (unit.active_map_slot >= 0 || unit.index_count_slot >= 0)
+        ? "an active or index set"
+        : (unit.box_t > 0 || unit.dev_box_t > 0) ? "a thread box"
+                                                 : nullptr;
+    if (held != nullptr)
+        refuse(EG_NOT_WRITTEN,
+            "unit '" + unit.name + "': a group on a unit with " + held
+                + " is not written");
+    if (g.membership < EG_GROUP_COUNT || g.membership > EG_GROUP_KEY)
+        refuse(EG_NOT_WRITTEN,
+            who + ": unknown membership " + std::to_string(g.membership)
+                + " of unit '" + unit.name + "'");
+    if (g.phases < 1)
+        refuse(EG_BAD_REQUEST,
+            bad + "phases " + std::to_string(g.phases) + " (>= 1)");
+    const std::int64_t bound = check_membership(g, unit, who);
+    if (g.n_scratch < 0 || (g.n_scratch > 0 && g.scratch == nullptr))
+        refuse(EG_BAD_REQUEST,
+            bad + "n_scratch " + std::to_string(g.n_scratch)
+                + " without scratch");
+    GroupFacts& f      = unit.group_record;
+    std::int64_t total = 0;
+    for (std::int32_t i = 0; i < g.n_scratch; ++i) {
+        const std::string at = who + " scratch[" + std::to_string(i) + "]";
+        const eg_unit_group_scratch s
+            = read_record(g.scratch[i], eg_unit_group_scratch{ }, at);
+        if (s.name == nullptr || *s.name == '\0')
+            refuse(EG_BAD_REQUEST,
+                "meta that contradicts itself: " + at + " has no name");
+        const std::string named
+            = "meta that contradicts itself: " + at + " ('" + s.name + "') ";
+        for (const GroupScratchFacts& before : f.scratch)
+            if (before.name == s.name)
+                refuse(EG_BAD_REQUEST, named + "is declared twice");
+        if (s.dtype < EG_DTYPE_REAL || s.dtype > EG_DTYPE_BAND_PARTIAL)
+            refuse(EG_NOT_WRITTEN,
+                at + ": unknown dtype " + std::to_string(s.dtype));
+        const std::int64_t width = scratch_width(s.dtype, unit.scalar_type);
+        if (width == 0)
+            refuse(EG_NOT_WRITTEN,
+                at + " ('" + s.name + "'): a scratch plane of wire dtype "
+                    + std::to_string(s.dtype) + " is not written");
+        if (s.rank < 0 || (s.rank > 0 && s.shape == nullptr))
+            refuse(EG_BAD_REQUEST,
+                named + "rank " + std::to_string(s.rank) + " without shape");
+        std::vector<std::int64_t> shape(s.shape, s.shape + s.rank);
+        for (std::int64_t e : shape)
+            if (e < 1)
+                refuse(EG_BAD_REQUEST,
+                    named + "has the extent " + std::to_string(e)
+                        + " (each is 1 or more)");
+        const std::int64_t value = extent_product(shape, at);
+        if (s.elements < 1 || s.elements % value != 0)
+            refuse(EG_BAD_REQUEST,
+                named + "elements " + std::to_string(s.elements)
+                    + " is not a whole number (>= 1) of values of "
+                    + std::to_string(value) + " scalars");
+        if (bound < 1)
+            refuse(EG_BAD_REQUEST,
+                named
+                    + "needs a size bound of the group, and the record states "
+                      "none");
+        if (s.elements / value > bound)
+            refuse(EG_BAD_REQUEST,
+                named + "holds " + std::to_string(s.elements / value)
+                    + " values but a group holds at most "
+                    + std::to_string(bound) + " lanes");
+        std::int64_t bytes = 0;
+        if (__builtin_mul_overflow(s.elements, width, &bytes)
+            || s.bytes != bytes)
+            refuse(EG_BAD_REQUEST,
+                named + "bytes " + std::to_string(s.bytes) + " is not its "
+                    + std::to_string(s.elements) + " elements of "
+                    + std::to_string(width) + " bytes");
+        if (__builtin_add_overflow(total, s.bytes, &total))
+            refuse(EG_BAD_REQUEST, bad + "scratch bytes do not fit 64 bits");
+        f.scratch.push_back({ s.name, s.dtype, s.elements, s.bytes });
+    }
+    if (g.scratch_bytes != total)
+        refuse(EG_BAD_REQUEST,
+            bad + "scratch_bytes " + std::to_string(g.scratch_bytes)
+                + " is not the " + std::to_string(total)
+                + " bytes of its scratch planes");
+    f.present       = true;
+    f.membership    = g.membership;
+    f.phases        = g.phases;
+    f.key_slot      = g.key_slot;
+    f.count         = g.count;
+    f.max_size      = g.max_size;
+    f.scratch_bytes = g.scratch_bytes;
+    if (g.membership == EG_GROUP_AXES)
+        f.axes.assign(g.axes, g.axes + g.n_axes);
+}
+
 /** @brief Check the unit-level members and resolve the host entry. */
 void read_unit(const eg_unit_meta& m, void* library, eg_unit_s& unit) {
     if ((m.flags & ~(EG_UNIT_CALLER_CARDS | EG_UNIT_CHECKED)) != 0)
@@ -820,6 +1049,7 @@ void read_unit(const eg_unit_meta& m, void* library, eg_unit_s& unit) {
         refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': a split unit with cell rows of its own or a derived role is not written");
     read_derived(m, unit);
     read_gemm(m, unit);
+    read_group(m, unit);
     if (unit.ctx->dev.ordinal >= 0 && m.device_image != nullptr) device_unit_load(unit, m, library);
 }
 

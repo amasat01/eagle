@@ -3,8 +3,8 @@
 /**
  * @file eg_unit_meta.h
  * @brief The typed unit meta below ``eg_unit_meta`` of eg_door.h
- *        (``eagle-door/1``, EG_META_SCHEMA_MAJOR 1): the body, launch, finish
- *        and team records and every record and closed set they need.
+ *        (``eagle-door/1``, EG_META_SCHEMA_MAJOR 1): the body, launch, finish,
+ *        team and group records and every record and closed set they need.
  *
  * RULES (every struct below follows them, on top of eg_door.h's meta rules).
  *  - Constant data only. Every record is ``const``, reached by a pointer or a
@@ -122,6 +122,12 @@ typedef int32_t eg_plane_unit;
 #define EG_UNIT_KEY 1    /**< one per key of ``keyed`` */
 #define EG_UNIT_TARGET 2 /**< chunks * cells of ``target_slot`` (an ordered scatter's partial sums) */
 #define EG_UNIT_ONCE 3   /**< one slice for the whole launch */
+
+/** ``eg_unit_group.membership``: which lanes make up one group. */
+typedef int32_t eg_group_membership;
+#define EG_GROUP_COUNT 0 /**< ``count`` consecutive lanes */
+#define EG_GROUP_AXES 1  /**< the lanes along the lane axes ``axes`` names */
+#define EG_GROUP_KEY 2   /**< the lanes of equal ``key_slot`` value */
 
 /** The SHAPE of a plane eagle makes. */
 typedef int32_t eg_plane_layout;
@@ -417,6 +423,59 @@ struct eg_unit_team {
     int32_t of_slot;          /**< CHUNKS, TARGETS: the slot the scatter adds into, else -1 */
     int32_t status_plane;     /**< CHUNKS: index in team_planes of the out-of-range flags eagle checks after a run, else -1 */
     int32_t of_stage;         /**< CHUNKS, TARGETS: index in the kernel's stages of the unit whose body holds ``of_slot``; -1: the source unit */
+};
+
+/** A scratch plane of a group: memory local to one group, which only the lanes
+ * of that group read and write and the caller never sees. A group of
+ * ``max_size`` lanes holds ``max_size`` values of ``shape`` in each scratch
+ * plane. */
+struct eg_unit_group_scratch {
+    uint32_t struct_size;
+    eg_wire_dtype dtype; /**< REAL, INT64, INT32 or BOOL: the type of one scalar
+                            of a value (a unit's scratch is never a BAND_PARTIAL
+                            or UINT32 plane) */
+    int32_t rank;        /**< the length of ``shape``: 0 for a scalar value */
+    int32_t reserved0;
+    const int64_t* shape; /**< ``rank`` extents of one value, each >= 1, NULL
+                             when rank is 0 */
+    int64_t elements; /**< scalars per group: the group's size bound times the
+                         product of ``shape``, >= 1 */
+    int64_t bytes;    /**< bytes per group: ``elements`` times the width of
+                         ``dtype`` (REAL is the unit's ``scalar_type``: 4 bytes for
+                         FLOAT32, else 8; INT64 8; INT32 4; BOOL 1) */
+    const char* name; /**< the declared name; reasons quote it */
+};
+
+/** The group of a unit (``eg_unit_meta.group``, NULL: the unit has none): a
+ * group is a set of lanes that run their body in phases, a phase being the code
+ * between two barriers, and that read and write the scratch planes of their
+ * group. The record says WHAT a group is and what one costs; how many threads
+ * serve it and where its scratch lives are the backend's choice at launch and
+ * are not stated. The lane axes ``axes`` indexes are the unit's launch lane
+ * axes (``eg_unit_launch.lane_labels`` and ``lane_extents``). A unit that
+ * states a group is a plain unit: it states no stages, derived role, gemm,
+ * finish, dispatch group, active or index set or thread box. */
+struct eg_unit_group {
+    uint32_t struct_size;
+    eg_group_membership membership;
+    int32_t phases; /**< the phases of the body, >= 1 */
+    int32_t n_axes; /**< AXES: the lane axes that span a group, >= 1, else 0 */
+    int32_t key_slot; /**< KEY: the slot of the per-lane key (a rank-0 INT32 or
+                         INT64 PLANE_IN slot of this unit), else -1 */
+    int32_t n_scratch;
+    int64_t count; /**< COUNT: the lanes of a group, >= 1, else 0 */
+    int64_t
+        max_size; /**< the size bound of a group in lanes: ``count`` for COUNT;
+                     for AXES the product of the extents of the spanned axes, -1
+                     when one is a run-time extent; for KEY the stated bound,
+                     -1: not stated. A scratch plane needs a bound */
+    int64_t
+        scratch_bytes;   /**< the bytes of all scratch planes of one group: the
+                            sum of the planes' ``bytes``, 0 without scratch */
+    const int32_t* axes; /**< AXES: ``n_axes`` distinct indices into the lane
+                            axes, in the order they span the group, else NULL */
+    const struct eg_unit_group_scratch* const*
+        scratch; /**< ``n_scratch`` planes with distinct names, NULL when 0 */
 };
 
 /* ---- derived units ------------------------------------------------------- */

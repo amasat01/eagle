@@ -1393,6 +1393,100 @@ AX_UNIT(unit_ax_nolabels, "ax_nolabels", 0xF7, ax_body, ax_nolabels_list, 1);
 AX_UNIT(unit_ax_noextents, "ax_noextents", 0xF8, ax_body, ax_noextents_list, 1);
 AX_UNIT(unit_ax_twice, "ax_twice", 0xF9, ax_body, ax_twice_list, 2);
 
+/* The group record (eg_unit_group): one accepted unit per membership kind, and the records the loader refuses. Slots of every group unit:
+ * 0 x (REAL PLANE_IN), 1 key (INT32 PLANE_IN), 2 y (PLANE_OUT), 3 u (UNIFORM). A group unit is loaded but never planned: eg_plan_new refuses it. */
+SLOT(slot_grp_x, EG_ROLE_PLANE_IN, "x");
+SLOT_OF(slot_grp_key, EG_ROLE_PLANE_IN, EG_DTYPE_INT32, "key");
+SLOT(slot_grp_y, EG_ROLE_PLANE_OUT, "y");
+SLOT(slot_grp_u, EG_ROLE_UNIFORM, "u");
+static const struct eg_unit_slot* const grp_slots[] = { &slot_grp_x, &slot_grp_key, &slot_grp_y, &slot_grp_u };
+static const struct eg_unit_body grp_body = { .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = 4, .slots = grp_slots };
+static const char* const grp_lane_labels[] = { "row", "col" };
+static const int64_t grp_lane_extents[] = { -1, 4 };
+static const struct eg_unit_launch grp_launch_flat = { .struct_size = sizeof(struct eg_unit_launch), .n_lane_axes = 0, .active_map_slot = -1,
+    .active_count_slot = -1, .index_map_slot = -1, .index_count_slot = -1, .group = 1 };
+static const struct eg_unit_launch grp_launch_grid = { .struct_size = sizeof(struct eg_unit_launch), .n_lane_axes = 2, .active_map_slot = -1,
+    .active_count_slot = -1, .index_map_slot = -1, .index_count_slot = -1, .group = 1, .lane_labels = grp_lane_labels, .lane_extents = grp_lane_extents };
+static const struct eg_unit_box grp_box = { .struct_size = sizeof(struct eg_unit_box), .axis = 0, .t = 2, .stride = 1 };
+static const struct eg_unit_launch grp_launch_boxed = { .struct_size = sizeof(struct eg_unit_launch), .n_lane_axes = 0, .active_map_slot = -1,
+    .active_count_slot = -1, .index_map_slot = -1, .index_count_slot = -1, .group = 1, .host_box = &grp_box };
+
+static const int64_t grp_shape3[] = { 3 };
+#define GRP_SCRATCH(var, dtype_, rank_, shape_, elements_, bytes_, name_)                                                                         \
+    static const struct eg_unit_group_scratch var = { .struct_size = sizeof(struct eg_unit_group_scratch), .dtype = dtype_, .rank = rank_,    \
+        .shape = shape_, .elements = elements_, .bytes = bytes_, .name = name_ }
+GRP_SCRATCH(grp_t8, EG_DTYPE_REAL, 0, NULL, 8, 64, "t");              /* 8 doubles */
+GRP_SCRATCH(grp_t8_short, EG_DTYPE_REAL, 0, NULL, 8, 63, "t");        /* bytes that are not elements x width */
+GRP_SCRATCH(grp_t9, EG_DTYPE_REAL, 0, NULL, 9, 72, "t");              /* more values than a group of 8 holds */
+GRP_SCRATCH(grp_m3, EG_DTYPE_INT32, 1, grp_shape3, 24, 96, "m");      /* 8 values of 3 int32 */
+GRP_SCRATCH(grp_t4, EG_DTYPE_REAL, 0, NULL, 4, 32, "t");
+GRP_SCRATCH(grp_t16, EG_DTYPE_REAL, 0, NULL, 16, 128, "t");
+GRP_SCRATCH(grp_u8, EG_DTYPE_UINT32, 0, NULL, 8, 32, "t");            /* a type a scratch plane never holds */
+static const struct eg_unit_group_scratch* const grp_list_t8[] = { &grp_t8 };
+static const struct eg_unit_group_scratch* const grp_list_t8_short[] = { &grp_t8_short };
+static const struct eg_unit_group_scratch* const grp_list_t9[] = { &grp_t9 };
+static const struct eg_unit_group_scratch* const grp_list_t8m3[] = { &grp_t8, &grp_m3 };
+static const struct eg_unit_group_scratch* const grp_list_twice[] = { &grp_t8, &grp_t8 };
+static const struct eg_unit_group_scratch* const grp_list_t4[] = { &grp_t4 };
+static const struct eg_unit_group_scratch* const grp_list_t16[] = { &grp_t16 };
+static const struct eg_unit_group_scratch* const grp_list_u8[] = { &grp_u8 };
+static const int32_t grp_axes_col[] = { 1 };
+static const int32_t grp_axes_row[] = { 0 };
+static const int32_t grp_axes_out[] = { 2 };
+#define GRP_RECORD(var, membership_, phases_, n_axes_, axes_, key_, count_, max_, bytes_, n_scratch_, scratch_)                                   \
+    static const struct eg_unit_group var = { .struct_size = sizeof(struct eg_unit_group), .membership = membership_, .phases = phases_,       \
+        .n_axes = n_axes_, .key_slot = key_, .n_scratch = n_scratch_, .count = count_, .max_size = max_, .scratch_bytes = bytes_,              \
+        .axes = axes_, .scratch = scratch_ }
+/* accepted: one per membership kind */
+GRP_RECORD(grp_rec_count, EG_GROUP_COUNT, 2, 0, NULL, -1, 8, 8, 160, 2, grp_list_t8m3);
+GRP_RECORD(grp_rec_axes, EG_GROUP_AXES, 2, 1, grp_axes_col, -1, 0, 4, 32, 1, grp_list_t4);
+GRP_RECORD(grp_rec_axes_rt, EG_GROUP_AXES, 1, 1, grp_axes_row, -1, 0, -1, 0, 0, NULL);
+GRP_RECORD(grp_rec_key, EG_GROUP_KEY, 2, 0, NULL, 1, 0, 16, 128, 1, grp_list_t16);
+GRP_RECORD(grp_rec_key_open, EG_GROUP_KEY, 1, 0, NULL, 1, 0, -1, 0, 0, NULL);
+/* refused */
+GRP_RECORD(grp_rec_unknown, 7, 1, 0, NULL, -1, 0, -1, 0, 0, NULL);
+GRP_RECORD(grp_rec_count0, EG_GROUP_COUNT, 1, 0, NULL, -1, 0, 0, 0, 0, NULL);
+GRP_RECORD(grp_rec_no_axis, EG_GROUP_AXES, 1, 0, NULL, -1, 0, 4, 0, 0, NULL);
+GRP_RECORD(grp_rec_axis_out, EG_GROUP_AXES, 1, 1, grp_axes_out, -1, 0, 4, 0, 0, NULL);
+GRP_RECORD(grp_rec_key_range, EG_GROUP_KEY, 1, 0, NULL, 9, 0, -1, 0, 0, NULL);
+GRP_RECORD(grp_rec_key_uniform, EG_GROUP_KEY, 1, 0, NULL, 3, 0, -1, 0, 0, NULL);
+GRP_RECORD(grp_rec_key_real, EG_GROUP_KEY, 1, 0, NULL, 0, 0, -1, 0, 0, NULL);
+GRP_RECORD(grp_rec_bytes, EG_GROUP_COUNT, 1, 0, NULL, -1, 8, 8, 63, 1, grp_list_t8_short);
+GRP_RECORD(grp_rec_total, EG_GROUP_COUNT, 1, 0, NULL, -1, 8, 8, 100, 1, grp_list_t8);
+GRP_RECORD(grp_rec_larger, EG_GROUP_COUNT, 1, 0, NULL, -1, 8, 8, 72, 1, grp_list_t9);
+GRP_RECORD(grp_rec_phases0, EG_GROUP_COUNT, 0, 0, NULL, -1, 8, 8, 0, 0, NULL);
+GRP_RECORD(grp_rec_alien, EG_GROUP_COUNT, 1, 0, NULL, 1, 8, 8, 0, 0, NULL);
+GRP_RECORD(grp_rec_unbounded, EG_GROUP_KEY, 1, 0, NULL, 1, 0, -1, 64, 1, grp_list_t8);
+GRP_RECORD(grp_rec_twice, EG_GROUP_COUNT, 1, 0, NULL, -1, 8, 8, 128, 2, grp_list_twice);
+GRP_RECORD(grp_rec_bad_dtype, EG_GROUP_COUNT, 1, 0, NULL, -1, 8, 8, 32, 1, grp_list_u8);
+GRP_RECORD(grp_rec_bound, EG_GROUP_AXES, 1, 1, grp_axes_col, -1, 0, 5, 0, 0, NULL);
+#define GRP_UNIT(var, name_, byte, launch_, group_)                                                                                               \
+    static const struct eg_unit_meta var = { .struct_size = sizeof(struct eg_unit_meta), .name = name_, .digest = DIGEST(byte),                  \
+        .pattern = EG_PATTERN_PURE, .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "axpb_host", .device_image_format = EG_IMAGE_NONE,           \
+        .body = &grp_body, .launch = &launch_, .group = &group_ }
+GRP_UNIT(unit_grp_count, "grp_count", 0x41, grp_launch_flat, grp_rec_count);
+GRP_UNIT(unit_grp_axes, "grp_axes", 0x42, grp_launch_grid, grp_rec_axes);
+GRP_UNIT(unit_grp_axes_rt, "grp_axes_rt", 0x43, grp_launch_grid, grp_rec_axes_rt);
+GRP_UNIT(unit_grp_key, "grp_key", 0x44, grp_launch_flat, grp_rec_key);
+GRP_UNIT(unit_grp_key_open, "grp_key_open", 0x45, grp_launch_flat, grp_rec_key_open);
+GRP_UNIT(unit_grp_unknown, "grp_unknown", 0x46, grp_launch_flat, grp_rec_unknown);
+GRP_UNIT(unit_grp_count0, "grp_count0", 0x47, grp_launch_flat, grp_rec_count0);
+GRP_UNIT(unit_grp_no_axis, "grp_no_axis", 0x48, grp_launch_grid, grp_rec_no_axis);
+GRP_UNIT(unit_grp_axis_out, "grp_axis_out", 0x49, grp_launch_grid, grp_rec_axis_out);
+GRP_UNIT(unit_grp_key_range, "grp_key_range", 0x4a, grp_launch_flat, grp_rec_key_range);
+GRP_UNIT(unit_grp_key_uniform, "grp_key_uniform", 0x4b, grp_launch_flat, grp_rec_key_uniform);
+GRP_UNIT(unit_grp_key_real, "grp_key_real", 0x4c, grp_launch_flat, grp_rec_key_real);
+GRP_UNIT(unit_grp_bytes, "grp_bytes", 0x4d, grp_launch_flat, grp_rec_bytes);
+GRP_UNIT(unit_grp_total, "grp_total", 0x4e, grp_launch_flat, grp_rec_total);
+GRP_UNIT(unit_grp_larger, "grp_larger", 0x4f, grp_launch_flat, grp_rec_larger);
+GRP_UNIT(unit_grp_phases0, "grp_phases0", 0x50, grp_launch_flat, grp_rec_phases0);
+GRP_UNIT(unit_grp_alien, "grp_alien", 0x51, grp_launch_flat, grp_rec_alien);
+GRP_UNIT(unit_grp_unbounded, "grp_unbounded", 0x52, grp_launch_flat, grp_rec_unbounded);
+GRP_UNIT(unit_grp_twice, "grp_twice", 0x53, grp_launch_flat, grp_rec_twice);
+GRP_UNIT(unit_grp_bad_dtype, "grp_bad_dtype", 0x54, grp_launch_flat, grp_rec_bad_dtype);
+GRP_UNIT(unit_grp_bound, "grp_bound", 0x55, grp_launch_grid, grp_rec_bound);
+GRP_UNIT(unit_grp_boxed, "grp_boxed", 0x56, grp_launch_boxed, grp_rec_count);
+
 static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &unit_tick, &unit_spans, &unit_prefixsum, &unit_widesum, &unit_mix2, &unit_split, &unit_count1,
                                                     &unit_count3, &unit_count1a, &unit_count3a, &unit_countA, &unit_countAa, &unit_vecs, &unit_count1i,
                                                     &unit_count1ia, &unit_count1e, &unit_lanes, &unit_prefix, &unit_count1g, &unit_widemul,
@@ -1404,7 +1498,11 @@ static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &uni
                                                     &unit_vecw, &unit_vecr, &unit_vecsplit, &unit_actrow, &unit_gathl, &unit_gathls, &unit_scat, &unit_scatp,
                                                     &unit_scat_badshape, &unit_scat_badrole, &unit_scat_badslot, &unit_scat_badindex,
                                                     &unit_ax_all, &unit_ax_uniform, &unit_ax_badslot, &unit_ax_noaxis, &unit_ax_nolabels,
-                                                    &unit_ax_noextents, &unit_ax_twice };
+                                                    &unit_ax_noextents, &unit_ax_twice,
+                                                    &unit_grp_count, &unit_grp_axes, &unit_grp_axes_rt, &unit_grp_key, &unit_grp_key_open, &unit_grp_unknown,
+                                                    &unit_grp_count0, &unit_grp_no_axis, &unit_grp_axis_out, &unit_grp_key_range, &unit_grp_key_uniform,
+                                                    &unit_grp_key_real, &unit_grp_bytes, &unit_grp_total, &unit_grp_larger, &unit_grp_phases0, &unit_grp_alien,
+                                                    &unit_grp_unbounded, &unit_grp_twice, &unit_grp_bad_dtype, &unit_grp_bound, &unit_grp_boxed };
 
 static const struct eg_library_meta library = {
     .struct_size = sizeof(struct eg_library_meta),

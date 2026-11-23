@@ -200,6 +200,8 @@ struct eg_unit_finish; /**< mask slot, steps (or EG_STEPS_AUTO), steps_max */
 struct eg_unit_team;   /**< a stage's team record */
 struct eg_unit_derived; /**< what a derived unit is to its primal: tape, reserved slots, slot sources */
 struct eg_unit_gemm;    /**< the matrix products of a dense-contraction unit (eg_unit_meta.h) */
+struct eg_unit_group;   /**< the group of lanes a unit's body runs over
+                           (eg_unit_meta.h) */
 
 /** A unit named file-independently: its name and digest, never a path. */
 struct eg_unit_ref {
@@ -252,6 +254,10 @@ struct eg_unit_meta {
     int32_t fault_slot;                 /**< CHECKED UNIT (EG_UNIT_CHECKED): the SHARED int64 LOOKUP slot of 2 cells (slot ordinal, index) the unit's
                                              generated checks claim (see ``eg_unit_load``); ignored without the flag */
     int32_t reserved2;
+    /* appended */
+    const struct eg_unit_group*
+        group; /**< NULL: the unit has no group; else the set of lanes its body
+                  runs over (eg_unit_meta.h) */
 };
 
 /** The top of the tree: what ``eg_unit_library_meta`` returns. */

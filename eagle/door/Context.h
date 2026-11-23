@@ -196,6 +196,30 @@ struct GemmFacts {
     std::vector<GemmCall> calls;
 };
 
+/** @brief A scratch plane of a unit's group (eg_unit_group_scratch), copied at
+ * eg_unit_load. */
+struct GroupScratchFacts {
+    std::string name;
+    std::int32_t dtype    = 0;
+    std::int64_t elements = 0, bytes = 0; ///< per group
+};
+
+/** @brief A unit's group record (eg_unit_meta.group), checked at eg_unit_load;
+ * no launch reads it yet (eg_plan_new refuses a unit that has one). */
+struct GroupFacts {
+    bool present            = false;
+    std::int32_t membership = 0; ///< EG_GROUP_*
+    std::int32_t phases     = 0;
+    std::int32_t key_slot = -1; ///< KEY: the slot of the per-lane key, else -1
+    std::int64_t count    = 0;  ///< COUNT: the lanes of a group, else 0
+    std::int64_t max_size
+        = -1; ///< the size bound of a group in lanes, -1: not stated
+    std::int64_t scratch_bytes
+        = 0; ///< the bytes of all scratch planes of one group
+    std::vector<std::int32_t> axes; ///< AXES: the lane axes that span a group
+    std::vector<GroupScratchFacts> scratch;
+};
+
 /** @brief A team plane of a split unit (eg_unit_team_plane), copied at eg_unit_load. */
 struct TeamPlaneFacts {
     std::int32_t dtype = 0, unit = 0, layout = 0, wide = 0;
@@ -320,6 +344,9 @@ struct eg_unit_s {
     eagle::door::FinishFacts finish;
     eagle::door::DerivedFacts derived;        ///< a derived unit (eg_unit_meta.derived), else not present
     eagle::door::GemmFacts gemm;              ///< a dense-contraction unit (eg_unit_meta.gemm), else not present
+    eagle::door::GroupFacts
+        group_record; ///< a unit with a group (eg_unit_meta.group), else not
+                      ///< present
     std::int32_t index = -1;                  ///< the unit index in its library table
     std::int32_t fault_slot = -1;             ///< a checked unit: the two-cell int64 LOOKUP the door makes per plan for the generated checks, else -1
     std::array<std::uint8_t, EG_DIGEST_BYTES> digest{};

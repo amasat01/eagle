@@ -6078,6 +6078,65 @@ static void check_plane_axes_refusals(eg_ctx* ctx) {
     }
 }
 
+/* ---- groups ----------------------------------------------------------------------- */
+
+/* A unit that states a group loads once per membership kind (COUNT with two scratch planes, AXES over a lane axis of static and of run-time
+   extent, KEY with and without a stated bound), and a plan of it is refused NOT_WRITTEN naming the unit: no backend launches a group yet. */
+static void check_group_accepted(eg_ctx* ctx) {
+    static const struct { const char* name; uint8_t byte; const char* what; } rows[] = {
+        { "grp_count", 0x41, "COUNT of 8 lanes with two scratch planes" },
+        { "grp_axes", 0x42, "AXES over a lane axis of extent 4 with a scratch plane" },
+        { "grp_axes_rt", 0x43, "AXES over a run-time lane axis, no scratch" },
+        { "grp_key", 0x44, "KEY with a stated bound of 16 and a scratch plane" },
+        { "grp_key_open", 0x45, "KEY with no stated bound, no scratch" },
+    };
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); ++i) {
+        eg_unit* unit = NULL;
+        eg_plan* p = NULL;
+        char name[160], stem[64];
+        snprintf(name, sizeof(name), "group: a unit with membership %s loads", rows[i].what);
+        const int loaded = load(ctx, rows[i].name, rows[i].byte, &unit) == EG_OK && unit != NULL;
+        check(loaded, name);
+        snprintf(name, sizeof(name), "group: a plan of the %s unit is refused NOT_WRITTEN, naming the unit and that no backend launches a group yet", rows[i].name);
+        snprintf(stem, sizeof(stem), "unit '%s': a unit with a group is not launched", rows[i].name);
+        check(loaded && plan(ctx, unit, EG_STRUCTURE_HOST_SERIAL, 8, 0, NULL, NULL, &p) == EG_NOT_WRITTEN && p == NULL && reason_has(ctx, stem), name);
+        eg_unit_free(ctx, unit);
+    }
+}
+
+/* Every inconsistent group record is refused at load by name: an unknown membership, a count below 1, AXES naming none or an axis the launch
+   does not have or a bound that is not the spanned lanes, KEY naming a slot that is not a rank-0 integer plane of the unit, a scratch whose bytes
+   are not elements x width or that is larger than the bound or has no bound or a type a scratch never holds, a scratch declared twice, a total
+   that is not the sum, a phase count below 1, an operand of another membership, and a group on a unit that has a thread box. */
+static void check_group_refusals(eg_ctx* ctx) {
+    static const struct { const char* name; uint8_t byte; eg_status status; const char* stem; const char* what; } rows[] = {
+        { "grp_unknown", 0x46, EG_NOT_WRITTEN, "unknown membership 7", "an unknown membership" },
+        { "grp_count0", 0x47, EG_BAD_REQUEST, "membership COUNT takes count >= 1", "a COUNT of no lanes" },
+        { "grp_no_axis", 0x48, EG_BAD_REQUEST, "membership AXES names no lane axis", "AXES naming no axis" },
+        { "grp_axis_out", 0x49, EG_BAD_REQUEST, "the lane axis 2, which the launch does not have", "AXES naming an axis outside the launch" },
+        { "grp_bound", 0x55, EG_BAD_REQUEST, "max_size 5 is not the 4 lanes", "a bound that is not the spanned lanes" },
+        { "grp_key_range", 0x4a, EG_BAD_REQUEST, "key_slot 9, outside the 4 slots", "a KEY slot the unit does not have" },
+        { "grp_key_uniform", 0x4b, EG_BAD_REQUEST, "key_slot 3 ('u'), which is not a rank-0 integer PLANE_IN", "a KEY slot that is a UNIFORM" },
+        { "grp_key_real", 0x4c, EG_BAD_REQUEST, "key_slot 0 ('x'), which is not a rank-0 integer PLANE_IN", "a KEY slot that is a real plane" },
+        { "grp_bytes", 0x4d, EG_BAD_REQUEST, "bytes 63 is not its 8 elements of 8 bytes", "scratch bytes that are not elements x width" },
+        { "grp_total", 0x4e, EG_BAD_REQUEST, "scratch_bytes 100 is not the 64 bytes", "a scratch total that is not the sum" },
+        { "grp_larger", 0x4f, EG_BAD_REQUEST, "holds 9 values but a group holds at most 8 lanes", "a scratch larger than the size bound" },
+        { "grp_unbounded", 0x52, EG_BAD_REQUEST, "needs a size bound of the group", "a scratch with no size bound" },
+        { "grp_twice", 0x53, EG_BAD_REQUEST, "is declared twice", "a scratch declared twice" },
+        { "grp_bad_dtype", 0x54, EG_NOT_WRITTEN, "a scratch plane of wire dtype 3 is not written", "a scratch of a type a scratch never holds" },
+        { "grp_phases0", 0x50, EG_BAD_REQUEST, "phases 0 (>= 1)", "a phase count below 1" },
+        { "grp_alien", 0x51, EG_BAD_REQUEST, "key_slot 1, an operand of membership KEY", "an operand of another membership" },
+        { "grp_boxed", 0x56, EG_NOT_WRITTEN, "a group on a unit with a thread box is not written", "a group on a unit with a thread box" },
+    };
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); ++i) {
+        eg_unit* unit = NULL;
+        char name[160];
+        snprintf(name, sizeof(name), "group: %s is refused at load with %s by name", rows[i].what, rows[i].status == EG_NOT_WRITTEN ? "NOT_WRITTEN" : "BAD_REQUEST");
+        check(load(ctx, rows[i].name, rows[i].byte, &unit) == rows[i].status && unit == NULL && reason_has(ctx, rows[i].stem), name);
+        eg_unit_free(ctx, unit);
+    }
+}
+
 int main(int argc, char** argv) {
     if (argc != 5) {
         fprintf(stderr, "usage: %s <fixture> <wrong size> <no size block> <v1 tag>\n", argv[0]);
@@ -6130,6 +6189,8 @@ int main(int argc, char** argv) {
     check_gather_columns(ctx);
     check_plane_axes_roles(ctx);
     check_plane_axes_refusals(ctx);
+    check_group_accepted(ctx);
+    check_group_refusals(ctx);
     check_gather_table(ctx);
     check_shared(ctx);
     check_box(ctx);

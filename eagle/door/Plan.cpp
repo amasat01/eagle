@@ -457,6 +457,16 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
     if ((d.flags & ~EG_PLAN_SPLIT_EVENLY) != 0)
         refuse(EG_BAD_REQUEST, "eg_plan_desc.flags: unknown bits " + std::to_string(d.flags & ~EG_PLAN_SPLIT_EVENLY));
     check_handle(ctx.units, d.unit, "eg_plan_desc.unit");
+    if (d.unit->group_record.present)
+        refuse(EG_NOT_WRITTEN,
+            "unit '" + d.unit->name
+                + "': a unit with a group is not launched by this backend yet");
+    for (const StageFacts& st : d.unit->stages)
+        if (st.unit->group_record.present)
+            refuse(EG_NOT_WRITTEN,
+                "unit '" + d.unit->name + "' stage '" + st.ref_name
+                    + "': a unit with a group is not launched by this backend "
+                      "yet");
     const bool device = d.structure == EG_STRUCTURE_DEVICE;
     if (device) device_plan_check(ctx, *d.unit);
     else if (d.structure != EG_STRUCTURE_HOST_TEAM && d.structure != EG_STRUCTURE_HOST_SERIAL)
