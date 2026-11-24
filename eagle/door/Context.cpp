@@ -136,6 +136,8 @@ void ctx_free_all(eg_ctx& ctx) {
         delete node;
     }
     ctx.host_nodes.clear();
+    for (eg_event_s* event : ctx.events) delete event;
+    ctx.events.clear();
     for (eg_plane_s* plane : ctx.planes) {
         if (!child && plane->tensor != nullptr && plane->tensor->deleter != nullptr)
             plane->tensor->deleter(plane->tensor);
@@ -160,6 +162,49 @@ bool ctx_close(eg_ctx& ctx) {
     }
     ctx_free_all(ctx);
     return false;
+}
+
+/** @brief Refuse an event call while a recording is open: an event is a mark of the eager level. */
+static void refuse_in_recording(const eg_ctx& ctx, const char* call) {
+    if (ctx.rec != nullptr)
+        refuse(EG_BAD_REQUEST, std::string(call) + ": an event is a mark of the eager level, not a node of a recording; "
+               "order inside one is eg_record_wait");
+}
+
+void event_new(eg_ctx& ctx, eg_event** out) {
+    if (out == nullptr) refuse(EG_BAD_REQUEST, "eg_event_new: out is NULL");
+    ctx.events.insert(*out = new eg_event_s);
+}
+
+void event_free(eg_ctx& ctx, eg_event* event) {
+    check_handle(ctx.events, event, "event");
+    ctx.events.erase(event);
+    delete event;
+}
+
+void event_record(eg_ctx& ctx, eg_event* event) {
+    refuse_in_recording(ctx, "eg_event_record");
+    check_handle(ctx.events, event, "event");
+    event->stamp = std::chrono::steady_clock::now();
+    event->recorded = true;
+}
+
+/** @brief A host queue has run everything before the mark when the mark is made, so a wait has nothing to wait for. */
+void event_wait(eg_ctx& ctx, eg_event* event) {
+    refuse_in_recording(ctx, "eg_event_wait");
+    check_handle(ctx.events, event, "event");
+    if (!event->recorded) refuse(EG_BAD_REQUEST, "eg_event_wait: the event was never recorded; record it first");
+}
+
+void event_elapsed(eg_ctx& ctx, const eg_event* start, const eg_event* stop, double* ms) {
+    refuse_in_recording(ctx, "eg_event_elapsed");
+    if (ms == nullptr) refuse(EG_BAD_REQUEST, "eg_event_elapsed: ms is NULL");
+    check_handle(ctx.events, start, "start event");
+    check_handle(ctx.events, stop, "stop event");
+    if (!start->recorded || !stop->recorded)
+        refuse(EG_BAD_REQUEST, std::string("eg_event_elapsed: the ") + (start->recorded ? "stop" : "start") +
+               " event was never recorded; record it first");
+    *ms = std::chrono::duration<double, std::milli>(stop->stamp - start->stamp).count();
 }
 
 /** @brief Fill @p out per the OUTPUT struct rule (eg_ctx_info). */

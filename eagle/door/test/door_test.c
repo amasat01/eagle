@@ -5037,6 +5037,60 @@ static void check_device_count(eg_ctx* ctx) {
     eg_ctx_free(host);
 }
 
+/* A host context is one queue: the three stream calls refuse it BAD_REQUEST by the same words, in either build of the door,
+ * and a NULL stream pointer is refused after the context kind. */
+static void check_host_streams(eg_ctx* ctx) {
+    uint64_t stream = 7;
+    const char* why = "host-only context: it has one queue";
+    check(eg_stream_new(ctx, "cuda:0", &stream) == EG_BAD_REQUEST && reason_has(ctx, "eg_stream_new") && reason_has(ctx, why) &&
+              stream == 7,
+          "eg_stream_new on a host context: BAD_REQUEST (host-only context: it has one queue), the handle untouched");
+    check(eg_stream_new(ctx, NULL, &stream) == EG_BAD_REQUEST && reason_has(ctx, why),
+          "eg_stream_new with no device text on a host context: the same refusal");
+    check(eg_stream_free(ctx, 1) == EG_BAD_REQUEST && reason_has(ctx, "eg_stream_free") && reason_has(ctx, why),
+          "eg_stream_free on a host context: BAD_REQUEST (host-only context: it has one queue)");
+    check(eg_stream_sync(ctx, 1) == EG_BAD_REQUEST && reason_has(ctx, "eg_stream_sync") && reason_has(ctx, why),
+          "eg_stream_sync on a host context: BAD_REQUEST (host-only context: it has one queue)");
+}
+
+/* Events on a host context: record stamps a steady clock, elapsed is the difference of two stamps in milliseconds, an event
+ * never recorded and a NULL pointer are refused by name, and a recording refuses every event call but new and free. */
+static void check_host_events(eg_ctx* ctx) {
+    eg_event *a = NULL, *b = NULL, *foreign = NULL;
+    double ms = -1.0;
+    check(eg_event_new(ctx, &a) == EG_OK && eg_event_new(ctx, &b) == EG_OK && a != NULL && b != NULL && a != b &&
+              eg_event_new(ctx, NULL) == EG_BAD_REQUEST && reason_has(ctx, "out is NULL"),
+          "eg_event_new on a host context: two events, a NULL out BAD_REQUEST");
+    check(eg_event_elapsed(ctx, a, b, &ms) == EG_BAD_REQUEST && reason_has(ctx, "start event was never recorded") &&
+              eg_event_wait(ctx, a) == EG_BAD_REQUEST && reason_has(ctx, "never recorded"),
+          "an event never recorded: eg_event_elapsed and eg_event_wait BAD_REQUEST by name");
+    check(eg_event_record(ctx, a) == EG_OK && eg_event_elapsed(ctx, a, b, &ms) == EG_BAD_REQUEST &&
+              reason_has(ctx, "stop event was never recorded"),
+          "eg_event_elapsed with only the start recorded: BAD_REQUEST naming the stop event");
+    struct timespec nap = { 0, 2000000 };
+    nanosleep(&nap, NULL);
+    check(eg_event_record(ctx, b) == EG_OK && eg_event_wait(ctx, a) == EG_OK && eg_event_elapsed(ctx, a, b, &ms) == EG_OK &&
+              ms >= 2.0 && ms < 2000.0,
+          "eg_event_record twice, eg_event_wait OK, eg_event_elapsed >= the 2 ms slept (a steady clock)");
+    check(eg_event_elapsed(ctx, b, a, &ms) == EG_OK && ms <= -2.0, "eg_event_elapsed with the events swapped: negative");
+    check(eg_event_elapsed(ctx, a, b, NULL) == EG_BAD_REQUEST && reason_has(ctx, "ms is NULL") &&
+              eg_event_record(ctx, NULL) == EG_BAD_REQUEST && eg_event_wait(ctx, NULL) == EG_BAD_REQUEST &&
+              eg_event_elapsed(ctx, NULL, b, &ms) == EG_BAD_REQUEST,
+          "a NULL ms or event: BAD_REQUEST");
+    check(eg_record_begin(ctx) == EG_OK && eg_event_record(ctx, a) == EG_BAD_REQUEST && reason_has(ctx, "eager level") &&
+              eg_event_wait(ctx, a) == EG_BAD_REQUEST && eg_event_elapsed(ctx, a, b, &ms) == EG_BAD_REQUEST &&
+              eg_record_abort(ctx) == EG_OK,
+          "inside a recording: eg_event_record, eg_event_wait and eg_event_elapsed BAD_REQUEST (eager level)");
+    check(eg_event_free(ctx, a) == EG_OK && eg_event_free(ctx, a) == EG_BAD_REQUEST && eg_event_free(ctx, NULL) == EG_OK &&
+              eg_event_record(ctx, a) == EG_BAD_REQUEST && eg_event_free(ctx, b) == EG_OK,
+          "eg_event_free: once, a second free and a freed event BAD_REQUEST, NULL OK");
+    eg_ctx* other = make_ctx();
+    check(other != NULL && eg_event_new(other, &foreign) == EG_OK && eg_event_record(ctx, foreign) == EG_BAD_REQUEST &&
+              reason_has(ctx, "not a live handle of this context") && eg_event_free(other, foreign) == EG_OK,
+          "an event of another context: BAD_REQUEST");
+    eg_ctx_free(other);
+}
+
 /* ---- transforms ---------------------------------------------------------- */
 
 static void fft_move(void* dst, const void* src, size_t bytes) { memcpy(dst, src, bytes); }
@@ -6357,6 +6411,8 @@ int main(int argc, char** argv) {
     check_reset(ctx);
     if (!device_group) check_no_device_group(ctx);
     check_device_count(ctx);
+    check_host_streams(ctx);
+    check_host_events(ctx);
 
     check_reduce(ctx);
     fft_values(ctx, 0);

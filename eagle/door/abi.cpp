@@ -353,6 +353,62 @@ EG_EXPORT eg_status eg_stream_use(eg_ctx* ctx, uint64_t stream) {
     return door::call(ctx, [stream](eg_ctx& c) { door::device_stream_use(c, stream); });
 }
 
+/** A host context is one queue, so there is no stream to make, name or wait for: the three stream calls refuse it alike. */
+static void refuse_host_queue(const eg_ctx& c, const char* call) {
+    if (c.dev.ordinal < 0) door::refuse(EG_BAD_REQUEST, std::string(call) + ": host-only context: it has one queue");
+}
+EG_EXPORT eg_status eg_stream_new(eg_ctx* ctx, const char* device, uint64_t* stream) {
+    return door::call(ctx, [device, stream](eg_ctx& c) {
+        refuse_host_queue(c, "eg_stream_new");
+        if (stream == nullptr) door::refuse(EG_BAD_REQUEST, "eg_stream_new: stream is NULL");
+        door::device_stream_new(c, device != nullptr ? device : "", stream);
+    });
+}
+EG_EXPORT eg_status eg_stream_free(eg_ctx* ctx, uint64_t stream) {
+    return door::call(ctx, [stream](eg_ctx& c) {
+        refuse_host_queue(c, "eg_stream_free");
+        door::device_stream_free(c, stream);
+    });
+}
+EG_EXPORT eg_status eg_stream_sync(eg_ctx* ctx, uint64_t stream) {
+    return door::call(ctx, [stream](eg_ctx& c) {
+        refuse_host_queue(c, "eg_stream_sync");
+        door::device_stream_sync(c, stream);
+    });
+}
+
+EG_EXPORT eg_status eg_event_new(eg_ctx* ctx, eg_event** out) {
+    return door::call(ctx, [out](eg_ctx& c) {
+        door::device_events_check(c, "eg_event_new");
+        door::event_new(c, out);
+    });
+}
+EG_EXPORT eg_status eg_event_free(eg_ctx* ctx, eg_event* event) {
+    if (event == nullptr) return EG_OK;
+    return door::call(ctx, [event](eg_ctx& c) {
+        door::device_events_check(c, "eg_event_free");
+        door::event_free(c, event);
+    });
+}
+EG_EXPORT eg_status eg_event_record(eg_ctx* ctx, eg_event* event) {
+    return door::call(ctx, [event](eg_ctx& c) {
+        door::device_events_check(c, "eg_event_record");
+        door::event_record(c, event);
+    });
+}
+EG_EXPORT eg_status eg_event_wait(eg_ctx* ctx, eg_event* event) {
+    return door::call(ctx, [event](eg_ctx& c) {
+        door::device_events_check(c, "eg_event_wait");
+        door::event_wait(c, event);
+    });
+}
+EG_EXPORT eg_status eg_event_elapsed(eg_ctx* ctx, const eg_event* start, const eg_event* stop, double* ms) {
+    return door::call(ctx, [=](eg_ctx& c) {
+        door::device_events_check(c, "eg_event_elapsed");
+        door::event_elapsed(c, start, stop, ms);
+    });
+}
+
 EG_EXPORT eg_status eg_device_count(eg_ctx* ctx, int32_t* count) {
     return door::call(ctx, [count](eg_ctx& c) {
         if (count == nullptr) door::refuse(EG_BAD_REQUEST, "eg_device_count: count is NULL");

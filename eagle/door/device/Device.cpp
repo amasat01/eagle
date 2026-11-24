@@ -115,6 +115,10 @@ void device_graph_retain(eg_graph*) {}
 void device_graph_release(eg_ctx&, eg_graph*) {}
 void device_graphs_drop(eg_ctx&) noexcept {}
 void device_stream_use(eg_ctx&, std::uint64_t) { device_group_check("eg_stream_use"); }
+void device_stream_new(eg_ctx&, const std::string&, std::uint64_t*) { device_group_check("eg_stream_new"); }
+void device_stream_free(eg_ctx&, std::uint64_t) { device_group_check("eg_stream_free"); }
+void device_stream_sync(eg_ctx&, std::uint64_t) { device_group_check("eg_stream_sync"); }
+void device_events_check(const eg_ctx&, const char*) {}
 void device_group_check(const char* call) {
     refuse(EG_NOT_WRITTEN, std::string(call) + ": the device group is not built");
 }
@@ -2733,6 +2737,22 @@ void device_stream_use(eg_ctx& ctx, std::uint64_t stream) {
         gemm_handle_make(ctx, scope);
     }
     ctx.dev.stream = scope;
+}
+
+/** @brief eg_stream_new, eg_stream_free and eg_stream_sync of a device context: not written yet. */
+void device_stream_new(eg_ctx&, const std::string&, std::uint64_t*) {
+    refuse(EG_NOT_WRITTEN, "eg_stream_new: not written for a device context");
+}
+void device_stream_free(eg_ctx&, std::uint64_t) {
+    refuse(EG_NOT_WRITTEN, "eg_stream_free: not written for a device context");
+}
+void device_stream_sync(eg_ctx&, std::uint64_t) {
+    refuse(EG_NOT_WRITTEN, "eg_stream_sync: not written for a device context");
+}
+
+/** @brief The five event calls of a device context: not written yet. */
+void device_events_check(const eg_ctx& ctx, const char* call) {
+    if (ctx.dev.ordinal >= 0) refuse(EG_NOT_WRITTEN, std::string(call) + ": not written for a device context");
 }
 
 /** @brief eg_sync: wait until the context's stream is idle (a host-only context has nothing queued). */

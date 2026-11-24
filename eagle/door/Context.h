@@ -22,6 +22,7 @@ struct eg_unit_meta;
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -668,6 +669,12 @@ struct eg_fft_s {
 };
 
 /** @brief A direct matrix product (eg_gemm_new): one GemmCall with its extents resolved, the width and the target. */
+/** One event (eg_event_new): the steady-clock time it was last recorded at; ``recorded`` says whether it ever was. */
+struct eg_event_s {
+    std::chrono::steady_clock::time_point stamp;
+    bool recorded = false;
+};
+
 struct eg_gemm_s {
     eg_ctx* ctx = nullptr;
     bool device = false;                      ///< the context's target: cuBLAS, else the reference loop
@@ -716,6 +723,7 @@ struct eg_ctx_s {
     std::unordered_set<eg_fft_s*> ffts;
     std::unordered_set<eg_gemm_s*> gemms;
     std::unordered_set<eg_host_node_s*> host_nodes;
+    std::unordered_set<eg_event_s*> events;
     const std::string* in_host_node = nullptr;   ///< the name of the host node whose callback is running on this context, else null
     int exports = 0;                          ///< the DLPack exports (eg_plane_dlpack) not yet released by their consumers; changed under `lock`
     bool closed = false;                      ///< eg_ctx_free ran with exports outstanding: the last export's release frees the context
@@ -988,6 +996,12 @@ void fault_reset(eg_ctx& ctx, const eg_plan_s& plan);
 void fault_check(eg_ctx& ctx, const eg_plan_s& plan);
 void fault_reset(eg_ctx& ctx, const eg_runner_s& runner);
 void fault_check(eg_ctx& ctx, const eg_runner_s& runner);
+/** @brief The five event calls on a host context (Context.cpp); a device context never reaches them (device_events_check). */
+void event_new(eg_ctx& ctx, eg_event** out);
+void event_free(eg_ctx& ctx, eg_event* event);
+void event_record(eg_ctx& ctx, eg_event* event);
+void event_wait(eg_ctx& ctx, eg_event* event);
+void event_elapsed(eg_ctx& ctx, const eg_event* start, const eg_event* stop, double* ms);
 void graph_launch(eg_ctx& ctx, eg_graph_s* graph);
 void graph_free(eg_ctx& ctx, eg_graph_s* graph);
 /** @brief A reference to host graph @p graph for a runner that runs it per step, and its release (the last one frees the graph). */

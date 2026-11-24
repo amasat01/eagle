@@ -87,6 +87,7 @@ typedef struct eg_runner_s eg_runner; /**< a run-until-done loop over bound plan
 typedef struct eg_graph_s eg_graph;   /**< a recorded sequence of door calls, replayed as one */
 typedef struct eg_gemm_s eg_gemm;     /**< a matrix product: stored shapes, flags and width, and on a device the stream's cuBLAS handle */
 typedef struct eg_fft_s eg_fft;       /**< a transform plan: kind, norm, shape and axes, and on a device its cuFFT plans */
+typedef struct eg_event_s eg_event;   /**< a mark on a stream that other streams wait for and that gives times, see ``eg_event_new`` */
 typedef struct eg_host_node_s eg_host_node;   /**< a caller's callback (and optional vjp) the door runs as one node, see ``eg_host_node_new`` */
 
 /** DLPack >= 1.0 managed tensor (dlpack.h). Only a pointer crosses. */
@@ -1573,7 +1574,9 @@ eg_status eg_graph_free(eg_ctx* ctx, eg_graph* graph);
  * ``eg_device_count``, which is EG_OK with 0. In a door built WITH it, on a
  * host context (made without EG_CTX_DEVICE): ``eg_sync`` is EG_OK,
  * ``eg_stream_use`` is EG_BAD_REQUEST ("host-only context": it has no
- * stream), ``eg_device_count`` and ``eg_device_props`` answer.
+ * stream), ``eg_stream_new``, ``eg_stream_free`` and ``eg_stream_sync`` are
+ * EG_BAD_REQUEST ("host-only context: it has one queue") in either build,
+ * ``eg_device_count`` and ``eg_device_props`` answer.
  */
 
 /** Number of devices the driver sees (seam ``device_count``): 0, with EG_OK, when the driver library cannot be
@@ -1594,9 +1597,58 @@ eg_status eg_device_props(eg_ctx* ctx, int32_t device, struct eg_device_props* o
  *  alive until every plane and plan made while it was in scope is freed. */
 eg_status eg_stream_use(eg_ctx* ctx, uint64_t stream);
 
+/** Make a queue the library owns on the device named by the text ``device`` (for example "cuda:0"; NULL or "": the
+ *  context's default device) and give its opaque 64-bit handle in ``*stream``. The text is read by the backend library,
+ *  not by the caller. The handle is the library's own and is not a driver stream: pass it to ``eg_stream_use`` to put
+ *  work on it, to ``eg_stream_sync`` to wait for it, and to ``eg_stream_free`` to release it. The caller owns the handle
+ *  and frees it once; freeing it is the only end of its life. A stream a caller made itself is never passed here: it is
+ *  adopted by handing its raw handle to ``eg_stream_use``, and it stays the caller's.
+ *  Status: OK; BAD_REQUEST (``stream`` NULL, a text that names no device of the backend, a host-only context: "host-only
+ *  context: it has one queue"); NOT_WRITTEN (a device context of a library that has not written it). */
+eg_status eg_stream_new(eg_ctx* ctx, const char* device, uint64_t* stream);
+
+/** Release a queue ``eg_stream_new`` made, after the work queued on it. If it is the stream in scope, the context's own
+ *  stream is in scope again. The handle is dead on return. Status: OK; BAD_REQUEST (a handle the context did not make or
+ *  already freed, a host-only context: "host-only context: it has one queue"); NOT_WRITTEN (as ``eg_stream_new``). */
+eg_status eg_stream_free(eg_ctx* ctx, uint64_t stream);
+
+/** Block until every node queued on ``stream`` (a handle of ``eg_stream_new``, or a raw stream adopted with
+ *  ``eg_stream_use``) has run; other streams are not waited for (``eg_sync`` waits for all). Status: OK; BAD_REQUEST (a
+ *  handle the context does not know, a host-only context: "host-only context: it has one queue"); FAULT (the failure a
+ *  host node of a device graph kept while the stream ran, as ``eg_sync``); NOT_WRITTEN (as ``eg_stream_new``). */
+eg_status eg_stream_sync(eg_ctx* ctx, uint64_t stream);
+
 /** Block until the context's stream is idle (seam ``stream_synchronize``). Status: OK; FAULT (also the failure a host
  *  node of a device graph kept while the stream ran, see ``eg_record_begin``). */
 eg_status eg_sync(eg_ctx* ctx);
+
+/** Make an event, not yet recorded, into ``*out``. The caller owns it and frees it once with ``eg_event_free``. An event
+ *  is a mark of the eager level: it is not a node of a recording, and ``eg_event_record``, ``eg_event_wait`` and
+ *  ``eg_event_elapsed`` refuse a context that is recording (inside one, order is ``eg_record_wait``). Status: OK;
+ *  BAD_REQUEST (``out`` NULL); NOT_WRITTEN (a device context of a library that has not written events). */
+eg_status eg_event_new(eg_ctx* ctx, eg_event** out);
+
+/** Free an event, after the work it marks has been reached. NULL-safe. Status: OK; BAD_REQUEST (an event the context did not
+ *  make or already freed); NOT_WRITTEN (as ``eg_event_new``). */
+eg_status eg_event_free(eg_ctx* ctx, eg_event* event);
+
+/** Mark the stream in scope: the event is reached when that stream has run everything queued on it before this call, and
+ *  records the time of that moment. Recording an event again moves the mark. On a host context the queue is the calling
+ *  thread's own, so the mark is reached at once and the time stamped is the call's, read from a steady clock. Status: OK;
+ *  BAD_REQUEST (a NULL, freed or foreign event, a context that is recording); NOT_WRITTEN (as ``eg_event_new``). */
+eg_status eg_event_record(eg_ctx* ctx, eg_event* event);
+
+/** Make the stream in scope wait, at this point of its queue, until ``event`` is reached; nothing the caller does on the
+ *  host waits. An event never recorded is refused by name (waiting for it would never end). On a host context the mark was
+ *  reached when it was recorded, so this returns at once. Status: OK; BAD_REQUEST (a NULL, freed or foreign event, an
+ *  event never recorded, a context that is recording); NOT_WRITTEN (as ``eg_event_new``). */
+eg_status eg_event_wait(eg_ctx* ctx, eg_event* event);
+
+/** The time in milliseconds from the mark of ``start`` to the mark of ``stop`` into ``*ms``; negative when ``stop`` was
+ *  reached first. It waits for both marks to be reached (the caller's thread blocks), so the value is always final. Both
+ *  events must have been recorded: one never recorded is refused by name. Status: OK; BAD_REQUEST (``ms`` NULL, a NULL,
+ *  freed or foreign event, an event never recorded, a context that is recording); NOT_WRITTEN (as ``eg_event_new``). */
+eg_status eg_event_elapsed(eg_ctx* ctx, const eg_event* start, const eg_event* stop, double* ms);
 
 #ifdef __cplusplus
 }
