@@ -660,6 +660,8 @@ struct DeviceState {
     std::uint64_t next_made_stream = 0;       ///< the counter the next handle is made from
     std::unordered_set<std::uint64_t> adopted_streams;               ///< raw streams the caller passed to eg_stream_use (never destroyed here)
     std::unordered_map<const void*, std::uint64_t> events;           ///< eg_event handle -> its CUevent (device/Device.cpp)
+    struct ScanState { void* data = nullptr; std::size_t bytes = 0; };
+    std::unordered_map<std::uint64_t, ScanState> scan_state;         ///< stream -> the working memory of its eager scans, grown on demand (device/Device.cpp)
     int sms = 0, regs_per_sm = 0, smem_per_sm = 0, threads_per_sm = 0, cc_major = 0, cc_minor = 0;
     int clock_khz = 0, memory_clock_khz = 0, bus_bits = 0, l2_bytes = 0;   ///< the device's clocks, memory bus and L2: what its peak rates are derived from
     int fp64_ratio = 1;                       ///< FP32:FP64 throughput ratio (1 when not reported)

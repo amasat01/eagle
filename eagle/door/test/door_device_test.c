@@ -3269,6 +3269,232 @@ static void runner_follows_scope(eg_ctx* ctx, eg_unit* active) {
     check(eg_stream_free(ctx, scope) == EG_OK, "the library stream of the runner row is freed");
 }
 
+/* ---- eg_scan on a device context ---------------------------------------------------------------------------------------- */
+
+/* The values of a scan row: a function of the seed and the index alone, so the input is regenerated chunk by chunk and never
+ * held on the host in full. A real minimum or maximum row has a NaN at every seventh value. */
+static uint64_t mix64(uint64_t x) {
+    x += 0x9E3779B97F4A7C15ull;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+    return x ^ (x >> 31);
+}
+
+/* True for a NaN (an integer converts to a number, never a NaN). */
+static int scan_is_nan(double v) { return v != v; }
+
+#define SCAN_CHUNK ((int64_t)1 << 20)
+
+/* One element type of eg_scan: generation, the sequential fold, the comparison. Reals: an integer sum wraps, a minimum and a maximum skip a NaN. */
+#define SCAN_TYPE(NAME, T, U, CODE, BITS, REAL, SIGNED)                                                                          \
+    static T scan_value_##NAME(uint64_t seed, int64_t i, int nans) {                                                              \
+        const uint64_t bits = mix64(seed * 0x2545F4914F6CDD1Dull + (uint64_t)i);                                                  \
+        if (REAL) {                                                                                                               \
+            if (nans && i % 7 == 3) return (T)NAN;                                                                                \
+            return (T)((double)(bits >> 11) * (2.0 / 9007199254740992.0) - 1.0);                                                  \
+        }                                                                                                                         \
+        return (T)(U)bits;                                                                                                        \
+    }                                                                                                                             \
+    static T scan_fold_##NAME(int op, T a, T b) {                                                                                 \
+        if (op == EG_SCAN_SUM) return REAL ? (T)(a + b) : (T)((U)a + (U)b);                                                       \
+        if (REAL) return op == EG_SCAN_MIN ? (T)((scan_is_nan(b) || a < b) ? a : b) : (T)((scan_is_nan(b) || b < a) ? a : b);                \
+        return op == EG_SCAN_MIN ? (b < a ? b : a) : (a < b ? b : a);                                                             \
+    }                                                                                                                             \
+    static T scan_identity_##NAME(int op) {                                                                                       \
+        if (op == EG_SCAN_SUM) return (T)0;                                                                                       \
+        if (REAL) return op == EG_SCAN_MIN ? (T)INFINITY : (T)-INFINITY;                                                          \
+        const T lowest = SIGNED ? (T)(((U)~(U)0 >> 1) + 1u) : (T)0;                                                               \
+        return op == EG_SCAN_MIN ? (T)(U)~(U)lowest : lowest;                                                                           \
+    }                                                                                                                             \
+    /* Wrong values of scanning @p n values with @p op in the form @p exclusive on the device through eg_scan, against the sequential loop; */ \
+    /* @p status gets eg_scan's. A real sum is held to |out[i] - exact| <= (i + 1) u sum|in[0..i]| (u the unit roundoff of the type). */    \
+    static int64_t scan_rows_##NAME(eg_ctx* ctx, int op, int exclusive, int64_t n, eg_status* status) {                           \
+        T *din = NULL, *dout = NULL;                                                                                              \
+        static T hin[SCAN_CHUNK], hout[SCAN_CHUNK];                                                                               \
+        const uint64_t seed = 11 + (uint64_t)n + (uint64_t)op;                                                                    \
+        const int64_t alloc = n > 0 ? n : 1;                                                                                      \
+        *status = EG_FAULT;                                                                                                       \
+        if (cudaMalloc((void**)&din, (size_t)alloc * sizeof(T)) != cudaSuccess || cudaMalloc((void**)&dout, (size_t)alloc * sizeof(T)) != cudaSuccess) { \
+            cudaFree(din);                                                                                                        \
+            return -1;                                                                                                            \
+        }                                                                                                                         \
+        for (int64_t at = 0; at < n; at += SCAN_CHUNK) {                                                                          \
+            const int64_t c = n - at < SCAN_CHUNK ? n - at : SCAN_CHUNK;                                                          \
+            for (int64_t i = 0; i < c; ++i) hin[i] = scan_value_##NAME(seed, at + i, op != EG_SCAN_SUM);                          \
+            cudaMemcpy(din + at, hin, (size_t)c * sizeof(T), cudaMemcpyHostToDevice);                                             \
+        }                                                                                                                         \
+        cudaMemset(dout, 0x5A, (size_t)alloc * sizeof(T));                                                                        \
+        cudaDeviceSynchronize();                                                                                                  \
+        struct tensor ti, to;                                                                                                     \
+        eg_plane* pi = wrap_device_typed(ctx, &ti, din, n, CODE, BITS);                                                           \
+        eg_plane* po = wrap_device_typed(ctx, &to, dout, n, CODE, BITS);                                                          \
+        int64_t bad = -1;                                                                                                         \
+        if (pi && po) {                                                                                                           \
+            struct eg_scan_desc d;                                                                                                \
+            memset(&d, 0, sizeof(d));                                                                                             \
+            d.struct_size = sizeof(d);                                                                                            \
+            d.flags = exclusive ? EG_SCAN_EXCLUSIVE : 0;                                                                          \
+            d.in = pi;                                                                                                            \
+            d.out = po;                                                                                                           \
+            d.op = op;                                                                                                            \
+            *status = eg_scan(ctx, &d);                                                                                           \
+            if (*status == EG_OK && eg_sync(ctx) == EG_OK) {                                                                      \
+                bad = 0;                                                                                                          \
+                T acc = scan_identity_##NAME(op);                                                                                 \
+                long double exact = 0.0L, mag = 0.0L;                                                                             \
+                const long double u = (BITS == 32) ? 0x1p-24L : 0x1p-53L;                                                         \
+                for (int64_t at = 0; at < n; at += SCAN_CHUNK) {                                                                  \
+                    const int64_t c = n - at < SCAN_CHUNK ? n - at : SCAN_CHUNK;                                                  \
+                    cudaMemcpy(hout, dout + at, (size_t)c * sizeof(T), cudaMemcpyDeviceToHost);                                   \
+                    for (int64_t i = 0; i < c; ++i) {                                                                             \
+                        const T x = scan_value_##NAME(seed, at + i, op != EG_SCAN_SUM);                                           \
+                        if (REAL && op == EG_SCAN_SUM) {                                                                          \
+                            const long double before = exact, bmag = mag;                                                         \
+                            exact += (long double)x;                                                                              \
+                            mag += fabsl((long double)x);                                                                         \
+                            const long double want = exclusive ? before : exact, scale = (exclusive ? bmag : mag) * (long double)(at + i + 1) * u; \
+                            bad += fabsl((long double)hout[i] - want) > scale + 1e-300L;                                          \
+                        } else {                                                                                                  \
+                            const T before = acc;                                                                                 \
+                            acc = scan_fold_##NAME(op, acc, x);                                                                   \
+                            const T want = exclusive ? before : acc;                                                              \
+                            bad += !(REAL ? ((scan_is_nan(want) && scan_is_nan(hout[i])) || want == hout[i]) : want == hout[i]);              \
+                        }                                                                                                         \
+                    }                                                                                                             \
+                }                                                                                                                 \
+            }                                                                                                                     \
+        }                                                                                                                         \
+        eg_plane_free(ctx, pi);                                                                                                   \
+        eg_plane_free(ctx, po);                                                                                                   \
+        cudaFree(din);                                                                                                            \
+        cudaFree(dout);                                                                                                           \
+        return bad;                                                                                                               \
+    }
+
+SCAN_TYPE(i32, int32_t, uint32_t, kDLInt, 32, 0, 1)
+SCAN_TYPE(i64, int64_t, uint64_t, kDLInt, 64, 0, 1)
+SCAN_TYPE(u32, uint32_t, uint32_t, kDLUInt, 32, 0, 0)
+SCAN_TYPE(u64, uint64_t, uint64_t, kDLUInt, 64, 0, 0)
+SCAN_TYPE(f32, float, uint32_t, kDLFloat, 32, 1, 0)
+SCAN_TYPE(f64, double, uint64_t, kDLFloat, 64, 1, 0)
+
+struct scan_kind {
+    const char* name;
+    int64_t (*rows)(eg_ctx*, int, int, int64_t, eg_status*);
+    int64_t tile; /* values of one tile of the device scan: 128 threads times the items per thread of the width */
+    int64_t element;
+};
+
+/* eg_scan on a device context: every element type and fold, both forms, at the sizes where a tile ends, and at the largest the card holds. */
+static void device_scans(eg_ctx* ctx) {
+    const struct scan_kind kinds[6] = { { "int32", scan_rows_i32, 128 * 12, 4 }, { "int64", scan_rows_i64, 128 * 8, 8 },
+                                        { "uint32", scan_rows_u32, 128 * 12, 4 }, { "uint64", scan_rows_u64, 128 * 8, 8 },
+                                        { "float32", scan_rows_f32, 128 * 12, 4 }, { "float64", scan_rows_f64, 128 * 8, 8 } };
+    const char* const folds[3] = { "sum", "min", "max" };
+    size_t free_bytes = 0, total_bytes = 0;
+    cudaMemGetInfo(&free_bytes, &total_bytes);
+    int rows = 0, wrong = 0;
+    for (int k = 0; k < 6; ++k) {
+        const struct scan_kind* kind = &kinds[k];
+        const int64_t largest = (int64_t)((double)free_bytes * 0.4 / (double)kind->element);
+        const int64_t sizes[8] = { 1, kind->tile - 1, kind->tile, kind->tile + 1, 3 * kind->tile + 17, 128 * kind->tile + 5, 4000003, largest };
+        for (int op = 0; op < 3; ++op)
+            for (int exclusive = 0; exclusive < 2; ++exclusive) {
+                int64_t bad_total = 0;
+                int ok = 1;
+                for (int s = 0; s < 8; ++s) {
+                    eg_status status = EG_OK;
+                    const int64_t bad = kind->rows(ctx, op, exclusive, sizes[s], &status);
+                    ok = ok && status == EG_OK && bad == 0;
+                    bad_total += bad > 0 ? bad : 0;
+                    if (!(status == EG_OK && bad == 0))
+                        printf("      %s %s %s n=%lld: status %d, %lld wrong\n", kind->name, folds[op], exclusive ? "exclusive" : "inclusive", (long long)sizes[s], (int)status,
+                               (long long)bad);
+                }
+                ++rows;
+                wrong += !ok;
+                char what[160];
+                snprintf(what, sizeof(what), "eg_scan on the device, %s %s %s: sizes 1, tile-1, tile, tile+1, 3 tiles+17, a group+5, 4000003 and %lld values equal the sequential loop",
+                         kind->name, folds[op], exclusive ? "exclusive" : "inclusive", (long long)largest);
+                check(ok, what);
+            }
+    }
+    printf("      eg_scan device value rows: %d rows, %d wrong\n", rows, wrong);
+    {   /* an extent of 0 writes nothing */
+        double* d = NULL;
+        struct tensor ti, to;
+        cudaMalloc((void**)&d, 64);
+        cudaMemset(d, 0x5A, 64);
+        eg_plane* pi = wrap_device_typed(ctx, &ti, d, 0, kDLFloat, 64);
+        eg_plane* po = wrap_device_typed(ctx, &to, d + 4, 0, kDLFloat, 64);
+        struct eg_scan_desc desc = { sizeof(struct eg_scan_desc), 0, pi, po, EG_SCAN_SUM };
+        unsigned char got[32];
+        const int ok = pi && po && eg_scan(ctx, &desc) == EG_OK && eg_sync(ctx) == EG_OK &&
+                       cudaMemcpy(got, d + 4, sizeof(got), cudaMemcpyDeviceToHost) == cudaSuccess && got[0] == 0x5A && got[31] == 0x5A;
+        check(ok, "eg_scan of an extent of 0 on the device is OK and writes nothing");
+        eg_plane_free(ctx, pi);
+        eg_plane_free(ctx, po);
+        cudaFree(d);
+    }
+    {   /* recorded once, replayed on two inputs: the replays own their working memory and equal the sequential loop */
+        const int64_t n = 100000;
+        static int32_t host_in[100000], host_out[100000];
+        int32_t *din = NULL, *dout = NULL;
+        int ok = cudaMalloc((void**)&din, (size_t)n * 4) == cudaSuccess && cudaMalloc((void**)&dout, (size_t)n * 4) == cudaSuccess;
+        struct tensor ti, to;
+        eg_plane* pi = ok ? wrap_device_typed(ctx, &ti, din, n, kDLInt, 32) : NULL;
+        eg_plane* po = ok ? wrap_device_typed(ctx, &to, dout, n, kDLInt, 32) : NULL;
+        struct eg_scan_desc desc = { sizeof(struct eg_scan_desc), 0, pi, po, EG_SCAN_SUM };
+        eg_graph* g = NULL;
+        ok = ok && pi && po && eg_record_begin(ctx) == EG_OK && eg_scan(ctx, &desc) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK;
+        for (int run = 0; ok && run < 2; ++run) {
+            for (int64_t i = 0; i < n; ++i) host_in[i] = scan_value_i32((uint64_t)(31 + run), i, 0);
+            cudaMemcpy(din, host_in, (size_t)n * 4, cudaMemcpyHostToDevice);
+            cudaMemset(dout, 0x5A, (size_t)n * 4);
+            cudaDeviceSynchronize();
+            ok = eg_graph_launch(ctx, g) == EG_OK && eg_sync(ctx) == EG_OK &&
+                 cudaMemcpy(host_out, dout, (size_t)n * 4, cudaMemcpyDeviceToHost) == cudaSuccess;
+            uint32_t acc = 0;
+            for (int64_t i = 0; ok && i < n; ++i) {
+                acc += (uint32_t)host_in[i];
+                ok = (uint32_t)host_out[i] == acc;
+            }
+        }
+        check(ok, "eg_scan recorded in a device graph and replayed on two inputs equals the sequential loop");
+        if (g) eg_graph_free(ctx, g);
+        eg_plane_free(ctx, pi);
+        eg_plane_free(ctx, po);
+        cudaFree(din);
+        cudaFree(dout);
+    }
+    {   /* a real sum is the same bits on every run */
+        const int64_t n = 3000003;
+        float* host = (float*)malloc((size_t)n * sizeof(float));
+        float *din = NULL, *dout = NULL, *first = (float*)malloc((size_t)n * sizeof(float)), *again = (float*)malloc((size_t)n * sizeof(float));
+        for (int64_t i = 0; i < n; ++i) host[i] = scan_value_f32(5, i, 0);
+        int ok = host && first && again && cudaMalloc((void**)&din, (size_t)n * 4) == cudaSuccess && cudaMalloc((void**)&dout, (size_t)n * 4) == cudaSuccess;
+        ok = ok && cudaMemcpy(din, host, (size_t)n * 4, cudaMemcpyHostToDevice) == cudaSuccess;
+        struct tensor ti, to;
+        eg_plane* pi = ok ? wrap_device_typed(ctx, &ti, din, n, kDLFloat, 32) : NULL;
+        eg_plane* po = ok ? wrap_device_typed(ctx, &to, dout, n, kDLFloat, 32) : NULL;
+        struct eg_scan_desc desc = { sizeof(struct eg_scan_desc), 0, pi, po, EG_SCAN_SUM };
+        int same = 1;
+        for (int run = 0; ok && pi && po && run < 25; ++run) {
+            cudaMemset(dout, 0x5A, (size_t)n * 4);
+            ok = eg_scan(ctx, &desc) == EG_OK && eg_sync(ctx) == EG_OK && cudaMemcpy(run == 0 ? first : again, dout, (size_t)n * 4, cudaMemcpyDeviceToHost) == cudaSuccess;
+            if (run > 0) same = same && memcmp(first, again, (size_t)n * 4) == 0;
+        }
+        check(ok && same, "a float32 sum of 3000003 values on the device is the same bits in 25 runs");
+        eg_plane_free(ctx, pi);
+        eg_plane_free(ctx, po);
+        cudaFree(din);
+        cudaFree(dout);
+        free(host);
+        free(first);
+        free(again);
+    }
+}
+
 int main(int argc, char** argv) {
     if (argc != 3) {
         fprintf(stderr, "usage: %s <libfixture_device.so> <libfixture_unit.so>\n", argv[0]);
@@ -3430,6 +3656,7 @@ int main(int argc, char** argv) {
     copy_across(ctx);
     device_streams(ctx, host);
     device_events(ctx, host);
+    device_scans(ctx);
     struct eg_reduce_desc rd;
     memset(&rd, 0, sizeof(rd));
     rd.struct_size = sizeof(rd);

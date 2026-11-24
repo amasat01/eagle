@@ -614,6 +614,7 @@ void device_close(eg_ctx& ctx) noexcept {
         EG_DRIVER(cuEventDestroy);
         Current current(d);
         for (const auto& e : d.events) cuEventDestroy_(reinterpret_cast<CUevent>(e.second));
+        for (const auto& s : d.scan_state) scan_state_free(s.second.data);
         for (const auto& m : d.made_streams) cuStreamDestroy_(reinterpret_cast<CUstream>(m.second));    // never the caller's streams
         if (d.own_stream != 0) cuStreamDestroy_(reinterpret_cast<CUstream>(d.own_stream));
         EG_DRIVER(cuDevicePrimaryCtxRelease);
@@ -1329,8 +1330,52 @@ void device_reduce(eg_ctx& ctx, const eg_reduce_desc& d) {
     device_reduce_leaf(ctx, host::reduce_check(ctx, d));
 }
 
-/** @brief eg_scan over device planes: not written yet. */
-void device_scan(eg_ctx&, const eg_scan_desc&) { refuse(EG_NOT_WRITTEN, "eg_scan: not written for a device context"); }
+/** @brief The working memory of the eager scans on @p stream, at least @p bytes: kept by the context, grown (never shrunk) when a
+ *  larger scan needs it, after the work queued on the stream has run. */
+void* scan_state_for(eg_ctx& ctx, std::uint64_t stream, std::size_t bytes) {
+    DeviceState::ScanState& have = ctx.dev.scan_state[stream];
+    if (have.bytes < bytes) {
+        const std::size_t want = std::max(bytes, 2 * have.bytes);
+        void* grown = scan_state_make(want);
+        if (have.data != nullptr) {
+            EG_DRIVER(cuStreamSynchronize);
+            check(cuStreamSynchronize_(reinterpret_cast<CUstream>(stream)), "eg_scan: cuStreamSynchronize");
+            scan_state_free(have.data);
+        }
+        have.data = grown;
+        have.bytes = want;
+    }
+    return have.data;
+}
+
+/** @brief eg_scan over device planes: the checks and the node are the host's; the scan is one pass with decoupled look-back
+ *  (device/ScanKernels.cuh) on the stream in scope of the calling thread. In a recording its working memory is a pair of
+ *  graph-owned stream-ordered allocation nodes, so a replay owns its own; eagerly it is the context's. */
+void device_scan(eg_ctx& ctx, const eg_scan_desc& d) {
+    const host::ScanOp s = host::scan_check(ctx, d);
+    const DLDataType& type = s.in->tensor->dl_tensor.dtype;
+    const auto at = [](const eg_plane_s* p) -> void* {
+        return static_cast<char*>(p->tensor->dl_tensor.data) + p->tensor->dl_tensor.byte_offset;
+    };
+    Node leaf;
+    leaf.kind = Node::Scan;
+    leaf.scan = s;
+    note_leaf(ctx, "eg_scan", { { s.in, 0, -1, "in" }, { s.out, 1, -1, "out" } }, std::move(leaf));
+    if (s.n == 0) return;
+    const ScanElement element = type.code == kDLFloat ? (type.bits == 32 ? ScanElement::kFloat32 : ScanElement::kFloat64)
+                              : type.code == kDLInt   ? (type.bits == 32 ? ScanElement::kInt32 : ScanElement::kInt64)
+                                                      : (type.bits == 32 ? ScanElement::kUint32 : ScanElement::kUint64);
+    const std::uint64_t stream = ctx.dev.stream;
+    const std::size_t bytes = scan_state_bytes(type.bits, s.n);
+    Current current(ctx.dev);
+    if (ctx.dev_rec != nullptr) {
+        void* state = alloc_async(stream, bytes, false);
+        scan_step(stream, element, s.op, s.exclusive, at(s.in), at(s.out), s.n, state);
+        free_async(stream, stream, state);
+    } else {
+        scan_step(stream, element, s.op, s.exclusive, at(s.in), at(s.out), s.n, scan_state_for(ctx, stream, bytes));
+    }
+}
 
 /** @brief eg_compact over device planes: not written yet. */
 void device_compact(eg_ctx&, const eg_compact_desc&) { refuse(EG_NOT_WRITTEN, "eg_compact: not written for a device context"); }
@@ -2863,6 +2908,10 @@ void device_stream_free(eg_ctx& ctx, std::uint64_t stream) {
     for (auto& block : ctx.dev.alloc_stream)
         if (block.second == queue) block.second = ctx.dev.own_stream;
     gemm_handle_drop(ctx, queue);
+    if (const auto at = ctx.dev.scan_state.find(queue); at != ctx.dev.scan_state.end()) {
+        scan_state_free(at->second.data);
+        ctx.dev.scan_state.erase(at);
+    }
     if (static_cast<std::uint64_t>(ctx.dev.stream) == queue) ctx.dev.stream = ctx.dev.own_stream;
     check(cuStreamDestroy_(reinterpret_cast<CUstream>(queue)), "eg_stream_free: cuStreamDestroy");
     ctx.dev.made_streams.erase(stream);

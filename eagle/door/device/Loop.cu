@@ -6,6 +6,7 @@
 // instantiated once and launched per run, as the old path's band loop
 // (``repeat_while`` under ``GraphPipeline.build``).
 #include "eagle/door/device/Loop.h"
+#include "eagle/door/device/ScanKernels.cuh"
 
 #include "eagle/cuda/CaptureAttribution.h"
 #include "eagle/cuda/CaptureConditional.h"
@@ -275,6 +276,48 @@ void reduce_op(cudaStream_t s, int op, const void* in, std::int64_t n, std::int6
 }
 
 }  // namespace
+
+namespace {
+
+template <class T>
+void scan_by_fold(cudaStream_t s, int fold, const void* in, void* out, std::int64_t n, bool exclusive, void* state) {
+    const T* src = static_cast<const T*>(in);
+    T* dst = static_cast<T*>(out);
+    switch (fold) {
+        case scan::kSum: scan::scan_queue<T, scan::kSum>(s, src, dst, n, exclusive, state); break;
+        case scan::kMin: scan::scan_queue<T, scan::kMin>(s, src, dst, n, exclusive, state); break;
+        default: scan::scan_queue<T, scan::kMax>(s, src, dst, n, exclusive, state);
+    }
+}
+
+}  // namespace
+
+std::size_t scan_state_bytes(unsigned bits, std::int64_t n) {
+    return bits == 64 ? scan::state_bytes<double>(n) : scan::state_bytes<float>(n);
+}
+
+void* scan_state_make(std::size_t bytes) {
+    void* state = nullptr;
+    EAGLE_CHECK_ALWAYS(cudaMalloc(&state, bytes));
+    return state;
+}
+
+void scan_state_free(void* state) noexcept {
+    if (state != nullptr) (void)cudaFree(state);
+}
+
+void scan_step(std::uint64_t stream, ScanElement type, int fold, bool exclusive, const void* in, void* out, std::int64_t n, void* state) {
+    const auto s = reinterpret_cast<cudaStream_t>(stream);
+    switch (type) {
+        case ScanElement::kInt32: scan_by_fold<std::int32_t>(s, fold, in, out, n, exclusive, state); break;
+        case ScanElement::kInt64: scan_by_fold<std::int64_t>(s, fold, in, out, n, exclusive, state); break;
+        case ScanElement::kUint32: scan_by_fold<std::uint32_t>(s, fold, in, out, n, exclusive, state); break;
+        case ScanElement::kUint64: scan_by_fold<std::uint64_t>(s, fold, in, out, n, exclusive, state); break;
+        case ScanElement::kFloat32: scan_by_fold<float>(s, fold, in, out, n, exclusive, state); break;
+        default: scan_by_fold<double>(s, fold, in, out, n, exclusive, state);
+    }
+    EAGLE_CHECK_ALWAYS(cudaGetLastError());
+}
 
 void reduce_step(std::uint64_t stream, int code, int op, const void* in, std::int64_t n, std::int64_t cols, void* out, void* comp,
                  bool pair) {

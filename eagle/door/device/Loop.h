@@ -128,6 +128,21 @@ void reset_step(std::uint64_t stream, std::int32_t* perm, std::int32_t* inv, std
 void reduce_step(std::uint64_t stream, int code, int op, const void* in, std::int64_t n, std::int64_t cols, void* out, void* comp,
                  bool pair);
 
+/** @brief The element types of a device scan. */
+enum class ScanElement { kInt32, kInt64, kUint32, kUint64, kFloat32, kFloat64 };
+
+/** @brief The bytes of working memory a device scan of @p n values of the width @p bits (32 or 64) needs; a scan clears it itself. */
+std::size_t scan_state_bytes(unsigned bits, std::int64_t n);
+/** @brief Device memory of @p bytes for the working memory of scans (NOT stream-ordered: never inside a capture). */
+void* scan_state_make(std::size_t bytes);
+/** @brief Free scan working memory (NULL-safe): waits for the device. */
+void scan_state_free(void* state) noexcept;
+
+/** @brief Queue on @p stream the scan of the @p n (above 0) values of @p in into @p out (distinct): ``out[i]`` folds ``in[0..i]``
+ *  (``in[0..i-1]`` when @p exclusive) with @p fold (0 sum, 1 minimum, 2 maximum) from its identity; @p state is
+ *  ``scan_state_bytes`` of working memory, cleared here. Nothing waits. A real sum has the same bits on every run. */
+void scan_step(std::uint64_t stream, ScanElement type, int fold, bool exclusive, const void* in, void* out, std::int64_t n, void* state);
+
 /** @brief Queue on @p stream a device-to-device copy of @p bytes. */
 void copy_step(std::uint64_t stream, void* dst, const void* src, std::size_t bytes);
 
