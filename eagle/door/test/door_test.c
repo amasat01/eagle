@@ -5322,9 +5322,11 @@ static void check_scan(eg_ctx* ctx) {
     diff.flags = EG_RECORD_DIFF;
     g = NULL;
     ok = eg_record_begin(ctx) == EG_OK && scan_do(ctx, px, pm, EG_SCAN_SUM, 0) == EG_OK;
-    check(ok && eg_record_end(ctx, &diff, &g) == EG_NOT_WRITTEN && reason_has(ctx, "eg_scan") && reason_has(ctx, "does not pull back a scan yet") && g == NULL,
-          "eg_scan in a DIFF recording: NOT_WRITTEN by name (its reverse is not written)");
-    eg_record_abort(ctx);
+    check(ok && eg_record_end(ctx, &diff, &g) == EG_OK && g != NULL,
+        "eg_scan in a DIFF recording: accepted (its reverse is the suffix scan "
+        "of the adjoint, values in the reverse rows below)");
+    if (g)
+        eg_graph_free(ctx, g);
 
     eg_plane_free(ctx, p2);
     eg_plane_free(ctx, pl);
@@ -5462,9 +5464,11 @@ static void check_compact(eg_ctx* ctx) {
     diff.flags = EG_RECORD_DIFF;
     g = NULL;
     ok = eg_record_begin(ctx) == EG_OK && compact_do(ctx, pm, p2, pc) == EG_OK;
-    check(ok && eg_record_end(ctx, &diff, &g) == EG_NOT_WRITTEN && reason_has(ctx, "eg_compact") && reason_has(ctx, "does not pull back a compaction yet") && g == NULL,
-          "eg_compact in a DIFF recording: NOT_WRITTEN by name (its reverse is not written)");
-    eg_record_abort(ctx);
+    check(ok && eg_record_end(ctx, &diff, &g) == EG_OK && g != NULL,
+        "eg_compact in a DIFF recording: accepted as an integer leaf (kept and "
+        "count carry no adjoint)");
+    if (g)
+        eg_graph_free(ctx, g);
     eg_plane_free(ctx, psrc);
     eg_plane_free(ctx, pout);
     eg_plane_free(ctx, p2d);
@@ -5748,12 +5752,11 @@ static void check_order(eg_ctx* ctx)
     g                = NULL;
     ok               = eg_record_begin(ctx) == EG_OK
         && order_do(ctx, pk, po, ps, 3, 0) == EG_OK;
-    check(ok && eg_record_end(ctx, &diff, &g) == EG_NOT_WRITTEN
-            && reason_has(ctx, "eg_order_by_key")
-            && reason_has(ctx, "does not pull back a sort yet") && g == NULL,
-        "eg_order_by_key in a DIFF recording: NOT_WRITTEN by name (an integer "
-        "result; its reverse is not written)");
-    eg_record_abort(ctx);
+    check(ok && eg_record_end(ctx, &diff, &g) == EG_OK && g != NULL,
+        "eg_order_by_key in a DIFF recording: accepted as an integer leaf "
+        "(order and starts carry no adjoint)");
+    if (g)
+        eg_graph_free(ctx, g);
 
     eg_plane_free(ctx, pk);
     eg_plane_free(ctx, po);
@@ -5764,6 +5767,640 @@ static void check_order(eg_ctx* ctx)
     eg_plane_free(ctx, pover);
     eg_plane_free(ctx, pwide);
     eg_plane_free(ctx, p2d);
+}
+
+/* ---- eg_reorder
+ * ----------------------------------------------------------- */
+
+enum { REORDER_MAX_N = 100000, REORDER_MAX_PLANES = 65 };
+
+static eg_status reorder_do(eg_ctx* ctx, eg_plane* const* planes,
+    uint32_t n_planes, eg_plane* order, uint32_t flags)
+{
+    struct eg_reorder_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.flags       = flags;
+    d.n_planes    = n_planes;
+    d.planes      = planes;
+    d.order       = order;
+    return eg_reorder(ctx, &d);
+}
+
+typedef struct {
+    uint8_t code, bits;
+    int rows; /* 1: a scalar value; more: a vector value, (rows, n) samples-last
+               */
+} reorder_type;
+
+/* the four integer types a plane carries (int8, int32, uint32, int64), float32
+ * and float64, then vector values of three float64 and of four int8 (the
+ * widest element a plane carries is 8 bytes) */
+static const reorder_type reorder_types[]
+    = { { kDLInt, 8, 1 }, { kDLInt, 32, 1 }, { kDLUInt, 32, 1 },
+          { kDLInt, 64, 1 }, { kDLFloat, 32, 1 }, { kDLFloat, 64, 1 },
+          { kDLFloat, 64, 3 }, { kDLInt, 8, 4 } };
+
+/* A plane over `data`: n lanes, or (rows, n) when the value is a vector. */
+static eg_plane* wrap_rows(eg_ctx* ctx, struct tensor* t, void* data, int64_t n,
+    uint8_t code, uint8_t bits, int rows)
+{
+    eg_plane* p = NULL;
+    tensor_init(t, data, n, bits);
+    tensor_as(t, code, bits);
+    if (rows > 1)
+        tensor_2d(t, rows, n);
+    return eg_plane_wrap(ctx, &t->managed, &p) == EG_OK ? p : NULL;
+}
+
+enum { ORDER_IDENTITY, ORDER_REVERSE, ORDER_SORTED, ORDER_KINDS };
+
+/* The order: the identity, the reverse, or the output of a sort by key (so a
+ * real permutation with ties kept in lane order), written into `order`. */
+static int reorder_fill_order(
+    eg_ctx* ctx, int32_t* order, int n, int kind, uint64_t seed)
+{
+    if (kind == ORDER_IDENTITY || kind == ORDER_REVERSE) {
+        for (int i = 0; i < n; ++i)
+            order[i] = kind == ORDER_IDENTITY ? i : n - 1 - i;
+        return 1;
+    }
+    static int64_t key[REORDER_MAX_N];
+    static int32_t keys32[REORDER_MAX_N];
+    static uint32_t starts[301];
+    order_keys(key, n, 300, 0, seed);
+    for (int i = 0; i < n; ++i)
+        keys32[i] = (int32_t)key[i];
+    struct tensor tk, to, ts;
+    eg_plane* pk = wrap(ctx, &tk, keys32, n, kDLInt, 32);
+    eg_plane* po = wrap(ctx, &to, order, n, kDLInt, 32);
+    eg_plane* ps = wrap(ctx, &ts, starts, 301, kDLUInt, 32);
+    int ok       = pk && po && ps && order_do(ctx, pk, po, ps, 300, 0) == EG_OK;
+    eg_plane_free(ctx, pk);
+    eg_plane_free(ctx, po);
+    eg_plane_free(ctx, ps);
+    return ok;
+}
+
+/* n_planes planes of one type reordered by one order: every output element
+ * equals `out[j] = in[order[j]]` of the loop written here, with 1, 4 and the
+ * default number of threads. */
+static int reorder_case_ok(eg_ctx* ctx, int n_planes, reorder_type type, int n,
+    int kind, uint64_t seed)
+{
+    const size_t elem  = (size_t)(type.bits / 8),
+                 bytes = (size_t)n * elem * (size_t)type.rows;
+    static int32_t order[REORDER_MAX_N];
+    static uint32_t uorder[REORDER_MAX_N];
+    static struct tensor tensors[REORDER_MAX_PLANES];
+    static eg_plane* planes[REORDER_MAX_PLANES];
+    char *in[REORDER_MAX_PLANES], *want[REORDER_MAX_PLANES],
+        *got[REORDER_MAX_PLANES];
+    int ok = reorder_fill_order(ctx, order, n, kind, seed);
+    memcpy(uorder, order, (size_t)n * sizeof(int32_t));
+    for (int p = 0; p < n_planes; ++p) {
+        in[p]   = malloc(bytes + 1);
+        want[p] = malloc(bytes + 1);
+        got[p]  = malloc(bytes + 1);
+        for (size_t b = 0; b < bytes; ++b)
+            in[p][b] = (char)((b * 131 + (size_t)p * 17 + seed) >> 3);
+        for (int r = 0; r < type.rows; ++r)
+            for (int j = 0; j < n; ++j)
+                memcpy(want[p] + ((size_t)r * n + (size_t)j) * elem,
+                    in[p] + ((size_t)r * n + (size_t)order[j]) * elem, elem);
+        planes[p] = wrap_rows(
+            ctx, &tensors[p], got[p], n, type.code, type.bits, type.rows);
+        ok = ok && planes[p];
+    }
+    /* the order is an int32 plane, and (identity of the bytes) a uint32 plane
+     * gives the same result */
+    struct tensor to, tu;
+    eg_plane* po               = wrap(ctx, &to, order, n, kDLInt, 32);
+    eg_plane* pu               = wrap(ctx, &tu, uorder, n, kDLUInt, 32);
+    ok                         = ok && po && pu;
+    static const int threads[] = { 1, 4, 0 };
+    for (size_t t = 0; ok && t < sizeof(threads) / sizeof(threads[0]); ++t) {
+        eg_host_threads(ctx, threads[t]);
+        for (int p = 0; p < n_planes; ++p)
+            memcpy(got[p], in[p], bytes);
+        ok = reorder_do(ctx, planes, (uint32_t)n_planes, t == 2 ? pu : po, 0)
+            == EG_OK;
+        for (int p = 0; ok && p < n_planes; ++p)
+            ok = memcmp(got[p], want[p], bytes) == 0;
+    }
+    eg_host_threads(ctx, 0);
+    for (int p = 0; p < n_planes; ++p) {
+        eg_plane_free(ctx, planes[p]);
+        free(in[p]);
+        free(want[p]);
+        free(got[p]);
+    }
+    eg_plane_free(ctx, po);
+    eg_plane_free(ctx, pu);
+    return ok;
+}
+
+static void check_reorder(eg_ctx* ctx)
+{
+    static const int sizes[] = { 0, 1, 255, 256, 257, REORDER_MAX_N };
+    static const int few[]   = { 1, 3 };
+    int ok                   = 1;
+    for (size_t f = 0; ok && f < 2; ++f)
+        for (size_t s = 0; ok && s < sizeof(sizes) / sizeof(sizes[0]); ++s)
+            for (size_t t = 0;
+                ok && t < sizeof(reorder_types) / sizeof(reorder_types[0]); ++t)
+                for (int k = 0; ok && k < ORDER_KINDS; ++k)
+                    ok = reorder_case_ok(
+                        ctx, few[f], reorder_types[t], sizes[s], k, 5 + s);
+    check(ok,
+        "eg_reorder: 1 and 3 planes of int8, int32, uint32, int64, float32, "
+        "float64, a vector of three float64 and a vector of four int8 over "
+        "0, 1, 255, 256, 257 and 100000 lanes, by the identity, the reverse "
+        "and a sort's output, equal out[j] = in[order[j]] with 1, 4 and the "
+        "default number of threads (an int32 and a uint32 order)");
+
+    ok = 1;
+    for (size_t s = 0; ok && s < 5; ++s)
+        for (size_t t = 0;
+            ok && t < sizeof(reorder_types) / sizeof(reorder_types[0]); ++t)
+            for (int k = 0; ok && k < ORDER_KINDS; ++k)
+                ok = reorder_case_ok(
+                    ctx, 64, reorder_types[t], sizes[s], k, 9 + s);
+    ok = ok
+        && reorder_case_ok(
+            ctx, 64, reorder_types[1], REORDER_MAX_N, ORDER_SORTED, 3)
+        && reorder_case_ok(ctx, 65, reorder_types[5], 1000, ORDER_REVERSE, 4);
+    check(ok,
+        "eg_reorder: 64 planes of every type over 0, 1, 255, 256 and 257 "
+        "lanes and of int32 over 100000, and 65 planes of float64: the same "
+        "result (the runtime's group of 64 planes is not a limit of the call)");
+
+    /* the refusals by name; after each the planes are byte-identical */
+    static int32_t src[16], other[16], obuf[16], wbuf[8];
+    static double dbuf[16];
+    static int32_t keep0[16], keep1[16];
+    for (int i = 0; i < 16; ++i) {
+        src[i]   = 100 + i;
+        other[i] = 200 + i;
+        obuf[i]  = 15 - i;
+        keep0[i] = src[i];
+        keep1[i] = other[i];
+    }
+    struct tensor ta, tb, to, tshort, tf, t2d, tov, tcell;
+    eg_plane* pa     = wrap(ctx, &ta, src, 16, kDLInt, 32);
+    eg_plane* pb     = wrap(ctx, &tb, other, 16, kDLInt, 32);
+    eg_plane* po     = wrap(ctx, &to, obuf, 16, kDLInt, 32);
+    eg_plane* pshort = wrap(ctx, &tshort, wbuf, 8, kDLInt, 32);
+    eg_plane* pf     = wrap(ctx, &tf, dbuf, 16, kDLFloat, 64);
+    eg_plane* pover  = wrap(ctx, &tov, src + 4, 8, kDLInt, 32);
+    eg_plane* pcell  = wrap(ctx, &tcell, src, 1, kDLInt, 32);
+    if (pcell)
+        tcell.managed.dl_tensor.ndim = 0;
+    tensor_init(&t2d, src, 4, 32);
+    tensor_as(&t2d, kDLInt, 32);
+    tensor_2d(&t2d, 4, 4);
+    eg_plane* p2d = NULL;
+    eg_plane_wrap(ctx, &t2d.managed, &p2d);
+    eg_plane* two[2] = { pa, pb };
+    eg_plane* one[1] = { pa };
+#define UNTOUCHED                                                              \
+    (memcmp(src, keep0, sizeof(src)) == 0                                      \
+        && memcmp(other, keep1, sizeof(other)) == 0)
+    ok = pa && pb && po && pshort && pf && pcell && pover && p2d;
+    check(ok && reorder_do(ctx, one, 1, po, 0) == EG_OK && src[0] == 115
+            && src[15] == 100,
+        "eg_reorder: the reverse order of 16 lanes, one plane");
+    memcpy(src, keep0, sizeof(src));
+
+    check(reorder_do(ctx, one, 0, po, 0) == EG_BAD_REQUEST
+            && reason_has(ctx, "n_planes is 0")
+            && reorder_do(ctx, NULL, 1, po, 0) == EG_BAD_REQUEST && UNTOUCHED,
+        "eg_reorder with no planes or a NULL table: BAD_REQUEST by name");
+    check(reorder_do(ctx, one, 1, po, 2) == EG_BAD_REQUEST
+            && reorder_do(ctx, one, 1, NULL, 0) == EG_BAD_REQUEST
+            && eg_reorder(ctx, NULL) == EG_BAD_REQUEST && UNTOUCHED,
+        "eg_reorder with unknown flag bits, a NULL order or a NULL descriptor: "
+        "BAD_REQUEST");
+    eg_plane* with_null[2] = { pa, NULL };
+    check(reorder_do(ctx, with_null, 2, po, 0) == EG_BAD_REQUEST && UNTOUCHED,
+        "eg_reorder with a NULL plane among the planes: BAD_REQUEST");
+    check(reorder_do(ctx, one, 1, pf, 0) == EG_BAD_REQUEST
+            && reason_has(ctx, "order must be an int32 or uint32 plane")
+            && reorder_do(ctx, one, 1, p2d, 0) == EG_BAD_REQUEST
+            && reason_has(ctx, "run-time axes") && UNTOUCHED,
+        "eg_reorder with an order that is not an Index plane: BAD_REQUEST by "
+        "name");
+    check(reorder_do(ctx, one, 1, pshort, 0) == EG_BAD_REQUEST
+            && reason_has(ctx, "plane 0 has 16 lanes, order has 8")
+            && UNTOUCHED,
+        "eg_reorder with an order of another extent than the planes: "
+        "BAD_REQUEST by name");
+    eg_plane* mixed[2] = { pa, pshort };
+    check(reorder_do(ctx, mixed, 2, po, 0) == EG_BAD_REQUEST
+            && reason_has(ctx, "plane 1 has 8 lanes, order has 16")
+            && UNTOUCHED,
+        "eg_reorder with planes of differing lane extents: BAD_REQUEST by "
+        "name");
+    eg_plane* cell_one[1] = { pcell };
+    check(pcell && reorder_do(ctx, cell_one, 1, po, 0) == EG_BAD_REQUEST
+            && reason_has(ctx, "plane 0 is a cell") && UNTOUCHED,
+        "eg_reorder with a plane that has no lane axis: BAD_REQUEST by name");
+    eg_plane* same[2] = { pa, pa };
+    check(reorder_do(ctx, same, 2, po, 0) == EG_BAD_REQUEST
+            && reason_has(ctx, "overlap; the planes must be distinct")
+            && UNTOUCHED,
+        "eg_reorder with one plane twice: BAD_REQUEST (distinct planes)");
+    eg_plane* inside[1] = { pover };
+    struct tensor tin;
+    eg_plane* inside_order = wrap(ctx, &tin, src, 8, kDLInt, 32);
+    check(inside_order
+            && reorder_do(ctx, inside, 1, inside_order, 0) == EG_BAD_REQUEST
+            && reason_has(ctx, "overlaps order") && UNTOUCHED,
+        "eg_reorder with a plane inside the order: BAD_REQUEST (distinct)");
+    eg_plane_free(ctx, inside_order);
+    eg_plane* flat[1] = { p2d };
+    check(reorder_do(ctx, flat, 1, po, 0) == EG_BAD_REQUEST
+            && reason_has(ctx, "plane 0 has 4 lanes, order has 16")
+            && UNTOUCHED,
+        "eg_reorder with a (4, 4) plane against an order of 16: BAD_REQUEST "
+        "naming the lane extent");
+
+    /* an entry outside [0, n) is counted in one pass and nothing moves */
+    obuf[3] = 16;
+    obuf[9] = -1;
+    check(reorder_do(ctx, two, 2, po, 0) == EG_BAD_REQUEST
+            && reason_has(
+                ctx, "reorder: 2 entries of order are outside [0, 16)")
+            && UNTOUCHED,
+        "eg_reorder with entries outside [0, n): BAD_REQUEST with the count "
+        "in the text, the planes untouched");
+    for (int i = 0; i < 16; ++i)
+        obuf[i] = 15 - i;
+
+    /* recorded, described and replayed over a changed order */
+    eg_graph* g = NULL;
+    struct eg_graph_description d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    ok            = eg_record_begin(ctx) == EG_OK
+        && reorder_do(ctx, two, 2, po, 0) == EG_OK
+        && eg_record_end(ctx, NULL, &g) == EG_OK
+        && eg_graph_describe(ctx, g, &d) == EG_OK && d.n_nodes == 1
+        && d.nodes[0].kind == EG_GNODE_REORDER && d.nodes[0].n_planes == 3
+        && d.nodes[0].planes[0] == pa && d.nodes[0].access[0] == 3
+        && d.nodes[0].planes[1] == pb && d.nodes[0].access[1] == 3
+        && d.nodes[0].planes[2] == po && d.nodes[0].access[2] == 1;
+    ok = ok && UNTOUCHED; /* recording moves nothing */
+    for (int i = 0; i < 16; ++i)
+        obuf[i] = (i + 1) % 16;
+    ok = ok && eg_graph_launch(ctx, g) == EG_OK;
+    for (int j = 0; ok && j < 16; ++j)
+        ok = src[j] == keep0[(j + 1) % 16] && other[j] == keep1[(j + 1) % 16];
+    obuf[5] = 99;
+    memcpy(src, keep0, sizeof(src));
+    memcpy(other, keep1, sizeof(other));
+    ok = ok && eg_graph_launch(ctx, g) == EG_BAD_REQUEST
+        && reason_has(ctx, "reorder: 1 entries of order are outside [0, 16)")
+        && UNTOUCHED;
+    check(ok,
+        "eg_reorder recorded: one EG_GNODE_REORDER node reading order and "
+        "reading and writing the planes; a replay reads the order as it is "
+        "then, and an entry outside [0, n) at the replay fails with the count "
+        "and moves nothing");
+    eg_graph_free(ctx, g);
+
+    struct eg_record_end_desc diff;
+    memset(&diff, 0, sizeof(diff));
+    diff.struct_size = sizeof(diff);
+    diff.flags       = EG_RECORD_DIFF;
+    g                = NULL;
+    for (int i = 0; i < 16; ++i)
+        obuf[i] = 15 - i;
+    ok = eg_record_begin(ctx) == EG_OK
+        && reorder_do(ctx, two, 2, po, 0) == EG_OK;
+    check(ok && eg_record_end(ctx, &diff, &g) == EG_OK && g != NULL,
+        "eg_reorder in a DIFF recording: accepted (its reverse is the scatter "
+        "through the order, values in the reverse rows below)");
+    if (g)
+        eg_graph_free(ctx, g);
+
+    eg_plane* gone[] = { pa, pb, po, pshort, pf, pcell, pover, p2d };
+    for (size_t i = 0; i < sizeof(gone) / sizeof(gone[0]); ++i)
+        eg_plane_free(ctx, gone[i]);
+#undef UNTOUCHED
+}
+
+/* ---- the reverse of eg_reorder
+ * ---------------------------------------------------------- */
+
+/* Real values from a seed, stored as float32 or float64. */
+static void fill_real(void* p, size_t count, uint8_t bits, uint64_t seed)
+{
+    uint64_t state = seed * 6364136223846793005ull + 1442695040888963407ull;
+    for (size_t i = 0; i < count; ++i) {
+        state = state * 6364136223846793005ull + 1442695040888963407ull;
+        const double v = (double)(int64_t)(state >> 40) / 1024.0;
+        if (bits == 64)
+            ((double*)p)[i] = v;
+        else
+            ((float*)p)[i] = (float)v;
+    }
+}
+
+/* A DIFF recording of whatever `record` calls, ended into a graph, launched
+ * once. */
+static eg_graph* diff_graph(
+    eg_ctx* ctx, int (*record)(eg_ctx*, void*), void* arg)
+{
+    struct eg_record_end_desc diff;
+    memset(&diff, 0, sizeof(diff));
+    diff.struct_size = sizeof(diff);
+    diff.flags       = EG_RECORD_DIFF;
+    eg_graph* g      = NULL;
+    if (eg_record_begin(ctx) != EG_OK)
+        return NULL;
+    if (!record(ctx, arg)) {
+        eg_record_abort(ctx);
+        return NULL;
+    }
+    if (eg_record_end(ctx, &diff, &g) != EG_OK
+        || eg_graph_launch(ctx, g) != EG_OK) {
+        if (g)
+            eg_graph_free(ctx, g);
+        return NULL;
+    }
+    return g;
+}
+
+/* The reverse of g with the given outputs, seeds, inputs and grads. */
+static eg_status reverse_do(eg_ctx* ctx, eg_graph* g, eg_plane* const* outputs,
+    eg_plane* const* seeds, int n_out, eg_plane* const* inputs,
+    eg_plane* const* grads, int n_in)
+{
+    struct eg_graph_reverse_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.n_seeds     = n_out;
+    d.outputs     = outputs;
+    d.seeds       = seeds;
+    d.n_grads     = n_in;
+    d.inputs      = inputs;
+    d.grads       = grads;
+    return eg_graph_reverse(ctx, g, &d);
+}
+
+typedef struct {
+    eg_plane* const* planes;
+    uint32_t n_planes;
+    eg_plane* order;
+} reorder_record;
+
+static int record_reorder(eg_ctx* ctx, void* arg)
+{
+    const reorder_record* r = arg;
+    return reorder_do(ctx, r->planes, r->n_planes, r->order, 0) == EG_OK;
+}
+
+/* n_planes real planes of `rows` rows and one int32 plane (it carries no
+ * adjoint) reordered by `kind`; the reverse scatters every seed through the
+ * order: grad[r][order[j]] = seed[r][j], a loop written here. */
+static int reorder_reverse_case(eg_ctx* ctx, int n_planes, int rows,
+    uint8_t bits, int n, int kind, uint64_t seed)
+{
+    const size_t es = bits / 8, elems = (size_t)rows * n;
+    static int32_t order[REORDER_MAX_N], ints[REORDER_MAX_N];
+    static struct tensor tp[5], tseed[4], tgrad[4], tint, to;
+    void *data[4], *seeds[4], *grads[4], *want[4];
+    eg_plane *planes[5], *pseed[4], *pgrad[4];
+    int ok = reorder_fill_order(ctx, order, n, kind, seed);
+    for (int k = 0; k < n_planes; ++k) {
+        data[k]  = malloc(elems * es + 1);
+        seeds[k] = malloc(elems * es + 1);
+        grads[k] = malloc(elems * es + 1);
+        want[k]  = malloc(elems * es + 1);
+        fill_real(data[k], elems, bits, seed + 1 + (uint64_t)k);
+        fill_real(seeds[k], elems, bits, seed + 50 + (uint64_t)k);
+        for (size_t r = 0; r < (size_t)rows; ++r)
+            for (int j = 0; j < n; ++j)
+                memcpy((char*)want[k] + (r * n + (size_t)order[j]) * es,
+                    (char*)seeds[k] + (r * n + (size_t)j) * es, es);
+        planes[k] = wrap_rows(ctx, &tp[k], data[k], n, kDLFloat, bits, rows);
+        pseed[k] = wrap_rows(ctx, &tseed[k], seeds[k], n, kDLFloat, bits, rows);
+        pgrad[k] = wrap_rows(ctx, &tgrad[k], grads[k], n, kDLFloat, bits, rows);
+        ok       = ok && planes[k] && pseed[k] && pgrad[k];
+    }
+    for (int i = 0; i < n; ++i)
+        ints[i] = i;
+    planes[n_planes]   = wrap(ctx, &tint, ints, n, kDLInt, 32);
+    eg_plane* po       = wrap(ctx, &to, order, n, kDLInt, 32);
+    ok                 = ok && planes[n_planes] && po;
+    reorder_record rec = { planes, (uint32_t)n_planes + 1, po };
+    eg_graph* g        = ok ? diff_graph(ctx, record_reorder, &rec) : NULL;
+    ok                 = ok && g;
+    static const int threads[] = { 1, 4, 0 };
+    for (size_t t = 0; ok && t < 3; ++t) {
+        eg_host_threads(ctx, threads[t]);
+        for (int k = 0; k < n_planes; ++k)
+            memset(grads[k], 0x55, elems * es);
+        ok = reverse_do(
+                 ctx, g, planes, pseed, n_planes, planes, pgrad, n_planes)
+            == EG_OK;
+        for (int k = 0; ok && k < n_planes; ++k)
+            ok = memcmp(grads[k], want[k], elems * es) == 0;
+    }
+    eg_host_threads(ctx, 0);
+    if (g)
+        eg_graph_free(ctx, g);
+    for (int k = 0; k < n_planes; ++k) {
+        eg_plane_free(ctx, planes[k]);
+        eg_plane_free(ctx, pseed[k]);
+        eg_plane_free(ctx, pgrad[k]);
+        free(data[k]);
+        free(seeds[k]);
+        free(grads[k]);
+        free(want[k]);
+    }
+    eg_plane_free(ctx, planes[n_planes]);
+    eg_plane_free(ctx, po);
+    return ok;
+}
+
+static void check_reverse_reorder(eg_ctx* ctx)
+{
+    static const int sizes[] = { 0, 1, 257, REORDER_MAX_N };
+    int ok                   = 1;
+    for (size_t s = 0; ok && s < 4; ++s)
+        for (int bits = 32; ok && bits <= 64; bits += 32)
+            for (int kind = 0; ok && kind < ORDER_KINDS; ++kind)
+                ok = reorder_reverse_case(
+                         ctx, 1, 1, (uint8_t)bits, sizes[s], kind, 3 + s)
+                    && reorder_reverse_case(
+                        ctx, 3, 1, (uint8_t)bits, sizes[s], kind, 8 + s)
+                    && reorder_reverse_case(
+                        ctx, 2, 3, (uint8_t)bits, sizes[s], kind, 13 + s);
+    check(ok,
+        "eg_reorder reverse: the seeds of 1 and 3 planes, and of 2 planes of "
+        "three rows, scatter through the order (the inverse permutation) "
+        "equal a loop, float32 and float64, over 0, 1, 257 and 100000 lanes "
+        "by the identity, the reverse and a sort's output, with 1, 4 and the "
+        "default number of threads; an int32 plane moved beside them carries "
+        "none");
+}
+
+/* ---- the reverse of eg_scan
+ * ---------------------------------------------------------- */
+
+/* Multiples of 1/8 in [-4, 4) with `distinct` different values: every sum below
+ * is exact in float32 and float64, so the sums equal a left-to-right loop in
+ * any grouping. */
+static void fill_small(
+    void* p, size_t count, uint8_t bits, int distinct, uint64_t seed)
+{
+    uint64_t state = seed * 6364136223846793005ull + 1442695040888963407ull;
+    for (size_t i = 0; i < count; ++i) {
+        state = state * 6364136223846793005ull + 1442695040888963407ull;
+        const double v
+            = (double)((int)((state >> 40) % (uint64_t)distinct) - distinct / 2)
+            / 8.0;
+        if (bits == 64)
+            ((double*)p)[i] = v;
+        else
+            ((float*)p)[i] = (float)v;
+    }
+}
+
+static double real_at(const void* p, size_t i, uint8_t bits)
+{
+    return bits == 64 ? ((const double*)p)[i] : (double)((const float*)p)[i];
+}
+
+static void real_put(void* p, size_t i, uint8_t bits, double v)
+{
+    if (bits == 64)
+        ((double*)p)[i] = v;
+    else
+        ((float*)p)[i] = (float)v;
+}
+
+typedef struct {
+    eg_plane *x, *y;
+    eg_scan_op op;
+    uint32_t flags;
+} scan_record;
+
+static int record_scan(eg_ctx* ctx, void* arg)
+{
+    const scan_record* r = arg;
+    return scan_do(ctx, r->x, r->y, r->op, r->flags) == EG_OK;
+}
+
+/* The loop the transpose of a scan is checked against: a sum gives in[i] the
+ * sum of dy over the outputs that fold it; a minimum or maximum gives the dy of
+ * out[k] to the running winner of k (the lowest lane among equals), summed in
+ * lane order. */
+static void scan_want(const void* x, const void* dy, void* want, size_t n,
+    uint8_t bits, eg_scan_op op, int exclusive)
+{
+    for (size_t i = 0; i < n; ++i)
+        real_put(want, i, bits, 0.0);
+    if (op == EG_SCAN_SUM) {
+        double run = 0.0;
+        for (size_t i = n; i-- > 0;) {
+            if (exclusive) {
+                real_put(want, i, bits, run);
+                run += real_at(dy, i, bits);
+            } else {
+                run += real_at(dy, i, bits);
+                real_put(want, i, bits, run);
+            }
+        }
+        return;
+    }
+    long win = -1;
+    for (size_t i = 0; i < n; ++i) {
+        if (exclusive && win >= 0)
+            real_put(want, (size_t)win, bits,
+                real_at(want, (size_t)win, bits) + real_at(dy, i, bits));
+        const double v    = real_at(x, i, bits);
+        const double best = win >= 0 ? real_at(x, (size_t)win, bits) : 0.0;
+        if (win < 0 || (op == EG_SCAN_MIN ? v < best : v > best))
+            win = (long)i;
+        if (!exclusive)
+            real_put(want, (size_t)win, bits,
+                real_at(want, (size_t)win, bits) + real_at(dy, i, bits));
+    }
+}
+
+static int scan_reverse_case(eg_ctx* ctx, uint8_t bits, int n, eg_scan_op op,
+    int exclusive, uint64_t seed)
+{
+    const size_t es = bits / 8;
+    void* x         = malloc((size_t)n * es + 1);
+    void* y         = malloc((size_t)n * es + 1);
+    void* dy        = malloc((size_t)n * es + 1);
+    void* grad      = malloc((size_t)n * es + 1);
+    void* want      = malloc((size_t)n * es + 1);
+    struct tensor tx, ty, td, tg;
+    fill_small(x, (size_t)n, bits, op == EG_SCAN_SUM ? 64 : 8, seed);
+    fill_small(dy, (size_t)n, bits, 64, seed + 7);
+    scan_want(x, dy, want, (size_t)n, bits, op, exclusive);
+    eg_plane* px    = wrap(ctx, &tx, x, n, kDLFloat, bits);
+    eg_plane* py    = wrap(ctx, &ty, y, n, kDLFloat, bits);
+    eg_plane* pd    = wrap(ctx, &td, dy, n, kDLFloat, bits);
+    eg_plane* pg    = wrap(ctx, &tg, grad, n, kDLFloat, bits);
+    scan_record rec = { px, py, op, exclusive ? EG_SCAN_EXCLUSIVE : 0 };
+    eg_graph* g
+        = px && py && pd && pg ? diff_graph(ctx, record_scan, &rec) : NULL;
+    int ok                     = g != NULL;
+    static const int threads[] = { 1, 4, 0 };
+    for (size_t t = 0; ok && t < 3; ++t) {
+        eg_host_threads(ctx, threads[t]);
+        memset(grad, 0x55, (size_t)n * es);
+        ok = reverse_do(ctx, g, &py, &pd, 1, &px, &pg, 1) == EG_OK
+            && memcmp(grad, want, (size_t)n * es) == 0;
+    }
+    eg_host_threads(ctx, 0);
+    if (g)
+        eg_graph_free(ctx, g);
+    eg_plane_free(ctx, px);
+    eg_plane_free(ctx, py);
+    eg_plane_free(ctx, pd);
+    eg_plane_free(ctx, pg);
+    free(x);
+    free(y);
+    free(dy);
+    free(grad);
+    free(want);
+    return ok;
+}
+
+static void check_reverse_scan(eg_ctx* ctx)
+{
+    static const int sizes[] = { 0, 1, 257, REORDER_MAX_N };
+    int ok                   = 1;
+    for (size_t s = 0; ok && s < 4; ++s)
+        for (int bits = 32; ok && bits <= 64; bits += 32)
+            for (int ex = 0; ok && ex < 2; ++ex)
+                ok = scan_reverse_case(
+                    ctx, (uint8_t)bits, sizes[s], EG_SCAN_SUM, ex, 21 + s);
+    check(ok,
+        "eg_scan sum reverse: the suffix scan of the adjoint of out "
+        "(cumsum(dy[::-1])[::-1] inclusive, the same shifted by one lane "
+        "exclusive) equals a loop, float32 and float64, over 0, 1, 257 and "
+        "100000 lanes, byte-identical at 1, 4 and the default threads");
+    ok = 1;
+    for (size_t s = 0; ok && s < 4; ++s)
+        for (int bits = 32; ok && bits <= 64; bits += 32)
+            for (int ex = 0; ok && ex < 2; ++ex)
+                for (int op = EG_SCAN_MIN; ok && op <= EG_SCAN_MAX; ++op)
+                    ok = scan_reverse_case(ctx, (uint8_t)bits, sizes[s],
+                        (eg_scan_op)op, ex, 41 + s);
+    check(ok,
+        "eg_scan min and max reverse: the adjoint of each output goes to its "
+        "running winner (the lowest lane among equals), each winner "
+        "receiving one run summed in lane order, inclusive and exclusive, "
+        "float32 and float64, over 0, 1, 257 and 100000 lanes, "
+        "byte-identical at 1, 4 and the default threads");
 }
 
 /* ---- eg_reduce with a position, and ANY ---------------------------------------- */
@@ -6090,17 +6727,19 @@ static void check_reduce_position(eg_ctx* ctx) {
         check(ok, "eg_reduce ANY into a uint32 cell recorded with a conditional on it: a replay with nothing set skips the arm, a set lane takes it");
         eg_graph_free(ctx, g);
 
-        /* the reverse: a minimum has no single answer for a gradient, with or without a position, until its rows land */
+        /* the reverse of a minimum with a position is accepted: its values are
+         * in check_reverse_reduce */
         struct eg_record_end_desc diff;
         memset(&diff, 0, sizeof(diff));
         diff.struct_size = sizeof(diff);
         diff.flags = EG_RECORD_DIFF;
         g = NULL;
         ok = eg_record_begin(ctx) == EG_OK && rank_do(ctx, px, pv, pl, EG_REDUCE_MIN) == EG_OK;
-        const eg_status st = eg_record_end(ctx, &diff, &g);
-        check(ok && st == EG_BAD_REQUEST && reason_has(ctx, "has no gradient eagle can pull back") && g == NULL,
-              "eg_reduce min with index in a DIFF recording: refused by name (a minimum has no gradient eagle pulls back yet)");
-        eg_record_abort(ctx);
+        check(ok && eg_record_end(ctx, &diff, &g) == EG_OK && g != NULL,
+            "eg_reduce min with index in a DIFF recording: accepted (the "
+            "adjoint goes to the winner, values in the reverse rows below)");
+        if (g)
+            eg_graph_free(ctx, g);
         eg_plane_free(ctx, px);
         eg_plane_free(ctx, pv);
         eg_plane_free(ctx, pl);
@@ -6109,6 +6748,223 @@ static void check_reduce_position(eg_ctx* ctx) {
         eg_plane_free(ctx, psrc);
         eg_plane_free(ctx, pout);
     }
+}
+
+/* ---- the reverse of eg_reduce min and max
+ * ------------------------------------------------ */
+
+typedef struct {
+    eg_plane *x, *v, *index;
+    eg_reduce_op op;
+} reduce_record;
+
+static int record_reduce(eg_ctx* ctx, void* arg)
+{
+    const reduce_record* r = arg;
+    return rank_do(ctx, r->x, r->v, r->index, r->op) == EG_OK;
+}
+
+/* Samples with ties (eight distinct values), NaN on every seventh lane (nan 1)
+ * or on all of them (nan 2); the reverse of a minimum or maximum, with the
+ * position asked for or not, is the cotangent at the first winner and zero
+ * elsewhere, a loop written here; a column of nothing but NaN has no winner and
+ * gives zeros. */
+static int reduce_reverse_case(eg_ctx* ctx, uint8_t bits, int n,
+    eg_reduce_op op, int with_index, int nan, uint64_t seed)
+{
+    const size_t es = bits / 8;
+    void* x         = malloc((size_t)n * es + 1);
+    void* grad      = malloc((size_t)n * es + 1);
+    void* want      = malloc((size_t)n * es + 1);
+    double v[2], dy[2];
+    float vf, dyf;
+    int32_t lane = -1;
+    struct tensor tx, tv, ti, td, tg;
+    fill_small(x, (size_t)n, bits, 8, seed);
+    for (int i = 0; i < n; ++i)
+        if (nan == 2 || (nan == 1 && i % 7 == 3))
+            real_put(x, (size_t)i, bits, (double)NAN);
+    void* vbuf  = bits == 64 ? (void*)v : (void*)&vf;
+    void* dybuf = bits == 64 ? (void*)dy : (void*)&dyf;
+    real_put(dybuf, 0, bits, 2.5);
+    memset(want, 0, (size_t)n * es);
+    long win = -1;
+    for (int i = 0; i < n; ++i) {
+        const double xi = real_at(x, (size_t)i, bits);
+        if (xi != xi)
+            continue;
+        if (win < 0
+            || (op == EG_REDUCE_MIN ? xi < real_at(x, (size_t)win, bits)
+                                    : xi > real_at(x, (size_t)win, bits)))
+            win = i;
+    }
+    if (win >= 0)
+        real_put(want, (size_t)win, bits, 2.5);
+    eg_plane* px               = wrap(ctx, &tx, x, n, kDLFloat, bits);
+    eg_plane* pv               = wrap(ctx, &tv, vbuf, 1, kDLFloat, bits);
+    eg_plane* pi               = wrap(ctx, &ti, &lane, 1, kDLInt, 32);
+    eg_plane* pd               = wrap(ctx, &td, dybuf, 1, kDLFloat, bits);
+    eg_plane* pg               = wrap(ctx, &tg, grad, n, kDLFloat, bits);
+    reduce_record rec          = { px, pv, with_index ? pi : NULL, op };
+    eg_graph* g                = px && pv && pi && pd && pg
+        ? diff_graph(ctx, record_reduce, &rec)
+        : NULL;
+    int ok                     = g != NULL;
+    static const int threads[] = { 1, 4, 0 };
+    for (size_t t = 0; ok && t < 3; ++t) {
+        eg_host_threads(ctx, threads[t]);
+        memset(grad, 0x55, (size_t)n * es);
+        ok = reverse_do(ctx, g, &pv, &pd, 1, &px, &pg, 1) == EG_OK
+            && memcmp(grad, want, (size_t)n * es) == 0;
+    }
+    eg_host_threads(ctx, 0);
+    if (g)
+        eg_graph_free(ctx, g);
+    eg_plane_free(ctx, px);
+    eg_plane_free(ctx, pv);
+    eg_plane_free(ctx, pi);
+    eg_plane_free(ctx, pd);
+    eg_plane_free(ctx, pg);
+    free(x);
+    free(grad);
+    free(want);
+    return ok;
+}
+
+static void check_reverse_reduce(eg_ctx* ctx)
+{
+    static const int sizes[] = { 1, 2, 257, REORDER_MAX_N };
+    int ok                   = 1;
+    for (size_t s = 0; ok && s < 4; ++s)
+        for (int bits = 32; ok && bits <= 64; bits += 32)
+            for (int op = EG_REDUCE_MIN; ok && op <= EG_REDUCE_MAX; ++op)
+                for (int wi = 0; ok && wi < 2; ++wi)
+                    for (int nan = 0; ok && nan < 3; ++nan)
+                        ok = reduce_reverse_case(ctx, (uint8_t)bits, sizes[s],
+                            (eg_reduce_op)op, wi, nan, 31 + s);
+    check(ok,
+        "eg_reduce min and max reverse: the cotangent goes to the first winner "
+        "of the column (ties to the lowest lane, a NaN never "
+        "wins) and nowhere else, a column of nothing but NaN gives zeros, "
+        "float32 and float64, over 1, 2, 257 and 100000 lanes, with "
+        "the position asked for and not, byte-identical at 1, 4 and the "
+        "default threads");
+}
+
+/* ---- the reverse of a recording that sorts, reorders by the order, scans and
+ * reduces ----------------------------------- */
+
+typedef struct {
+    eg_plane *keys, *order, *starts, *p, *q, *r, *keep, *kept, *count;
+    int64_t bound;
+} chain_record;
+
+static int record_chain(eg_ctx* ctx, void* arg)
+{
+    const chain_record* c = arg;
+    eg_plane* moved[1]    = { c->p };
+    return order_do(ctx, c->keys, c->order, c->starts, c->bound, 0) == EG_OK
+        && reorder_do(ctx, moved, 1, c->order, 0) == EG_OK
+        && scan_do(ctx, c->p, c->q, EG_SCAN_SUM, 0) == EG_OK
+        && rank_do(ctx, c->q, c->r, NULL, EG_REDUCE_MAX) == EG_OK
+        && compact_do(ctx, c->keep, c->kept, c->count) == EG_OK;
+}
+
+/* keys -> (sort) order -> (reorder) p' = p[order] -> (scan) q = cumsum(p') ->
+ * (reduce max) r = max(q), plus a compaction of a mask beside them. The seeds
+ * on q and on r pull back to p by the loop composition: the one-hot of r at the
+ * first lane that holds the maximum of q is added to the seed on q, the suffix
+ * sums of that give p', and p[order[j]] gets p'[j]. */
+static int chain_case(eg_ctx* ctx, int n, uint64_t seed)
+{
+    enum { BOUND = 300 };
+    const int bound = BOUND;
+    static int64_t key[REORDER_MAX_N];
+    static int32_t keys32[REORDER_MAX_N], starts[BOUND + 1],
+        order[REORDER_MAX_N], kept[REORDER_MAX_N];
+    static uint8_t keep[REORDER_MAX_N];
+    static double p[REORDER_MAX_N], p0[REORDER_MAX_N], q[REORDER_MAX_N],
+        dq[REORDER_MAX_N], grad[REORDER_MAX_N], want[REORDER_MAX_N],
+        moved[REORDER_MAX_N], bq[REORDER_MAX_N];
+    double r = 0.0, dr = 1.5;
+    uint32_t count = 0;
+    order_keys(key, n, bound, 0, seed);
+    for (int i = 0; i < n; ++i) {
+        keys32[i] = (int32_t)key[i];
+        keep[i]   = (uint8_t)(i % 3 == 0);
+    }
+    fill_small(p0, (size_t)n, 64, 64, seed + 1);
+    fill_small(dq, (size_t)n, 64, 64, seed + 2);
+    order_oracle(key, n, bound);
+    for (int j = 0; j < n; ++j)
+        moved[j] = p0[order_want[j]];
+    double run = 0.0;
+    long win   = -1;
+    for (int j = 0; j < n; ++j) {
+        run += moved[j];
+        q[j] = run;
+        if (win < 0 || run > q[win])
+            win = j;
+    }
+    for (int j = 0; j < n; ++j)
+        bq[j] = dq[j] + (j == win ? dr : 0.0);
+    run = 0.0;
+    for (int j = n; j-- > 0;) {
+        run += bq[j];
+        moved[j] = run; /* the adjoint of p' */
+    }
+    for (int j = 0; j < n; ++j)
+        want[order_want[j]] = moved[j];
+    struct tensor tk, to, ts, tp, tq, tr, tkeep, tkept, tcount, tdq, tdr, tg;
+    eg_plane* pk     = wrap(ctx, &tk, keys32, n, kDLInt, 32);
+    eg_plane* po     = wrap(ctx, &to, order, n, kDLInt, 32);
+    eg_plane* ps     = wrap(ctx, &ts, starts, bound + 1, kDLInt, 32);
+    eg_plane* pp     = wrap(ctx, &tp, p, n, kDLFloat, 64);
+    eg_plane* pq     = wrap(ctx, &tq, q, n, kDLFloat, 64);
+    eg_plane* pr     = wrap(ctx, &tr, &r, 1, kDLFloat, 64);
+    eg_plane* pkeep  = wrap(ctx, &tkeep, keep, n, kDLBool, 8);
+    eg_plane* pkept  = wrap(ctx, &tkept, kept, n, kDLInt, 32);
+    eg_plane* pcnt   = wrap(ctx, &tcount, &count, 1, kDLUInt, 32);
+    eg_plane* pdq    = wrap(ctx, &tdq, dq, n, kDLFloat, 64);
+    eg_plane* pdr    = wrap(ctx, &tdr, &dr, 1, kDLFloat, 64);
+    eg_plane* pg     = wrap(ctx, &tg, grad, n, kDLFloat, 64);
+    chain_record rec = { pk, po, ps, pp, pq, pr, pkeep, pkept, pcnt, bound };
+    int ok = pk && po && ps && pp && pq && pr && pkeep && pkept && pcnt && pdq
+        && pdr && pg;
+    memcpy(p, p0, (size_t)n * sizeof(double));
+    eg_graph* g          = ok ? diff_graph(ctx, record_chain, &rec) : NULL;
+    ok                   = g != NULL;
+    eg_plane* outputs[2] = { pq, pr };
+    eg_plane* seeds[2]   = { pdq, pdr };
+    static const int threads[] = { 1, 4, 0 };
+    for (size_t t = 0; ok && t < 3; ++t) {
+        eg_host_threads(ctx, threads[t]);
+        memset(grad, 0x55, (size_t)n * sizeof(double));
+        ok = reverse_do(ctx, g, outputs, seeds, 2, &pp, &pg, 1) == EG_OK
+            && memcmp(grad, want, (size_t)n * sizeof(double)) == 0;
+    }
+    eg_host_threads(ctx, 0);
+    if (g)
+        eg_graph_free(ctx, g);
+    eg_plane* all[]
+        = { pk, po, ps, pp, pq, pr, pkeep, pkept, pcnt, pdq, pdr, pg };
+    for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); ++i)
+        eg_plane_free(ctx, all[i]);
+    return ok;
+}
+
+static void check_reverse_chain(eg_ctx* ctx)
+{
+    static const int sizes[] = { 1, 257, REORDER_MAX_N };
+    int ok                   = 1;
+    for (size_t s = 0; ok && s < 3; ++s)
+        ok = chain_case(ctx, sizes[s], 61 + s);
+    check(ok,
+        "a recording that sorts by key, reorders a plane by the order, scans "
+        "it, takes the maximum of the scan and compacts a mask: the "
+        "gradient to the plane equals the loop composition (one-hot at the "
+        "first maximum, suffix sums, the inverse permutation), "
+        "byte-identical at 1, 4 and the default threads");
 }
 
 /* ---- transforms ---------------------------------------------------------- */
@@ -7436,7 +8292,12 @@ int main(int argc, char** argv) {
     check_scan(ctx);
     check_compact(ctx);
     check_order(ctx);
+    check_reorder(ctx);
+    check_reverse_reorder(ctx);
+    check_reverse_scan(ctx);
     check_reduce_position(ctx);
+    check_reverse_reduce(ctx);
+    check_reverse_chain(ctx);
     check_cell_position(ctx);
 
     check_reduce(ctx);

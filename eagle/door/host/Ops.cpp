@@ -13,9 +13,11 @@
 #include "eagle/exec/HostTeam.h"
 #include "eagle/filtering/Compact.h"
 #include "eagle/filtering/KeyedSort.h"
+#include "eagle/filtering/Reorder.h"
 #include "eagle/reduce/canonical.h"
 
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <type_traits>
@@ -455,22 +457,49 @@ struct Samples {
 /** The scan's block: the blocks, and so the grouping of a real sum, are a function of the extent alone. */
 constexpr unsigned kScanBlock = 1024;
 
-template <class T, class OP>
-void scan_form(const ScanOp& s, int threads) {
-    const Samples<const T> in{ data_of<T>(*s.in), static_cast<idx_t>(s.n) };
-    const Samples<T> out{ mut_data_of<T>(*s.out), static_cast<idx_t>(s.n) };
+template<class T, class OP>
+void scan_form(
+    const T* from, T* to, idx_t n, eg_scan_op op, bool exclusive, int threads)
+{
+    const Samples<const T> in{ from, n };
+    const Samples<T> out{ to, n };
     std::vector<T> totals(static_cast<std::size_t>(filtering::detail::ScanCore::countBlocks<kScanBlock>(in.n, std::min<idx_t>(kScanBlock, in.n))));
     const Samples<T> sums{ totals.data(), static_cast<idx_t>(totals.size()) };
-    const T identity = scan_identity<T>(s.op);
-    if (s.exclusive) cpu::Scan::exclusive<T, OP, kScanBlock>(in, out, sums, identity, threads);
+    const T identity = scan_identity<T>(op);
+    if (exclusive)
+        cpu::Scan::exclusive<T, OP, kScanBlock>(
+            in, out, sums, identity, threads);
     else cpu::Scan::inclusive<T, OP, kScanBlock>(in, out, sums, identity, threads);
 }
 
 template <class T>
 void scan_by_op(const ScanOp& s, int threads) {
-    if (s.op == EG_SCAN_SUM) scan_form<T, ScanSum<T>>(s, threads);
-    else if (s.op == EG_SCAN_MIN) scan_form<T, ScanMin<T>>(s, threads);
-    else scan_form<T, ScanMax<T>>(s, threads);
+    const T* from = data_of<T>(*s.in);
+    T* to         = mut_data_of<T>(*s.out);
+    const idx_t n = static_cast<idx_t>(s.n);
+    if (s.op == EG_SCAN_SUM)
+        scan_form<T, ScanSum<T>>(from, to, n, s.op, s.exclusive, threads);
+    else if (s.op == EG_SCAN_MIN)
+        scan_form<T, ScanMin<T>>(from, to, n, s.op, s.exclusive, threads);
+    else
+        scan_form<T, ScanMax<T>>(from, to, n, s.op, s.exclusive, threads);
+}
+
+/** The adjoint of a sum scan: out[k] folds in[0..k] (in[0..k-1] exclusive), so
+ * in[i] reaches the outputs from i (from i + 1) on and its adjoint is the sum
+ * of dy[i..] (dy[i + 1..]): the forward scan run over the adjoint read from the
+ * last lane to the first. */
+template<class T>
+void scan_sum_pullback(const ScanOp& s, const T* dy, T* bar, int threads)
+{
+    const std::size_t n = static_cast<std::size_t>(s.n);
+    std::vector<T> reversed(n), folded(n);
+    for (std::size_t i = 0; i < n; ++i)
+        reversed[i] = dy[n - 1 - i];
+    scan_form<T, ScanSum<T>>(reversed.data(), folded.data(),
+        static_cast<idx_t>(n), EG_SCAN_SUM, s.exclusive, threads);
+    for (std::size_t i = 0; i < n; ++i)
+        bar[i] = folded[n - 1 - i];
 }
 
 }  // namespace
@@ -521,6 +550,58 @@ void scan_exec(const ScanOp& s, int threads) {
         case kScanU64: scan_by_op<std::uint64_t>(s, threads); break;
         case kScanF32: scan_by_op<float>(s, threads); break;
         default: scan_by_op<double>(s, threads);
+    }
+}
+
+namespace {
+
+/** The adjoint of a minimum or maximum scan: out[k] is the running winner of
+ * in[0..k] (in[0..k-1] exclusive), the lowest lane among equals, and the
+ * adjoint of out[k] goes to it. Winners never decrease, so each receives one
+ * contiguous run of dy, added in lane order by this one pass: the same bits at
+ * any thread count. A NaN never wins, as in the forward's fmin and fmax; a lane
+ * with no winner (the exclusive scan's first output, or a prefix of nothing but
+ * NaN) passes nothing. */
+template<class T>
+void scan_extremum_pullback(const ScanOp& s, const T* in, const T* dy, T* bar)
+{
+    const bool low = s.op == EG_SCAN_MIN;
+    std::fill(bar, bar + s.n, T(0));
+    std::int64_t winner = -1;
+    for (std::int64_t k = 0; k < s.n; ++k) {
+        if (s.exclusive && winner >= 0)
+            bar[winner] += dy[k];
+        const T v = in[k];
+        if (!std::isnan(v)
+            && (winner < 0 || (low ? v < in[winner] : v > in[winner])))
+            winner = k;
+        if (!s.exclusive && winner >= 0)
+            bar[winner] += dy[k];
+    }
+}
+
+} // namespace
+
+void scan_pullback(
+    const ScanOp& s, const char* in, const char* dy, char* bar, int threads)
+{
+    if (s.n == 0)
+        return;
+    const bool real32 = s.code == kScanF32;
+    if (s.op == EG_SCAN_SUM) {
+        if (real32)
+            scan_sum_pullback(s, reinterpret_cast<const float*>(dy),
+                reinterpret_cast<float*>(bar), threads);
+        else
+            scan_sum_pullback(s, reinterpret_cast<const double*>(dy),
+                reinterpret_cast<double*>(bar), threads);
+    } else if (real32) {
+        scan_extremum_pullback(s, reinterpret_cast<const float*>(in),
+            reinterpret_cast<const float*>(dy), reinterpret_cast<float*>(bar));
+    } else {
+        scan_extremum_pullback(s, reinterpret_cast<const double*>(in),
+            reinterpret_cast<const double*>(dy),
+            reinterpret_cast<double*>(bar));
     }
 }
 
@@ -739,6 +820,95 @@ void copy_exec(const eg_plane_s& src, const eg_plane_s& dst) {
     const DLTensor& d = dst.tensor->dl_tensor;
     if (size_of(s) == 0 || bytes_of(s) == bytes_of(d)) return;
     std::memmove(const_cast<char*>(bytes_of(d)), bytes_of(s), size_of(s));
+}
+
+/** @brief Check a reorder request; refuses as eg_reorder states. */
+ReorderOp reorder_check(const eg_ctx& ctx, const eg_reorder_desc& desc)
+{
+    if (desc.flags != 0)
+        refuse(EG_BAD_REQUEST,
+            "eg_reorder_desc.flags: unknown bits "
+                + std::to_string(desc.flags));
+    if (desc.n_planes == 0 || desc.planes == nullptr)
+        refuse(EG_BAD_REQUEST,
+            "eg_reorder_desc.planes: a reorder moves one plane or more, "
+            "n_planes is "
+                + std::to_string(desc.n_planes));
+    check_handle(ctx.planes, desc.order, "eg_reorder_desc.order");
+    const DLTensor& order = desc.order->tensor->dl_tensor;
+    if (order.ndim != 1)
+        refuse(EG_BAD_REQUEST,
+            "eg_reorder: order has " + std::to_string(order.ndim)
+                + " run-time axes, an order is one plane of n indices");
+    if (!is_index_plane(order))
+        refuse(EG_BAD_REQUEST,
+            "eg_reorder: order must be an int32 or uint32 plane");
+    if (order.shape[0] > std::numeric_limits<std::int32_t>::max())
+        refuse(EG_BAD_REQUEST,
+            "eg_reorder: " + std::to_string(order.shape[0])
+                + " elements is above the 2^31 - 1 a reorder indexes");
+    check_access(*desc.order, false, "eg_reorder order");
+    ReorderOp r;
+    r.order = desc.order;
+    r.n     = order.shape[0];
+    for (std::uint32_t p = 0; p < desc.n_planes; ++p) {
+        const std::string name = "plane " + std::to_string(p);
+        check_handle(ctx.planes, desc.planes[p], "eg_reorder_desc.planes");
+        const DLTensor& t = desc.planes[p]->tensor->dl_tensor;
+        if (t.ndim < 1)
+            refuse(EG_BAD_REQUEST,
+                "eg_reorder: " + name
+                    + " is a cell, a reorder runs along "
+                      "the lane axis, its last");
+        if (t.shape[t.ndim - 1] != r.n)
+            refuse(EG_BAD_REQUEST,
+                "eg_reorder: " + name + " has "
+                    + std::to_string(t.shape[t.ndim - 1]) + " lanes, order has "
+                    + std::to_string(r.n));
+        check_access(*desc.planes[p], true, ("eg_reorder " + name).c_str());
+        if (overlaps(t, order))
+            refuse(EG_BAD_REQUEST, "eg_reorder: " + name + " overlaps order");
+        for (std::uint32_t q = 0; q < p; ++q)
+            if (overlaps(t, desc.planes[q]->tensor->dl_tensor))
+                refuse(EG_BAD_REQUEST,
+                    "eg_reorder: plane " + std::to_string(q) + " and " + name
+                        + " overlap; the planes must be distinct");
+        r.planes.push_back(desc.planes[p]);
+    }
+    return r;
+}
+
+/** @brief Run a checked reorder: count the entries of ``order`` outside
+ * [0, n) in one pass, and only when there are none move the planes. */
+void reorder_exec(const ReorderOp& r, int threads)
+{
+    const std::uint32_t* order = data_of<std::uint32_t>(*r.order);
+    // Read as unsigned, a negative int32 entry is above n like any other.
+    std::int64_t outside = 0;
+    for (std::int64_t j = 0; j < r.n; ++j)
+        outside += std::int64_t(order[j]) >= r.n;
+    if (outside != 0)
+        refuse(EG_BAD_REQUEST,
+            "reorder: " + std::to_string(outside)
+                + " entries of order are outside [0, " + std::to_string(r.n)
+                + ")");
+    // A plane of a vector value is (rows..., n), samples last: each row is a
+    // plane of n lanes moved by the same order.
+    std::vector<filtering::ReorderPlane> planes;
+    std::uint32_t widest = 1;
+    for (const eg_plane_s* p : r.planes) {
+        const DLTensor& t       = p->tensor->dl_tensor;
+        const auto bytes        = std::uint32_t(t.dtype.bits / 8);
+        const std::int64_t rows = r.n == 0 ? 0 : elements(t) / r.n;
+        char* first             = const_cast<char*>(bytes_of(t));
+        for (std::int64_t row = 0; row < rows; ++row)
+            planes.push_back({ first + row * r.n * bytes, bytes });
+        widest = std::max(widest, bytes);
+    }
+    std::vector<std::uint64_t> stage(
+        (filtering::permuteStageBytes(r.n, widest) + 7) / 8);
+    filtering::permuteHost(planes.data(), std::uint32_t(planes.size()), order,
+        stage.data(), r.n, threads);
 }
 
 }  // namespace host

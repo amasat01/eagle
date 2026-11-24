@@ -53,6 +53,14 @@ ScanOp scan_check(const eg_ctx& ctx, const eg_scan_desc& desc);
  *  the extent alone, so every result is the same bits at any thread count. */
 void scan_exec(const ScanOp& s, int threads);
 
+/** @brief The adjoint of the real scan @p s: @p bar (the extent of ``in``) from
+ * @p dy, the adjoint of ``out``, and @p in, the values the scan read (not read
+ * for a sum). A sum is the suffix scan of @p dy, inclusive for an inclusive
+ * scan and exclusive for an exclusive one, run by the forward's own machinery
+ * over the reversed adjoint, so the bits are the same at any @p threads. */
+void scan_pullback(
+    const ScanOp& s, const char* in, const char* dy, char* bar, int threads);
+
 /** @brief A checked compaction: the three planes and the extent. */
 struct CompactOp {
     eg_plane_s* keep = nullptr;
@@ -79,6 +87,20 @@ OrderOp order_check(const eg_ctx& ctx, const eg_order_desc& desc);
  * permutation is one value, so every thread count gives the same bits. Refuses
  * (EG_BAD_REQUEST) with the number of keys outside [0, bound). */
 void order_exec(const OrderOp& o, int threads);
+
+/** @brief A checked reorder: the planes to move, the order and the extent. */
+struct ReorderOp {
+    std::vector<eg_plane_s*> planes;
+    eg_plane_s* order = nullptr;
+    std::int64_t n    = 0;
+};
+
+ReorderOp reorder_check(const eg_ctx& ctx, const eg_reorder_desc& desc);
+/** @brief Run the checked reorder @p r on at most @p threads threads:
+ * afterwards ``p[j]`` holds what ``p[order[j]]`` held, the same bytes at any
+ * thread count. Refuses (EG_BAD_REQUEST) with the number of entries outside [0,
+ * n), found before anything moves. */
+void reorder_exec(const ReorderOp& r, int threads);
 
 /** @brief The one compaction of the host runtime: the indices of the lanes of @p mask that are kept (a set byte keeps, or with
  *  @p drop drops) into @p kept[0, count), ascending, and their number into @p count; the entries from @p count on are left as

@@ -31,6 +31,11 @@ std::vector<eg_plane_s*> planes_of(const Node& n) {
         case Node::Compact: return { n.compact.keep, n.compact.kept, n.compact.count };
         case Node::Order:
             return { n.order.keys, n.order.order, n.order.starts };
+        case Node::Reorder: {
+            std::vector<eg_plane_s*> all = n.reorder.planes;
+            all.push_back(n.reorder.order);
+            return all;
+        }
         case Node::Copy:
         case Node::Fft: return { n.src, n.dst };
         case Node::Gemm: return { n.src, n.rhs, n.dst };
@@ -108,6 +113,8 @@ std::string describe(const Node& n) {
         case Node::Compact: return "eg_compact";
         case Node::Order:
             return "eg_order_by_key";
+        case Node::Reorder:
+            return "eg_reorder";
         case Node::Copy: return "eg_copy";
         case Node::Fft: return "eg_fft_run";
         case Node::Gemm: return "eg_gemm_run";
@@ -154,6 +161,11 @@ std::vector<PlaneUse> uses_of(const Node& n) {
             add(n.order.keys, "keys", 0);
             add(n.order.order, "order", 1);
             add(n.order.starts, "starts", 1);
+            break;
+        case Node::Reorder:
+            for (eg_plane_s* p : n.reorder.planes)
+                add(p, "plane", 2);
+            add(n.reorder.order, "order", 0);
             break;
         case Node::Scan:
             add(n.scan.in, "in", 0);
@@ -214,6 +226,8 @@ eg_gnode_kind gnode_kind(const Node& n) {
         case Node::Compact: return EG_GNODE_COMPACT;
         case Node::Order:
             return EG_GNODE_ORDER;
+        case Node::Reorder:
+            return EG_GNODE_REORDER;
         case Node::Copy: return EG_GNODE_COPY;
         case Node::Fft: return EG_GNODE_FFT;
         case Node::Gemm: return EG_GNODE_GEMM;
@@ -358,6 +372,9 @@ void run_node(eg_ctx& ctx, const Node& n, Tape* tape) {
         case Node::Order:
             host::order_exec(n.order, host::team_threads(ctx));
             break;
+        case Node::Reorder:
+            host::reorder_exec(n.reorder, host::team_threads(ctx));
+            break;
         case Node::Copy: host::copy_exec(*n.src, *n.dst); break;
         case Node::Fft: host::fft_exec(*n.fft, *n.src, *n.dst, host::team_threads(ctx)); break;
         case Node::Gemm: host::gemm_exec(*n.gemm, *n.src, *n.rhs, *n.dst); break;
@@ -465,6 +482,17 @@ void order_by_key(eg_ctx& ctx, const eg_order_desc* desc)
     n.order = host::order_check(ctx, d);
     if (!record(ctx, std::move(n)))
         host::order_exec(n.order, host::team_threads(ctx));
+}
+
+/** @brief eg_reorder: check, then keep it while recording, else run it. */
+void reorder(eg_ctx& ctx, const eg_reorder_desc* desc)
+{
+    const eg_reorder_desc d = read_input(desc, "eg_reorder_desc");
+    Node n;
+    n.kind    = Node::Reorder;
+    n.reorder = host::reorder_check(ctx, d);
+    if (!record(ctx, std::move(n)))
+        host::reorder_exec(n.reorder, host::team_threads(ctx));
 }
 
 /** @brief eg_copy: check, then keep it while recording, else run it. */

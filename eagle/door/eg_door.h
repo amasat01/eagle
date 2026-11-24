@@ -602,6 +602,18 @@ struct eg_order_desc {
     int64_t bound; /**< K: every key lies in [0, K) */
 };
 
+/** INPUT to ``eg_reorder``: ``planes`` holds ``n_planes`` (1 or more) planes
+ * whose last axis, the lanes, has extent n; a plane of a vector value,
+ * (rows..., n) samples-last, moves every row by the same order. ``order`` is an
+ * int32 or uint32 plane of n indices. */
+struct eg_reorder_desc {
+    uint32_t struct_size;
+    uint32_t flags; /**< none defined: 0 */
+    uint32_t n_planes;
+    eg_plane* const* planes;
+    eg_plane* order;
+};
+
 /** ``eg_cond_desc.flags``: IF, IF_ELSE and WHILE test the cell for zero instead of non-zero. SWITCH refuses it. */
 #define EG_COND_NEGATE (1u << 0)
 
@@ -1169,6 +1181,31 @@ eg_status eg_compact(eg_ctx* ctx, const struct eg_compact_desc* desc);
 eg_status eg_order_by_key(eg_ctx* ctx, const struct eg_order_desc* desc);
 
 /**
+ * Permute planes in place by an order. Recordable (node kind EG_GNODE_REORDER,
+ * reading ``order`` and reading and writing every plane of ``planes``).
+ * Afterwards ``p[j]`` holds what ``p[order[j]]`` held, for every plane p, so an
+ * ``order`` that is the output of ``eg_order_by_key`` sorts every plane by that
+ * key. The result is the same bytes at any thread count. A repeated entry of
+ * ``order`` is the caller's broken promise (the planes then hold a lane twice
+ * and another not at all) and is not detected; an entry outside [0, n) fails
+ * the call (eagerly) or the replay (recorded) with the number of such entries,
+ * found in one pass before anything moves, so the planes are then untouched.
+ * The planes are distinct from each other and from ``order``, contiguous and
+ * writable, and all have the lane extent n of ``order`` as their last axis; a
+ * plane of a vector value, (rows..., n), moves every row by the same order. The
+ * runtime moves elements of 1, 2, 4, 8 or 16 bytes and a plane's element is at
+ * most 8, so no plane meets that limit; its groups of 64 planes are not a limit
+ * of the call. An extent above 2^31 - 1 is refused. Status: OK; BAD_REQUEST (a
+ * NULL or foreign plane, unknown flag bits, ``n_planes`` 0, a plane with no
+ * lane axis, planes whose last axis is not the extent of ``order``, an
+ * ``order`` that is not an int32 or uint32 plane of one axis, planes that
+ * overlap, an extent above 2^31 - 1, a plane that is not contiguous, a
+ * read-only plane, an entry of ``order`` outside [0, n)); NOT_WRITTEN (a device
+ * context).
+ */
+eg_status eg_reorder(eg_ctx* ctx, const struct eg_reorder_desc* desc);
+
+/**
  * Copy ``src`` into ``dst`` (same shape and dtype). Two planes on one side
  * copy on that side; one host plane and one device plane of the context's
  * device copy across, either way, on the context's stream, and the call
@@ -1487,7 +1524,9 @@ eg_status eg_record_fork_end(eg_ctx* ctx);
  */
 eg_status eg_record_wait(eg_ctx* ctx, int32_t n_planes, eg_plane* const* planes);
 
-#define EG_RECORD_DIFF (1u << 0) /**< plan the recording for ``eg_graph_reverse`` (launches, copies, sum reduces, transforms and products) */
+#define EG_RECORD_DIFF                                                         \
+    (1u << 0) /**< plan the recording for ``eg_graph_reverse`` (launches,      \
+                 copies, reduces, scans, reorders, transforms and products) */
 
 /** One recorded launch a gradient flows through, and the vjp unit that reverses it. ``launch`` is the 0-based ordinal of the
  *  ``eg_launch`` inside the recording (a plan launched twice is two ordinals). The vjp is a unit of the launch's library whose
@@ -1510,40 +1549,74 @@ struct eg_record_end_desc {
     const struct eg_node_vjp* vjps;
 };
 
-/** End recording; ``*out`` replays it. ``desc`` NULL: a plain graph. With EG_RECORD_DIFF every recorded call must be an
- *  ``eg_launch`` on a plan with no split, SEGMENTED or companion unit, an ``eg_copy``, ``eg_reduce``, ``eg_fft_run`` or
- *  ``eg_gemm_run``, an ``eg_run`` of an EG_RUN_RECORD runner (refine or not), or a fork, an IF, IF_ELSE or SWITCH around them,
- *  or a WHILE around the others; these are the leaves. The reverse runs over the leaves
- *  in reverse recording order; fork, branch, join and wait are structure only. What each kind reverses to (the door makes these
- *  transposes at this call, with no ``eg_node_vjp``, on the target of the graph, and frees them with it): a copy copies the adjoint
- *  of its target back into the adjoint of its source (a source that is not a float plane has no adjoint); a 1-D sum reduce gives
- *  every sample the adjoint of the sum; a transform of any kind, norm and direction applies its adjoint transform (the Hermitian
- *  weights of a real kind and the norm swap included) to the adjoint of its output; a product gives A the adjoint of C times op(B)
- *  transposed, B op(A) transposed times the adjoint of C, and, when it accumulates, passes the adjoint of C on to C's earlier value
- *  (the three products run as the forward does: the reference loop on the host, cuBLAS on a device). A run is reversed by ``eg_reverse``
- *  of its runner, seeded with the adjoints of the state planes the run overwrote and giving gradients for every plane it reads; the
- *  adjoint of a state plane is then the run's gradient of that state (the run replaced it), those of the other planes it reads gain
- *  the run's gradients, and a plane with no link gets none. The runner's record is reversed once per ``eg_graph_launch``; its own
- *  memory passes are in its ``eg_runner_figures``. A plane a run only reads must not be overwritten by a later leaf (NOT_WRITTEN by name).
- *  None of these has a scatter-add.
- *  A reduce whose op is not sum is refused BAD_REQUEST with the text "has no gradient eagle can pull back (a tie has no single
- *  answer); only op='sum' reverses"; a 2-D or companion reduce NOT_WRITTEN with "eagle does not pull back yet; only a 1-D op='sum'
- *  reduce reverses"; a run of a runner made without EG_RUN_RECORD NOT_WRITTEN with "the run of runner k in a DIFF recording needs EG_RUN_RECORD to
- *  be reversed", the same runner run twice BAD_REQUEST ending "record the second run with a second runner", a run inside a WHILE NOT_WRITTEN
- *  with "a phase count must be static: unroll the phases into the graph". The text after the
- *  call's name is the same on every target, for the caller to carry unchanged. A device recording refuses a call that runs on the
- *  host (a host plan, the copy or reduce of host planes, the run of a host runner) NOT_WRITTEN by name. Each replay saves what every conditional's test saw
- *  (``cell[cell_index]`` and the baseline element) and a leaf under an arm takes part in the reverse only if that arm ran, decided
- *  from the saved values with NEGATE applied, never from the live cells. A WHILE needs ``max_iters`` of 1 or more (0 is refused:
- *  the cap bounds the tape); the tape plans its body unrolled ``max_iters`` times, each copy running only if its iteration did.
- *  The planes the later leaves overwrite are copied at each ``eg_graph_launch`` just before the overwriting leaf, so the reverse reads
- *  what each leaf read; that memory is allocated here (FAULT by name when it cannot be). A WHILE keeps the planes its body writes
- *  only at the start of every ``w``-th iteration, ``w = min(max_iters, clamp(ceil(sqrt(max_iters)), 16, 1024))``, and the reverse
- *  rebuilds each window's states on private copies by re-launching the body's plans, newest window first: the tape holds
- *  ``ceil(max_iters / w) + w`` states of those planes instead of ``max_iters``, and the gradient is the unrolled plan's. One
- *  ``eg_node_vjp`` per ``eg_launch`` ordinal serves every unrolled copy of it. Status: OK; BAD_REQUEST (not recording, a conditional or fork open,
- *  a vjp whose links the launch cannot satisfy, two names of one plane in a node, overlapping planes); NOT_WRITTEN (a
- *  node or unit the reverse does not cover); FAULT (capture failed; a snapshot buffer not allocated). */
+/** End recording; ``*out`` replays it. ``desc`` NULL: a plain graph. With
+ * EG_RECORD_DIFF every recorded call must be an
+ *  ``eg_launch`` on a plan with no split, SEGMENTED or companion unit, an
+ * ``eg_copy``, ``eg_reduce``, ``eg_fft_run`` or
+ *  ``eg_gemm_run``, an ``eg_run`` of an EG_RUN_RECORD runner (refine or not),
+ * or a fork, an IF, IF_ELSE or SWITCH around them, or a WHILE around the
+ * others; these are the leaves. The reverse runs over the leaves in reverse
+ * recording order; fork, branch, join and wait are structure only. What each
+ * kind reverses to (the door makes these transposes at this call, with no
+ * ``eg_node_vjp``, on the target of the graph, and frees them with it): a copy
+ * copies the adjoint of its target back into the adjoint of its source (a
+ * source that is not a float plane has no adjoint); a 1-D sum reduce gives
+ *  every sample the adjoint of the sum; a transform of any kind, norm and
+ * direction applies its adjoint transform (the Hermitian weights of a real kind
+ * and the norm swap included) to the adjoint of its output; a product gives A
+ * the adjoint of C times op(B) transposed, B op(A) transposed times the adjoint
+ * of C, and, when it accumulates, passes the adjoint of C on to C's earlier
+ * value (the three products run as the forward does: the reference loop on the
+ * host, cuBLAS on a device). A run is reversed by ``eg_reverse`` of its runner,
+ * seeded with the adjoints of the state planes the run overwrote and giving
+ * gradients for every plane it reads; the adjoint of a state plane is then the
+ * run's gradient of that state (the run replaced it), those of the other planes
+ * it reads gain the run's gradients, and a plane with no link gets none. The
+ * runner's record is reversed once per ``eg_graph_launch``; its own memory
+ * passes are in its ``eg_runner_figures``. A plane a run only reads must not be
+ * overwritten by a later leaf (NOT_WRITTEN by name). None of these has a
+ * scatter-add. A real sum scan gives the adjoint of ``in`` the suffix scan of
+ * the adjoint of ``out`` (inclusive stays inclusive, exclusive stays
+ * exclusive); a real minimum or maximum scan gives the adjoint of ``out[i]`` to
+ * the running winner of i, the lowest lane among equals, each winner receiving
+ * one run summed in lane order; a 1-D minimum or maximum reduce gives the
+ * adjoint of the value to the lane it chose (the lowest among equals, none for
+ * a column of NaN), found again over the values it read; a reorder scatters the
+ * adjoint of every real plane through the ``order`` it ran with (an ``order`` a
+ * later leaf overwrites is copied first, as any int plane a reverse reads). A
+ * sort, a compaction and a mask reduce (any, all) are integer leaves: they are
+ * accepted and no adjoint flows through them. A scan or reorder inside a WHILE,
+ * and any of these transposes on a device recording, are NOT_WRITTEN by name.
+ *  A 2-D or companion float reduce is NOT_WRITTEN with "eagle does not pull
+ * back yet; only a 1-D op='sum' reduce reverses" (without "op='sum' " for a
+ * minimum or maximum); a run of a runner made without EG_RUN_RECORD NOT_WRITTEN
+ * with "the run of runner k in a DIFF recording needs EG_RUN_RECORD to be
+ * reversed", the same runner run twice BAD_REQUEST ending "record the second
+ * run with a second runner", a run inside a WHILE NOT_WRITTEN with "a phase
+ * count must be static: unroll the phases into the graph". The text after the
+ *  call's name is the same on every target, for the caller to carry unchanged.
+ * A device recording refuses a call that runs on the host (a host plan, the
+ * copy or reduce of host planes, the run of a host runner) NOT_WRITTEN by name.
+ * Each replay saves what every conditional's test saw
+ *  (``cell[cell_index]`` and the baseline element) and a leaf under an arm
+ * takes part in the reverse only if that arm ran, decided from the saved values
+ * with NEGATE applied, never from the live cells. A WHILE needs ``max_iters``
+ * of 1 or more (0 is refused: the cap bounds the tape); the tape plans its body
+ * unrolled ``max_iters`` times, each copy running only if its iteration did.
+ *  The planes the later leaves overwrite are copied at each ``eg_graph_launch``
+ * just before the overwriting leaf, so the reverse reads what each leaf read;
+ * that memory is allocated here (FAULT by name when it cannot be). A WHILE
+ * keeps the planes its body writes only at the start of every ``w``-th
+ * iteration, ``w = min(max_iters, clamp(ceil(sqrt(max_iters)), 16, 1024))``,
+ * and the reverse rebuilds each window's states on private copies by
+ * re-launching the body's plans, newest window first: the tape holds
+ *  ``ceil(max_iters / w) + w`` states of those planes instead of ``max_iters``,
+ * and the gradient is the unrolled plan's. One
+ *  ``eg_node_vjp`` per ``eg_launch`` ordinal serves every unrolled copy of it.
+ * Status: OK; BAD_REQUEST (not recording, a conditional or fork open, a vjp
+ * whose links the launch cannot satisfy, two names of one plane in a node,
+ * overlapping planes); NOT_WRITTEN (a node or unit the reverse does not cover);
+ * FAULT (capture failed; a snapshot buffer not allocated). */
 eg_status eg_record_end(eg_ctx* ctx, const struct eg_record_end_desc* desc, eg_graph** out);
 
 /** Replay a recorded graph once. Calls today: seam ``launcher_launch`` on a
@@ -1608,6 +1681,8 @@ typedef int32_t eg_gnode_kind;
 #define EG_GNODE_ORDER                                                         \
     15 /**< ``eg_order_by_key``: reads ``keys``, writes ``order`` and          \
           ``starts`` */
+#define EG_GNODE_REORDER                                                       \
+    16 /**< ``eg_reorder``: reads ``order``, reads and writes every plane */
 
 /** What an edge of a graph description is. */
 typedef int32_t eg_gedge_kind;

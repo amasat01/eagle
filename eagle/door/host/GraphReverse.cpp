@@ -7,11 +7,12 @@
 // WHILE bodies unrolled (host/Shape.h ReversePlan); a leaf under a conditional runs in the reverse only if the tests the replay saved say so.
 // eg_graph_reverse then reverses the leaves in reverse node order over the planes each node read, summing the adjoints of a plane
 // read by several nodes in node order, the seed first (the order of eagle::diff::transpose).
+#include "eagle/diff/Transpose.h"
 #include "eagle/door/Context.h"
 #include "eagle/door/host/Graph.h"
 #include "eagle/door/host/Ops.h"
 #include "eagle/door/host/Team.h"
-#include "eagle/diff/Transpose.h"
+#include "eagle/exec/HostTeam.h"
 
 #include <algorithm>
 #include <cmath>
@@ -193,6 +194,7 @@ std::string leaf_name(const Node& n, std::size_t ordinal) {
         : n.kind == Node::Scan                   ? "eg_scan"
         : n.kind == Node::Compact                ? "eg_compact"
         : n.kind == Node::Order                  ? "eg_order_by_key"
+        : n.kind == Node::Reorder                ? "eg_reorder"
         : n.kind == Node::Fft                    ? "eg_fft_run"
         : n.kind == Node::Host                   ? "eg_host_call"
                                                  : "eg_gemm_run";
@@ -265,7 +267,67 @@ void other_leaf(eg_ctx& ctx, const Node& n, DiffNode& dn, std::size_t ordinal, c
             dn.reduce = n.reduce;
             read(n.reduce.in, "in");
             write(n.reduce.out, "out");
+            if (n.reduce.op != EG_REDUCE_SUM)
+                dn.valued = dn.reads; // a minimum or maximum pulls back to the
+                                      // lane it chose over the values it read
+            if (n.reduce.index != nullptr && kept.count(n.reduce.index) != 0)
+                dn.overwrites.push_back(
+                    track(n.reduce.index, true, at + " index", at + " index"));
             return;
+        case Node::Order: // integer results and keys: no adjoint flows; a kept
+                          // plane it overwrites is copied before it
+            for (eg_plane_s* p : { n.order.order, n.order.starts })
+                if (kept.count(p) != 0)
+                    dn.overwrites.push_back(
+                        track(p, true, at + " result", at + " result"));
+            return;
+        case Node::Compact: // an index list and a count: integers, no adjoint;
+                            // a real plane read through ``kept`` is an indexed
+                            // read
+            for (eg_plane_s* p : { n.compact.kept, n.compact.count })
+                if (kept.count(p) != 0)
+                    dn.overwrites.push_back(
+                        track(p, true, at + " result", at + " result"));
+            return;
+        case Node::Scan:
+            if (!floats(n.scan.in)) { // no adjoint; a kept plane it overwrites
+                                      // is copied before it
+                if (kept.count(n.scan.out) != 0)
+                    dn.overwrites.push_back(
+                        track(n.scan.out, true, at + " out", at + " out"));
+                return;
+            }
+            dn.scan = n.scan;
+            read(n.scan.in, "in");
+            write(n.scan.out, "out");
+            if (n.scan.op != EG_SCAN_SUM)
+                dn.valued = dn.reads; // a minimum or maximum pulls back through
+                                      // the winners of the values it read
+            return;
+        case Node::Reorder: {
+            // A plane moves in place: its adjoint is read as the adjoint of
+            // what it became and written as that of what it was. The order is
+            // read by the transpose (kept, so a later leaf that overwrites it
+            // is preceded by a copy); a plane with no adjoint only notes a kept
+            // plane it moves.
+            bool real = false;
+            for (eg_plane_s* p : n.reorder.planes) {
+                if (floats(p)) {
+                    read(p, "plane");
+                    write(p, "plane");
+                    real = true;
+                } else if (kept.count(p) != 0) {
+                    dn.overwrites.push_back(
+                        track(p, true, at + " plane", at + " plane"));
+                }
+            }
+            if (real) {
+                dn.kept_reads.push_back(track(
+                    n.reorder.order, false, at + " order", at + " order"));
+                dn.valued = dn.kept_reads;
+            }
+            return;
+        }
         case Node::Fft:
             read(n.src, "in");
             write(n.dst, "out");
@@ -298,17 +360,16 @@ void leaf_checks(const std::vector<const Node*>& others) {
                 if (others[i]->kind == Node::Run && others[i]->runner == n.runner)
                     refuse(EG_BAD_REQUEST, at + ": its runner is run twice in the recording and its record holds one run: record the second run with a second runner");
         }
-        if (n.kind == Node::Scan) refuse(EG_NOT_WRITTEN, at + ": eagle does not pull back a scan yet");
-        if (n.kind == Node::Compact) refuse(EG_NOT_WRITTEN, at + ": eagle does not pull back a compaction yet");
-        if (n.kind == Node::Order)
+        if (n.kind != Node::Reduce
+            || tensor(*n.reduce.in).dtype.code != kDLFloat)
+            continue; // a mask or integer reduce carries no adjoint
+        if (n.reduce.cols != 1 || n.reduce.comp != nullptr)
             refuse(EG_NOT_WRITTEN,
                 at
-                    + ": eagle does not pull back a sort yet; its order and "
-                      "starts are integer results that carry no gradient");
-        if (n.kind != Node::Reduce) continue;
-        if (n.reduce.op != EG_REDUCE_SUM) refuse(EG_BAD_REQUEST, at + " has no gradient eagle can pull back (a tie has no single answer); only op='sum' reverses");
-        if (tensor(*n.reduce.in).dtype.code == kDLFloat && (n.reduce.cols != 1 || n.reduce.comp != nullptr))
-            refuse(EG_NOT_WRITTEN, at + ": a 2-D or companion reduce: eagle does not pull back yet; only a 1-D op='sum' reduce reverses");
+                    + ": a 2-D or companion reduce: eagle does not pull back "
+                      "yet; only a 1-D "
+                    + (n.reduce.op == EG_REDUCE_SUM ? "op='sum' " : "")
+                    + "reduce reverses");
     }
 }
 
@@ -361,6 +422,10 @@ std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<eg_plan_s*>&
             if (o->kind == Node::Host && o->host->vjp != nullptr)
                 for (std::size_t j = 0; j < o->hplanes.size(); ++j)
                     if (tensor(*o->hplanes[j]).dtype.code != kDLFloat && (o->haccess[j] & EG_ACCESS_READ) != 0) kept.insert(o->hplanes[j]);
+        for (const Node* o : others) // the order a reorder's transpose scatters
+                                     // through is kept like a vjp's int planes
+            if (o->kind == Node::Reorder)
+                kept.insert(o->reorder.order);
         for (std::size_t i = 0; i < launches.size(); ++i) {
             const eg_plan_s& plan = *launches[i];
             const std::string at = "eg_record_end: launch " + std::to_string(i);
@@ -413,6 +478,13 @@ std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<eg_plan_s*>&
             for (int m = loop.first_leaf; m < loop.first_leaf + loop.cap * loop.per_iter; ++m) {
                 const DiffNode& node = diff->nodes[static_cast<std::size_t>(plan.leaves[static_cast<std::size_t>(m)].node)];
                 if (node.writes.empty() && node.overwrites.empty()) continue;
+                if (node.kind == Node::Scan || node.kind == Node::Reorder)
+                    refuse(EG_NOT_WRITTEN,
+                        "eg_record_end: a scan or reorder that writes planes "
+                        "the tape tracks inside a WHILE body is not written in "
+                        "EG_RECORD_DIFF; "
+                        "the loop's window rebuilds its states by re-running "
+                        "the body and has no re-run of it");
                 if (node.kind == Node::Host)
                     refuse(EG_NOT_WRITTEN, "eg_record_end: host node '" + node.host->name + "' writes planes the tape tracks inside a WHILE body; the loop's window rebuilds its states by "
                            "re-running the body and does not call a host node again");
@@ -805,7 +877,42 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
                 give(in, std::move(back));
                 break;
             }
-            case Node::Reduce: {                // every sample of the sum gets the adjoint of the sum
+            case Node::Reduce: { // every sample of the sum gets the adjoint of
+                                 // the sum; a minimum or maximum gives it to
+                                 // its winner
+                if (node.reduce.op != EG_REDUCE_SUM) {
+                    if (D != nullptr)
+                        refuse(EG_NOT_WRITTEN,
+                            "eg_graph_reverse: the transpose of a minimum or "
+                            "maximum eg_reduce is not written for a device "
+                            "recording");
+                    // The winner is found again by the forward's own reduce
+                    // over the values it read, asked for its position: one
+                    // lane, the lowest among equals, none (the lane n) for a
+                    // column of NaN.
+                    Bytes chosen(byte_count(plane_of(out))),
+                        lane(byte_count(plane_of(out)));
+                    View x(plane_of(in), value_of(in, i)),
+                        y(plane_of(out), chosen.data()),
+                        w(plane_of(out), lane.data());
+                    host::ReduceOp r = node.reduce;
+                    r.in             = x.get();
+                    r.out            = y.get();
+                    r.index          = w.get();
+                    host::reduce_exec(r, threads);
+                    const std::int32_t winner
+                        = *reinterpret_cast<const std::int32_t*>(lane.data());
+                    Bytes bar(byte_count(plane_of(in)));
+                    if (winner >= 0 && winner < r.n) {
+                        const std::size_t es = element_bytes(plane_of(in));
+                        std::memcpy(bar.data()
+                                + static_cast<std::size_t>(r.first + winner)
+                                    * es,
+                            dy.data(), es);
+                    }
+                    give(in, std::move(bar));
+                    break;
+                }
                 const std::size_t es = element_bytes(plane_of(in));
                 const std::int64_t n = node.reduce.n;
                 Bytes spread(byte_count(plane_of(in)), D);
@@ -816,6 +923,61 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
                     for (std::int64_t k = 0; k < n; ++k) std::memcpy(spread.data() + static_cast<std::size_t>(k) * es, dy.data(), es);
                 }
                 give(in, std::move(spread));
+                break;
+            }
+            case Node::Scan: { // the suffix scan of the adjoint of out
+                if (D != nullptr)
+                    refuse(EG_NOT_WRITTEN,
+                        "eg_graph_reverse: the transpose of eg_scan is not "
+                        "written for a device recording");
+                Bytes bar(byte_count(plane_of(in)));
+                host::scan_pullback(node.scan,
+                    node.valued.empty() ? nullptr : value_of(in, i), dy.data(),
+                    bar.data(), threads);
+                give(in, std::move(bar));
+                break;
+            }
+            case Node::Reorder: { // the unique scatter through the order the
+                                  // forward ran with: bar_p[order[j]] =
+                                  // bar_p'[j]
+                if (D != nullptr)
+                    refuse(EG_NOT_WRITTEN,
+                        "eg_graph_reverse: the transpose of eg_reorder is not "
+                        "written for a device recording");
+                const int order_plane = node.kept_reads.front();
+                const std::int64_t n  = elements(tensor(plane_of(order_plane)));
+                const std::uint32_t* order
+                    = reinterpret_cast<const std::uint32_t*>(
+                        value_of(order_plane, i));
+                for (std::int64_t j = 0; j < n; ++j)
+                    if (order[j] >= static_cast<std::uint64_t>(n))
+                        refuse(EG_BAD_REQUEST,
+                            "eg_graph_reverse: an entry of the order of "
+                            "eg_reorder is outside [0, "
+                                + std::to_string(n)
+                                + "): the order plane changed after the "
+                                  "launch");
+                for (std::size_t k = 0; k < node.writes.size(); ++k) {
+                    const eg_plane_s& plane = plane_of(node.writes[k]);
+                    const std::int64_t rows
+                        = n == 0 ? 0 : elements(tensor(plane)) / n;
+                    Bytes bar(byte_count(plane));
+                    const auto scatter = [&](auto tag) {
+                        using T = decltype(tag);
+                        const T* from
+                            = reinterpret_cast<const T*>(adjoint[k].data());
+                        T* to = reinterpret_cast<T*>(bar.data());
+                        exec::hostFor(n, threads, [&](std::int64_t j) {
+                            for (std::int64_t r = 0; r < rows; ++r)
+                                to[r * n + order[j]] = from[r * n + j];
+                        });
+                    };
+                    if (element_bytes(plane) == 8)
+                        scatter(double{ });
+                    else
+                        scatter(float{ });
+                    give(node.reads[k], std::move(bar));
+                }
                 break;
             }
             case Node::Fft: {

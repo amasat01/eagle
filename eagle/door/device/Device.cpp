@@ -120,6 +120,10 @@ void device_order_by_key(eg_ctx&, const eg_order_desc&)
 {
     device_group_check("eg_order_by_key");
 }
+void device_reorder(eg_ctx&, const eg_reorder_desc&)
+{
+    device_group_check("eg_reorder");
+}
 void device_reduce_leaf(eg_ctx&, const host::ReduceOp&) {}
 void device_copy(eg_ctx&, eg_plane_s*, eg_plane_s*) {}
 void device_fft_new(eg_ctx&, eg_fft_s&) {}
@@ -1413,6 +1417,14 @@ void device_order_by_key(eg_ctx&, const eg_order_desc&)
 {
     refuse(EG_NOT_WRITTEN,
         "eg_order_by_key: the sort by key is not written for a device context");
+}
+
+/** @brief eg_reorder over device planes: not written on a device. */
+void device_reorder(eg_ctx&, const eg_reorder_desc&)
+{
+    refuse(EG_NOT_WRITTEN,
+        "eg_reorder: the reorder by an order is not written for a device "
+        "context");
 }
 
 /** @brief The checked reduce @p r on the context's stream, kept in the recording if there is one. */

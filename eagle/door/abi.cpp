@@ -170,6 +170,26 @@ EG_EXPORT eg_status eg_order_by_key(
             door::order_by_key(c, desc);
     });
 }
+EG_EXPORT eg_status eg_reorder(eg_ctx* ctx, const struct eg_reorder_desc* desc)
+{
+    return door::call(ctx, [&](eg_ctx& c) {
+        const eg_reorder_desc d = door::read_input(desc, "eg_reorder_desc");
+        // One side for the order and every plane: each plane is tested against
+        // the first, so a mix on any pair is refused.
+        bool device = door::device_planes(c, "eg_reorder", { d.order });
+        if (d.planes != nullptr && d.n_planes > 0) {
+            device = door::device_planes(
+                c, "eg_reorder", { d.planes[0], d.order });
+            for (uint32_t i = 1; i < d.n_planes; ++i)
+                door::device_planes(
+                    c, "eg_reorder", { d.planes[0], d.planes[i], d.order });
+        }
+        if (device)
+            door::device_reorder(c, d);
+        else
+            door::reorder(c, desc);
+    });
+}
 EG_EXPORT eg_status eg_copy(eg_ctx* ctx, eg_plane* src, eg_plane* dst) {
     return door::call(ctx, [&](eg_ctx& c) {
         if (door::planes_cross_sides(c, src, dst)) {

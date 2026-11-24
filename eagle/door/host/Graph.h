@@ -38,7 +38,8 @@ struct Node {
         Host,
         Scan,
         Compact,
-        Order
+        Order,
+        Reorder
     } kind              = Launch;
     eg_plan_s* plan = nullptr;
     eg_runner_s* runner = nullptr;
@@ -46,6 +47,7 @@ struct Node {
     host::ScanOp scan;                          ///< a scan
     host::CompactOp compact;                    ///< a compaction
     host::OrderOp order;                        ///< a sort by key
+    host::ReorderOp reorder;                    ///< a reorder by an order
     eg_fft_s* fft = nullptr;
     eg_gemm_s* gemm = nullptr;
     eg_host_node_s* host = nullptr;             ///< a host call's node
@@ -114,6 +116,7 @@ struct DiffNode {
     eg_unit_s* vjp = nullptr;                   ///< a launch: a reference is held; null: no gradient flows through the node
     std::vector<VjpLink> links;
     host::ReduceOp reduce;                      ///< a reduce
+    host::ScanOp scan;                          ///< a real scan
     eg_fft_s *fft = nullptr, *adjoint = nullptr;    ///< a transform (a reference is held) and the transform that is its adjoint (made here, freed with the tape)
     eg_gemm_s gemm, gemm_a, gemm_b;             ///< a product, and the products that give the gradients of its A and of its B
     eg_runner_s* runner = nullptr;              ///< a run (a recorded runner: the graph's node holds its reference)

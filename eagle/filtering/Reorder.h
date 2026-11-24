@@ -756,6 +756,52 @@ inline void restoreHost(const ReorderPlane* planes, std::uint32_t nPlanes,
     });
 }
 
+/** @brief Bytes of staging @ref permuteHost needs for @p n samples of planes
+ *  whose widest element is @p maxElemBytes. */
+inline std::size_t permuteStageBytes(std::int64_t n, std::uint32_t maxElemBytes)
+{
+    return std::size_t(n > 0 ? n : 0) * maxElemBytes;
+}
+
+/**
+ * @brief Permute @p planes in place by @p order: afterwards ``p[j]`` holds
+ *        what ``p[order[j]]`` held, on at most ``team`` host threads.
+ *
+ * ``reorderHost`` moves by a keep mask (a stable partition) and cannot apply
+ * a given order, so this is the gather it stages for. Each plane is copied
+ * to ``stage`` (``permuteStageBytes``) and gathered back, so addresses never
+ * change; every entry of @p order must already lie in ``[0, n)`` (the caller
+ * checks, nothing here does). Elements are 1, 2, 4, 8 or 16 bytes. Each
+ * output slot has one writer, so the bytes are the same at any @p team.
+ */
+inline void permuteHost(const ReorderPlane* planes, std::uint32_t nPlanes,
+    const std::uint32_t* order, void* stage, std::int64_t n,
+    int team = exec::host_max_threads())
+{
+    detail::checkCompact(n);
+    for (std::uint32_t p = 0; p < nPlanes; ++p) {
+        if (!detail::supportedElem(planes[p].elemBytes))
+            EAGLE_THROW(std::invalid_argument,
+                "reorder: plane " + std::to_string(p) + " has "
+                    + std::to_string(planes[p].elemBytes)
+                    + "-byte elements; supported are 1, 2, 4, 8 and 16");
+        detail::withElem(planes[p].elemBytes, [&]<typename T>() {
+            // Byte copies keep the plane's own alignment, which may be below
+            // the element size (a vector value is several lanes wide).
+            char* data      = static_cast<char*>(planes[p].data);
+            char* staged    = static_cast<char*>(stage);
+            const auto size = std::int64_t(sizeof(T));
+            exec::hostFor(n, team, [&](std::int64_t i) {
+                std::memcpy(staged + i * size, data + i * size, sizeof(T));
+            });
+            exec::hostFor(n, team, [&](std::int64_t j) {
+                std::memcpy(data + j * size,
+                    staged + std::int64_t(order[j]) * size, sizeof(T));
+            });
+        });
+    }
+}
+
 /** @brief The host face of ``resetDevice`` over host memory, on at most ``team`` host threads. */
 inline void resetHost(std::int32_t* perm, std::int32_t* inv, std::int32_t* indexMap,
     std::uint32_t* count, std::uint32_t* span, std::int64_t n,
