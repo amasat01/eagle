@@ -155,13 +155,13 @@ __global__ void __launch_bounds__(kBlock) downsweep(const Key* typed, const std:
     const long long base = static_cast<long long>(blockIdx.x) * kTile + static_cast<long long>(warp) * kItems * scan::kWarp;
     const unsigned mask = (1u << width) - 1u;
     std::uint32_t key[kItems], number[kItems];
-    unsigned digit[kItems], rank[kItems];
+    unsigned digit[kItems], same[kItems], rank[kItems];
+    // The loads and the matches of the rounds do not depend on each other: they are issued together, and only the counters chain.
     for (int j = 0; j < kItems; ++j) {
         const long long at = base + static_cast<long long>(j) * scan::kWarp + lane;
-        const bool valid = at < n;
         key[j] = 0;
         number[j] = 0;
-        if (valid) {
+        if (at < n) {
             if constexpr (First) {
                 key[j] = static_cast<std::uint32_t>(typed[at]);
                 number[j] = static_cast<std::uint32_t>(at);
@@ -171,12 +171,17 @@ __global__ void __launch_bounds__(kBlock) downsweep(const Key* typed, const std:
             }
         }
         digit[j] = (key[j] >> shift) & mask;
-        const unsigned active = __ballot_sync(0xffffffffu, valid);
-        const unsigned same = match_digit(digit[j], width, active);
+    }
+    for (int j = 0; j < kItems; ++j) {
+        const long long at = base + static_cast<long long>(j) * scan::kWarp + lane;
+        same[j] = match_digit(digit[j], width, __ballot_sync(0xffffffffu, at < n));
+    }
+    for (int j = 0; j < kItems; ++j) {
+        const long long at = base + static_cast<long long>(j) * scan::kWarp + lane;
         const unsigned before = warp_count[warp][digit[j]];
-        rank[j] = before + static_cast<unsigned>(__popc(same & ((1u << lane) - 1u)));
+        rank[j] = before + static_cast<unsigned>(__popc(same[j] & ((1u << lane) - 1u)));
         __syncwarp();
-        if (valid && (same & ((1u << lane) - 1u)) == 0) warp_count[warp][digit[j]] = before + static_cast<unsigned>(__popc(same));
+        if (at < n && (same[j] & ((1u << lane) - 1u)) == 0) warp_count[warp][digit[j]] = before + static_cast<unsigned>(__popc(same[j]));
         __syncwarp();
     }
     __syncthreads();

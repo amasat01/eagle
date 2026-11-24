@@ -5,6 +5,9 @@
 
 #include "eagle/filtering/KeyedSort.h"
 #include "eagle/filtering/Reorder.h"
+#ifndef EAGLE_CPU_ONLY
+#include "eagle/cuda/KeyedSort.cuh"
+#endif
 
 #include <algorithm>
 #include <cstddef>
@@ -64,12 +67,29 @@ struct ClassTrigger {
     std::uint32_t* classFire;       ///< OUT
 };
 
-/** @brief Bytes of scratch a class sort of @p n samples needs (``reorderScratchBytes`` + dst + offsets). */
+#ifndef EAGLE_CPU_ONLY
+namespace detail {
+/** @brief The device sort's own memory in a class sort: the 32-bit keys, the order and the starts, then its zeroed working memory and its temporaries. */
+inline std::size_t classSortArea(std::int64_t n, std::uint32_t classes)
+{
+    const std::int64_t m = n > 0 ? n : 1;
+    const std::int64_t k = std::int64_t(classes) + 1;    // the classes, the dead and the slots past the live span are one more key each
+    return (std::size_t(m) * 4u + 15u) / 16u * 16u * 2u + (std::size_t(k) + 1u) * 4u + 48u
+        + cuda::order::state_bytes(cuda::order::shape_of(m, k + 1)) + cuda::order::layout_of(cuda::order::shape_of(m, k + 1)).bytes;
+}
+} // namespace detail
+#endif
+
+/** @brief Bytes of scratch a class sort of @p n samples needs (``reorderScratchBytes`` + dst + offsets + the device sort's area). */
 inline std::size_t classSortScratchBytes(std::int64_t n, std::uint32_t maxElemBytes, std::uint32_t classes)
 {
     const std::size_t base = reorderScratchBytes(n, maxElemBytes);
     const std::size_t m    = std::size_t(n > 0 ? n : 1);
-    return (base + 15u) / 16u * 16u + (m * 4u + 15u) / 16u * 16u + (std::size_t(classes) + 2u) * 4u;
+    std::size_t bytes = (base + 15u) / 16u * 16u + (m * 4u + 15u) / 16u * 16u + (std::size_t(classes) + 2u) * 4u;
+#ifndef EAGLE_CPU_ONLY
+    bytes = (bytes + 15u) / 16u * 16u + detail::classSortArea(n, classes);
+#endif
+    return bytes;
 }
 
 namespace detail {
@@ -114,34 +134,33 @@ AETHER_DEVICEANDHOST() inline std::uint32_t classKey(
 
 #ifndef EAGLE_CPU_ONLY
 
-AETHER_KERNEL() void classInit(std::uint32_t* off) { off[0] = 0u; }
-
+/** @brief The sort key of every slot: its class key while it lies in the live span ``*lim``, else one more than the largest, so the slots
+ *  past the span sort to the end. */
 AETHER_KERNEL()
-__launch_bounds__(256, 4) void classKeep(const std::uint8_t* mask, const std::uint8_t* cls, idx_t* keep,
-    const std::uint32_t* lim, std::uint32_t c, std::uint32_t classes, bool drop, bool within, std::int64_t n)
+__launch_bounds__(256, 4) void classKeys(const std::uint8_t* mask, const std::uint8_t* cls, std::uint32_t* keys,
+    const std::uint32_t* lim, std::uint32_t classes, bool drop, bool within, std::int64_t n)
 {
     const std::int64_t i = reorderThread();
     if (i >= n)
         return;
-    const bool in = i < std::int64_t(*lim) && classKey(mask[i], cls[i], drop, within, classes) == c;
-    keep[i]       = idx_t(in);
+    const std::uint32_t dead = within ? classes : classes + 1u;
+    keys[i] = i < std::int64_t(*lim) ? classKey(mask[i], cls[i], drop, within, classes) : dead;
 }
 
+/** @brief ``dst[order[j]] = j``: the sorted place of every slot. */
 AETHER_KERNEL()
-__launch_bounds__(256, 4) void classAssign(const idx_t* keep, const idx_t* incl, const std::uint32_t* off,
-    std::int32_t* dst, std::uint32_t c, std::int64_t n)
+__launch_bounds__(256, 4) void classPlaces(const std::uint32_t* order, std::int32_t* dst, std::int64_t n)
 {
-    const std::int64_t i = reorderThread();
-    if (i < n && keep[i] != 0)
-        dst[i] = std::int32_t(off[c] + std::uint32_t(incl[i]) - 1u);
+    const std::int64_t j = reorderThread();
+    if (j < n)
+        dst[order[j]] = std::int32_t(j);
 }
 
-AETHER_KERNEL() void classAdvance(const idx_t* incl, const std::uint32_t* lim, std::uint32_t* off, std::uint32_t c,
-    std::int64_t n)
+/** @brief ``off[c] = starts[c]`` for the keys ``0 .. count - 1``: the first place of each class. */
+AETHER_KERNEL() void classOffsets(const std::uint32_t* starts, std::uint32_t* off, std::uint32_t count)
 {
-    std::int64_t l = std::int64_t(*lim);
-    l              = l < n ? l : n;
-    off[c + 1]     = off[c] + (l == 0 ? 0u : std::uint32_t(incl[l - 1]));
+    for (std::uint32_t c = threadIdx.x; c < count; c += blockDim.x)
+        off[c] = starts[c];
 }
 
 template<typename T>
@@ -257,8 +276,8 @@ inline void classTriggerDevice(const std::uint8_t* mask, std::uint32_t flags, co
 /**
  * @brief Enqueue the K-class stable sort of @p n samples on @p stream.
  *
- * Needs ``classSortScratchBytes`` of scratch. Capturable: kernels only. Cost is
- * ``K`` (``K + 1`` for a full sort) inclusive scans.
+ * Needs ``classSortScratchBytes`` of scratch. Capturable: kernels only. One stable
+ * device sort by key (``cuda/KeyedSort.cuh``) over the class keys.
  */
 inline void reorderClassesDevice(const ReorderPlane* planes, std::uint32_t nPlanes, const std::uint8_t* mask,
     std::uint32_t flags, std::uint32_t classes, const std::uint8_t* classPlane, std::int32_t* perm, std::int32_t* inv,
@@ -282,11 +301,6 @@ inline void reorderClassesDevice(const ReorderPlane* planes, std::uint32_t nPlan
         EAGLE_CHECK_ALWAYS(cudaGetLastError());
         return;
     }
-    const idx_t N   = idx_t(n);
-    idx_t* base     = static_cast<idx_t*>(scratch);
-    auto keep       = spanView<idx_t>(base, N, deviceDevice());
-    auto inclusive  = spanView<idx_t>(base + N, N, deviceDevice());
-    auto blockSums  = spanView<idx_t>(base + 2 * std::size_t(N), N, deviceDevice());
     char* raw       = static_cast<char*>(scratch);
     void* stage     = raw + detail::reorderStageOffset(n);
     std::uint32_t maxElem = 4u;
@@ -297,19 +311,24 @@ inline void reorderClassesDevice(const ReorderPlane* planes, std::uint32_t nPlan
     std::uint32_t* off   = reinterpret_cast<std::uint32_t*>(tail + (std::size_t(n) * 4u + 15u) / 16u * 16u);
     const std::uint32_t* lim = within ? count : span;
     const unsigned nb = unsigned((n + 255) / 256);
-    detail::classInit<<<1, 1, 0, stream>>>(off);
+    // The sort: the slots in the live span by class (the dead one more key), the slots past it last; stable, so a class keeps its slot order.
+    const std::uint32_t nKeys = within ? classes : classes + 1u;
+    const auto shape          = cuda::order::shape_of(n, std::int64_t(nKeys) + 1);
+    char* area                = reinterpret_cast<char*>((reinterpret_cast<std::uintptr_t>(off + classes + 2u) + 15u) / 16u * 16u);
+    std::uint32_t* keys       = reinterpret_cast<std::uint32_t*>(area);
+    std::uint32_t* order      = keys + (std::size_t(n) * 4u + 15u) / 16u * 4u;
+    std::uint32_t* starts     = order + (std::size_t(n) * 4u + 15u) / 16u * 4u;
+    void* state               = reinterpret_cast<char*>(starts) + (std::size_t(nKeys + 2u) * 4u + 15u) / 16u * 16u;
+    void* temp                = static_cast<char*>(state) + cuda::order::state_bytes(shape);
+    detail::classKeys<<<nb, 256, 0, stream>>>(mask, classPlane, keys, lim, classes, drop, within, n);
     EAGLE_CHECK_ALWAYS(cudaGetLastError());
-    const std::uint32_t nKeys = within ? classes : classes + 1u;  // the dead are one more key
-    for (std::uint32_t c = 0; c < nKeys; ++c) {
-        detail::classKeep<<<nb, 256, 0, stream>>>(mask, classPlane, base, lim, c, classes, drop, within, n);
-        EAGLE_CHECK_ALWAYS(cudaGetLastError());
-        cuda::Scan::enqueue<idx_t, aether::SumOp<idx_t>, true>(
-            keep.as_const(), inclusive, blockSums, idx_t(0), stream);
-        detail::classAssign<<<nb, 256, 0, stream>>>(base, base + N, off, dst, c, n);
-        EAGLE_CHECK_ALWAYS(cudaGetLastError());
-        detail::classAdvance<<<1, 1, 0, stream>>>(base + N, lim, off, c, n);
-        EAGLE_CHECK_ALWAYS(cudaGetLastError());
-    }
+    EAGLE_CHECK_ALWAYS(cudaMemsetAsync(state, 0, cuda::order::state_bytes(shape), stream));
+    cuda::order::queue<std::uint32_t>(stream, keys, shape, order, starts, state, temp);
+    EAGLE_CHECK_ALWAYS(cudaGetLastError());
+    detail::classPlaces<<<nb, 256, 0, stream>>>(order, dst, n);
+    EAGLE_CHECK_ALWAYS(cudaGetLastError());
+    detail::classOffsets<<<1, 256, 0, stream>>>(starts, off, nKeys + 1u);
+    EAGLE_CHECK_ALWAYS(cudaGetLastError());
     for (std::uint32_t p = 0; p < nPlanes; ++p) {
         detail::withElem(planes[p].elemBytes, [&]<typename T>() {
             detail::classPlaneDevice<T>(planes[p].data, stage, dst, lim, fire, n, nb, stream);
