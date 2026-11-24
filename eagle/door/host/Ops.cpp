@@ -162,8 +162,44 @@ void ranked_columns(const ReduceOp& r, int threads) {
     }
 }
 
+/** @brief Column ``p`` of the rows of a cell as ``in(i)``: each row's value ranked by the lane that won it; a NaN row (no winner) has lane ``none``. */
+template <class T>
+struct RankedRows {
+    const T* p;
+    const T* lanes;
+    idx_t none;
+    Ranked<T> operator()(idx_t i) const {
+        const T v = p[i];
+        if constexpr (std::is_floating_point_v<T>) {
+            if (std::isnan(v)) return { v, none };
+        }
+        return { v, static_cast<idx_t>(lanes[i]) };
+    }
+};
+
+/** @brief The cell's fold over its rows: the winner of (value, lane) pairs through the canonical tree, written as its value, or as its lane
+ *  (the sample count when no row has a winner) when the cell takes the position. */
+template <class T, bool Max>
+void ranked_rows_columns(const ReduceOp& r, int threads) {
+    namespace canon = eagle::reduce::canonical;
+    const T* in = data_of<T>(*r.in) + r.first;
+    const T* lanes = data_of<T>(*r.lanes) + r.first;
+    T* out = mut_data_of<T>(*r.out);
+    const idx_t none = static_cast<idx_t>(r.samples);
+    for (std::int64_t j = 0; j < r.cols; ++j) {
+        const RankedRows<T> x{ in + j * r.n, lanes + j * r.n, none };
+        const Ranked<T> best = canon::partialRange<Ranked<T>, Best<T, Max>>(x, 0, r.n, {}, threads).value();
+        out[j] = r.position ? static_cast<T>(best.lane) : best.value;
+    }
+}
+
 template <class T>
 void ranked_by_op(const ReduceOp& r, int threads) {
+    if (r.lanes != nullptr) {
+        if (r.op == EG_REDUCE_MAX) ranked_rows_columns<T, true>(r, threads);
+        else ranked_rows_columns<T, false>(r, threads);
+        return;
+    }
     if (r.op == EG_REDUCE_MAX) ranked_columns<T, true>(r, threads);
     else ranked_columns<T, false>(r, threads);
 }
@@ -189,7 +225,7 @@ struct LogicalOr {
 
 template <class T>
 void by_op(const ReduceOp& r, int threads) {
-    if (r.index != nullptr) return ranked_by_op<T>(r, threads);
+    if (r.index != nullptr || r.lanes != nullptr) return ranked_by_op<T>(r, threads);
     if (r.op == EG_REDUCE_SUM) columns<T, aether::SumOp<T>>(r, threads);
     else if (r.op == EG_REDUCE_MAX) columns<T, aether::MaxOp<T>>(r, threads);
     else columns<T, eagle::reduce::canonical::MinOp<T>>(r, threads);
@@ -274,6 +310,18 @@ ReduceOp reduce_check(const eg_ctx& ctx, const eg_reduce_desc& desc) {
     return r;
 }
 
+ReduceOp cell_reduce_check(const eg_ctx& ctx, eg_reduce_desc desc, bool position, std::int64_t samples) {
+    eg_plane* lanes = desc.op == EG_REDUCE_SUM ? nullptr : desc.comp;
+    if (lanes != nullptr) desc.comp = nullptr;
+    ReduceOp r = reduce_check(ctx, desc);
+    if (lanes != nullptr) {    // the rows carry the lane that won each: fold pairs
+        r.lanes = lanes;
+        r.position = position;
+        r.samples = samples;
+    }
+    return r;
+}
+
 /** @brief Run a checked reduce on at most @p threads threads of eagle's host pool: each column's canonical tree
  *  into out[column]. */
 void reduce_exec(const ReduceOp& r, int threads) {
@@ -307,7 +355,7 @@ T identity_of(std::int32_t op) {
 template <class T>
 void write_identity(const ReduceOp& r) {
     T* out = mut_data_of<T>(*r.out);
-    for (std::int64_t j = 0; j < r.cols; ++j) out[j] = identity_of<T>(r.op);
+    for (std::int64_t j = 0; j < r.cols; ++j) out[j] = r.position ? static_cast<T>(r.samples) : identity_of<T>(r.op);
 }
 
 }  // namespace
@@ -325,7 +373,7 @@ void fold_plan(const eg_plan_s& plan, int threads, std::int64_t first_row, std::
         d.comp = plan.comps[i];
         d.out = plan.bindings[c.slot].plane;
         d.op = c.op;
-        ReduceOp r = reduce_check(*plan.ctx, d);
+        ReduceOp r = cell_reduce_check(*plan.ctx, d, c.position, plan.n_samples);
         if (end_row > first_row) {
             r.first = first_row;
             r.n = end_row - first_row;

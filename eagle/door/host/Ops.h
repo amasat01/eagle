@@ -20,6 +20,9 @@ struct ReduceOp {
     eg_plane_s* out = nullptr;
     eg_plane_s* comp = nullptr;   ///< input companion, or (with ``pair``) the output compensation
     eg_plane_s* index = nullptr;  ///< min and max only: receives the lane of each column's winner, or nullptr
+    eg_plane_s* lanes = nullptr;  ///< min and max over the rows of a cell: the lane that won each row (same type as ``in``), or nullptr
+    bool position = false;        ///< with ``lanes``: the cell takes the lane of the overall winner instead of its value
+    std::int64_t samples = 0;     ///< with ``lanes``: the sample count, the lane of "no winner"
     eg_reduce_op op = EG_REDUCE_SUM;
     bool pair = false;
     std::int32_t code = 0;        ///< the element type, see Ops.cpp
@@ -29,6 +32,11 @@ struct ReduceOp {
 
 ReduceOp reduce_check(const eg_ctx& ctx, const eg_reduce_desc& desc);
 void reduce_exec(const ReduceOp& r, int threads);
+
+/** @brief Check the fold of the rows of a cell: ``desc.comp`` holds the compensation rows of a sum, or the rows of the lanes that won (@p lanes
+ *  is then the same plane) of a minimum or maximum, which folds pairs (value, lane) and writes the value, or with @p position the lane of the
+ *  winner (@p samples when there is none). */
+ReduceOp cell_reduce_check(const eg_ctx& ctx, eg_reduce_desc desc, bool position, std::int64_t samples);
 
 /** @brief A checked scan: the two planes, the op, the form and the element type (see Ops.cpp). */
 struct ScanOp {

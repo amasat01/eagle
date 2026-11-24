@@ -132,13 +132,15 @@ struct CompanionFacts {
 struct CellFacts {
     std::int32_t slot = -1;
     eg_reduce_op op = EG_REDUCE_SUM;
-    std::int32_t comp = -1;                   ///< SUM: the row slot of its compensation, else -1
+    std::int32_t comp = -1;                   ///< SUM: the row slot of its compensation; MAX, MIN: of the winners' lanes; else -1
+    bool position = false;                    ///< MAX, MIN: the cell takes the lane of the winner, not its value
     std::string name;                         ///< the cell's name (a column's slot is named <cell>_<k> when the cell has several)
 };
 
 /** @brief One cell column of a split unit's stages: the rows its stage writes and where they fold (a source slot of the caller's, or a
  *  cell plane eagle makes and later stages read by this name). */
 struct SplitCell {
+    bool position = false;                    ///< MAX, MIN: the cell takes the lane of the winner, not its value (see CellFacts)
     std::int32_t stage = 0, row_slot = -1, comp_slot = -1, source = -1;
     eg_reduce_op op = EG_REDUCE_SUM;
     std::string name;

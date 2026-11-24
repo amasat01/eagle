@@ -166,7 +166,7 @@ inline std::uint64_t run_split(const eg_plan_s& plan, int threads) {
             rd.out = sc.source >= 0 ? plan.bindings[static_cast<std::size_t>(sc.source)].plane : plan.outs[c];
             rd.comp = plan.comps[c];
             rd.op = sc.op;
-            reduce_exec(reduce_check(*plan.ctx, rd), threads);
+            reduce_exec(cell_reduce_check(*plan.ctx, rd, sc.position, plan.n_samples), threads);
         }
     }
     check_scatter_status(plan);

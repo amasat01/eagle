@@ -214,7 +214,10 @@ struct eg_unit_cell {
     int32_t columns;          /**< components of the cell, >= 1 */
     const int32_t* slots;     /**< ``columns`` row-plane slots in THIS unit, NULL: this unit binds none (a source unit's internal cell) */
     const char* name;         /**< joins eg_unit_stage cells_in / cells_out; reasons */
-    const int32_t* comp_slots; /**< ``columns`` row-plane slots of a SUM cell's compensation in THIS unit, NULL: none (refused on MAX / MIN) */
+    const int32_t* comp_slots; /**< ``columns`` row-plane slots of a SUM cell's compensation in THIS unit, NULL: none. A MAX or MIN cell names here the rows
+                                    *   of the lane that won each row (a real holding a whole number), and then folds pairs (value, lane): the larger (smaller)
+                                    *   value wins, equal values go to the lower lane, a NaN never wins, and no winner has the lane ``nSamples``. */
+    uint32_t position;        /**< 1: the cell takes the lane of the winner instead of its value (needs ``comp_slots``; MAX and MIN only) */
 };
 
 /** A plane keyed by kept lane axes, owned by eagle between stages (eg_bind sizes

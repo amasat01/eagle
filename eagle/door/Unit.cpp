@@ -229,8 +229,8 @@ void read_made(const eg_unit_body& body, void* library, bool device_only, eg_uni
             refuse(EG_BAD_REQUEST, who + "cell '" + name + "' has " + std::to_string(cell.columns) + " columns and no row slots");
         if (cell.op == EG_REDUCE_SUM && cell.comp_slots == nullptr)
             refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': the cell '" + name + "' sums, and the cell's compensation slot is not stated in the unit meta (comp_slots is NULL)");
-        if (cell.op != EG_REDUCE_SUM && cell.comp_slots != nullptr)
-            refuse(EG_BAD_REQUEST, who + "cell '" + name + "' folds with MAX or MIN and names compensation slots");
+        if (cell.position != 0 && (cell.op == EG_REDUCE_SUM || cell.comp_slots == nullptr))
+            refuse(EG_BAD_REQUEST, who + "cell '" + name + "' takes a position, which needs a MAX or MIN fold and the rows of the winners' lanes (comp_slots)");
         for (int c = 0; c < cell.columns; ++c) {
             SlotFacts& row = accum(cell.slots[c], "cell");
             if (row.made || row.cell) refuse(EG_BAD_REQUEST, who + "cell slot " + std::to_string(cell.slots[c]) + " is listed twice");
@@ -242,7 +242,7 @@ void read_made(const eg_unit_body& body, void* library, bool device_only, eg_uni
                 cs.made = true;
             }
             row.cell = true;
-            unit.cells.push_back({ cell.slots[c], cell.op, comp, name });
+            unit.cells.push_back({ cell.slots[c], cell.op, comp, cell.position != 0, name });
         }
     }
 }
@@ -1130,6 +1130,7 @@ void resolve_stages(eg_ctx& ctx, const eg_unit_load_desc& d, eg_unit_s& unit) {
                 sc.stage = static_cast<std::int32_t>(i);
                 sc.row_slot = c.slot;
                 sc.comp_slot = c.comp;
+                sc.position = c.position;
                 sc.op = c.op;
                 sc.name = su.slots[static_cast<std::size_t>(c.slot)].name;
                 for (std::size_t k = 0; k < unit.slots.size(); ++k)

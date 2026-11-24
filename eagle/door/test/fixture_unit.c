@@ -130,6 +130,7 @@ EG_FIXTURE_EXPORT void gath_host(void* const* params, int64_t base, int64_t coun
 EG_FIXTURE_EXPORT void boxed_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void shr_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void cells_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void cellpos_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void keyed_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void keyed__fold_acc_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void sg_cls_host(void* const* params, int64_t base, int64_t count, int64_t n);
@@ -473,6 +474,25 @@ void cells_host(void* const* params, int64_t base, int64_t count, int64_t n) {
         if (i % 4 == 0) tot[r] = 1e300, mx[r] = -1e300;
         if (x[i] < tot[r]) tot[r] = x[i];
         if (x[i] > mx[r]) mx[r] = x[i];
+    }
+}
+
+/* rows of 4 samples of a minimum with its position: lo[r] and at[r] hold the smallest non-NaN x of the row, lo_comp[r] and at_comp[r] the lane
+ * that has it (the first of equals; n when every x of the row is NaN); params lo, at, x, lo_comp, at_comp */
+void cellpos_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    double* lo = (double*)((const struct fixture_handle*)params[0])->data;
+    double* at = (double*)((const struct fixture_handle*)params[1])->data;
+    const double* x = (const double*)((const struct fixture_handle*)params[2])->data;
+    double* lo_lane = (double*)((const struct fixture_handle*)params[3])->data;
+    double* at_lane = (double*)((const struct fixture_handle*)params[4])->data;
+    for (int64_t i = base; i < base + count; i += 4) {
+        const int64_t r = i / 4;
+        double best = 0.0 / 0.0;
+        int64_t lane = n;
+        for (int64_t j = i; j < i + 4 && j < base + count; ++j)
+            if (x[j] == x[j] && (lane == n || x[j] < best)) best = x[j], lane = j;
+        lo[r] = at[r] = best;
+        lo_lane[r] = at_lane[r] = (double)lane;
     }
 }
 
@@ -1104,6 +1124,24 @@ static const struct eg_unit_meta unit_cells = {
     .struct_size = sizeof(struct eg_unit_meta), .name = "cells", .digest = DIGEST(0x67), .pattern = EG_PATTERN_PURE,
     .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "cells_host", .device_image_format = EG_IMAGE_NONE,
     .body = &cells_body, .launch = &launch };
+/* a minimum and its position over rows of 4 samples: the value cell and the position cell fold the same pairs */
+ZSLOT_OF(slot_lo, EG_DTYPE_REAL, "lo");
+ZSLOT_OF(slot_at, EG_DTYPE_REAL, "at");
+ZSLOT_OF(slot_lo_c, EG_DTYPE_REAL, "lo_comp");
+ZSLOT_OF(slot_at_c, EG_DTYPE_REAL, "at_comp");
+static const int32_t cellpos_lo_slots[] = { 0 }, cellpos_at_slots[] = { 1 }, cellpos_lo_comp[] = { 3 }, cellpos_at_comp[] = { 4 };
+static const struct eg_unit_cell cell_lo = { .struct_size = sizeof(struct eg_unit_cell), .op = EG_REDUCE_MIN, .columns = 1,
+                                             .slots = cellpos_lo_slots, .name = "lo", .comp_slots = cellpos_lo_comp };
+static const struct eg_unit_cell cell_at = { .struct_size = sizeof(struct eg_unit_cell), .op = EG_REDUCE_MIN, .columns = 1,
+                                             .slots = cellpos_at_slots, .name = "at", .comp_slots = cellpos_at_comp, .position = 1 };
+static const struct eg_unit_cell* const cellpos_list[] = { &cell_lo, &cell_at };
+static const struct eg_unit_slot* const cellpos_slots[] = { &slot_lo, &slot_at, &slot_x, &slot_lo_c, &slot_at_c };
+static const struct eg_unit_body cellpos_body = { .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL,
+    .n_slots = 5, .n_cells = 2, .cell_row = 4, .slots = cellpos_slots, .cells = cellpos_list };
+static const struct eg_unit_meta unit_cellpos = {
+    .struct_size = sizeof(struct eg_unit_meta), .name = "cellpos", .digest = DIGEST(0xF1), .pattern = EG_PATTERN_PURE,
+    .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "cellpos_host", .device_image_format = EG_IMAGE_NONE,
+    .body = &cellpos_body, .launch = &launch };
 static const struct eg_unit_meta unit_cellsum = {
     .struct_size = sizeof(struct eg_unit_meta), .name = "cellsum", .digest = DIGEST(0x6a), .pattern = EG_PATTERN_PURE,
     .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "cells_host", .device_image_format = EG_IMAGE_NONE,
@@ -1540,7 +1578,7 @@ GRP_UNIT(unit_grp_distinct_unordered, "grp_distinct_unordered", 0x5a, grp_launch
 static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &unit_tick, &unit_spans, &unit_prefixsum, &unit_widesum, &unit_mix2, &unit_split, &unit_count1,
                                                     &unit_count3, &unit_count1a, &unit_count3a, &unit_countA, &unit_countAa, &unit_vecs, &unit_count1i,
                                                     &unit_count1ia, &unit_count1e, &unit_lanes, &unit_prefix, &unit_count1g, &unit_widemul,
-                                                    &unit_gathb, &unit_gatha, &unit_gathn, &unit_gath18, &unit_boxed, &unit_boxbad, &unit_shr, &unit_cells, &unit_keyed,
+                                                    &unit_gathb, &unit_gatha, &unit_gathn, &unit_gath18, &unit_boxed, &unit_boxbad, &unit_shr, &unit_cells, &unit_keyed, &unit_cellpos,
                                                     &unit_keyedbad, &unit_cellsum, &unit_axpb_cards, &unit_axpb_badflag,
                                                     &unit_sg_cls, &unit_sg_k0, &unit_sg_k1, &unit_sgf, &unit_dg_k0, &unit_dg_k1, &unit_dg_sweep, &unit_dgf,
                                                     &unit_sga_cls, &unit_sga_k0, &unit_sga_k1, &unit_sga_rare, &unit_sga_even, &unit_sga_scalar, &unit_sga_heavy,

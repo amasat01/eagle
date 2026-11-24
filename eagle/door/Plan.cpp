@@ -587,6 +587,10 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
     std::vector<exec::Partition> parts = read_partitions(d);
     if (d.unit->seg.present && (parts.size() != 1 || parts[0].base != 0 || parts[0].count != d.n_samples))
         refuse(EG_BAD_REQUEST, "unit '" + d.unit->name + "' runs a SEGMENTED dispatch group over the sorted samples: one whole partition");
+    if (d.structure == EG_STRUCTURE_DEVICE)    // the device fold of a min or max does not carry the lane of the winner
+        for (const CellFacts& c : d.unit->cells)
+            if (c.op != EG_REDUCE_SUM && c.comp >= 0)
+                refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': the cell '" + c.name + "' folds a minimum or maximum with the lane that won (a position); not written for a device plan");
     for (const exec::Partition& p : parts)    // a row of a cell has one writer: a partition starts on a row
         if (d.unit->cell_row > 0 && p.base % d.unit->cell_row != 0)
             refuse(EG_BAD_REQUEST, "unit '" + d.unit->name + "' reduces over samples in rows of " + std::to_string(d.unit->cell_row) +

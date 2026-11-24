@@ -4,8 +4,10 @@
 #pragma once
 
 #include "eagle/typedefs.h"
-#include "eagle/cuda.h"
+// The device half of the scan core needs the launch machinery; the host half (a block count) needs none of it,
+// and host code must stay free of it.
 #ifndef EAGLE_CPU_ONLY
+#include "eagle/cuda.h"
 #include "eagle/cuda/WarpShuffle.h"
 #endif
 #include "eagle/util/DeviceError.h"

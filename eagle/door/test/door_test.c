@@ -4366,6 +4366,60 @@ static void check_box(eg_ctx* ctx) {
     eg_unit_free(ctx, unit);
 }
 
+/* the sequential loop: the first lane of the smallest non-NaN value; lane n and NaN when none */
+static void pos_oracle(const double* x, int64_t n, double* value, int64_t* lane) {
+    *value = 0.0 / 0.0;
+    *lane = n;
+    for (int64_t i = 0; i < n; ++i)
+        if (x[i] == x[i] && (*lane == n || x[i] < *value)) *value = x[i], *lane = i;
+}
+
+/* a minimum cell and the cell of its position, folded from rows of 4 samples that carry (value, lane): equal to the sequential loop */
+static void check_cell_position(eg_ctx* ctx) {
+    static double x[20000];
+    eg_unit* unit = NULL;
+    check(load(ctx, "cellpos", 0xF1, &unit) == EG_OK, "eg_unit_load a unit with a minimum cell and its position cell");
+    if (unit == NULL) return;
+    static const int64_t sizes[] = { 1, 4, 5, 10, 1000, 16384, 20000 };
+    static const char* const words[] = { "ties", "a NaN in every third lane", "all NaN" };
+    const int threads[3] = { 1, 4, 0 };
+    for (int kind = 0; kind < 3; ++kind) {
+        int ok = 1;
+        for (size_t si = 0; si < sizeof(sizes) / sizeof(sizes[0]); ++si) {
+            const int64_t n = sizes[si];
+            for (int64_t i = 0; i < n; ++i)
+                x[i] = kind == 2 ? 0.0 / 0.0 : (kind == 1 && i % 3 == 0 ? 0.0 / 0.0 : (double)((i * 37) % 11) + 2.0);
+            double want;
+            int64_t lane;
+            pos_oracle(x, n, &want, &lane);
+            for (int t = 0; t < 3; ++t) {
+                double lo = -1.0, at = -1.0;
+                struct tensor tx, tl, ta;
+                eg_plane* planes[3] = { wrap(ctx, &tl, &lo, 1, kDLFloat, 64), wrap(ctx, &ta, &at, 1, kDLFloat, 64), wrap(ctx, &tx, x, n, kDLFloat, 64) };
+                const int32_t slots[3] = { 0, 1, 2 };
+                struct eg_bind_desc bd;
+                memset(&bd, 0, sizeof(bd));
+                bd.struct_size = sizeof(bd);
+                bd.n_planes = 3;
+                bd.plane_slots = slots;
+                bd.planes = planes;
+                eg_plan* p = NULL;
+                eg_host_threads(ctx, threads[t]);
+                ok = ok && planes[0] && planes[1] && planes[2] && plan(ctx, unit, EG_STRUCTURE_HOST_TEAM, n, 0, NULL, NULL, &p) == EG_OK &&
+                     eg_bind(ctx, p, &bd) == EG_OK && eg_launch(ctx, p, NULL) == EG_OK && at == (double)lane &&
+                     (want != want ? lo != lo : lo == want);
+                eg_host_threads(ctx, 0);
+                eg_plan_free(ctx, p);
+                for (int k = 0; k < 3; ++k) eg_plane_free(ctx, planes[k]);
+            }
+        }
+        char what[200];
+        snprintf(what, sizeof(what), "cells: a minimum and its position folded from rows of 4 samples over 1 to 20000 samples with %s equal the sequential loop at 1 thread, 4 and the default", words[kind]);
+        check(ok, what);
+    }
+    eg_unit_free(ctx, unit);
+}
+
 /* cell rows of 4 samples folded by their op, and a keyed accumulate with an eagle-made companion folded after each launch */
 static void check_made(eg_ctx* ctx) {
     static double x[10], tot[1], mx[1], acc[4], xk[12];
@@ -7086,6 +7140,7 @@ int main(int argc, char** argv) {
     check_scan(ctx);
     check_compact(ctx);
     check_reduce_position(ctx);
+    check_cell_position(ctx);
 
     check_reduce(ctx);
     fft_values(ctx, 0);
