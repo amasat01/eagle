@@ -140,8 +140,22 @@ EG_EXPORT eg_status eg_launch(eg_ctx* ctx, eg_plan* plan, uint64_t* tiles) {
 EG_EXPORT eg_status eg_reduce(eg_ctx* ctx, const struct eg_reduce_desc* desc) {
     return door::call(ctx, [&](eg_ctx& c) {
         const eg_reduce_desc d = door::read_input(desc, "eg_reduce_desc");
-        if (door::device_planes(c, "eg_reduce", { d.in, d.out, d.comp })) door::device_reduce(c, d);
+        if (door::device_planes(c, "eg_reduce", { d.in, d.out, d.comp, d.index })) door::device_reduce(c, d);
         else door::reduce(c, desc);
+    });
+}
+EG_EXPORT eg_status eg_scan(eg_ctx* ctx, const struct eg_scan_desc* desc) {
+    return door::call(ctx, [&](eg_ctx& c) {
+        const eg_scan_desc d = door::read_input(desc, "eg_scan_desc");
+        if (door::device_planes(c, "eg_scan", { d.in, d.out })) door::device_scan(c, d);
+        else door::scan(c, desc);
+    });
+}
+EG_EXPORT eg_status eg_compact(eg_ctx* ctx, const struct eg_compact_desc* desc) {
+    return door::call(ctx, [&](eg_ctx& c) {
+        const eg_compact_desc d = door::read_input(desc, "eg_compact_desc");
+        if (door::device_planes(c, "eg_compact", { d.keep, d.kept, d.count })) door::device_compact(c, d);
+        else door::compact(c, desc);
     });
 }
 EG_EXPORT eg_status eg_copy(eg_ctx* ctx, eg_plane* src, eg_plane* dst) {

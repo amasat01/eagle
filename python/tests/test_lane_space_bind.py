@@ -400,6 +400,19 @@ def test_a_malformed_plane_axes_is_refused_naming_the_key():
                                 name="k")
 
 
+def test_a_unit_that_lists_stages_states_the_axes_of_an_output_a_later_stage_writes():
+    later = {"y": {"payload": [], "axes": [{"label": "b", "extent": 8}]}}
+    first = {"arg_spec": [["plane_out", "tmb0_gp"], ["plane_in", "x"]], "plane_axes": later,
+             "stages": [{"unit": {"name": "k"}}, {"unit": {"name": "k_2"}}]}
+    assert sidecar.read_plane_axes(first, name="k") == later
+    alone = {key: value for key, value in first.items() if key != "stages"}
+    with pytest.raises(ValueError, match="plane_axes"):
+        sidecar.read_plane_axes(alone, name="k")
+    malformed = {**first, "plane_axes": {"y": {"payload": [0], "axes": []}}}
+    with pytest.raises(ValueError, match="plane_axes"):
+        sidecar.read_plane_axes(malformed, name="k")
+
+
 def test_rebind_takes_a_lane_shaped_plane_as_a_view(built):
     k = declared(built, "scale", CHANNEL_BY_SAMPLE)
     x = np.arange(3 * 16, dtype=np.float64).reshape(3, 16)

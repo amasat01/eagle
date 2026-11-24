@@ -16,7 +16,9 @@
 namespace eagle {
 namespace cpu {
 
-/** @brief Prefix sum (scan) on eagle's host pool */
+/** @brief Prefix scan on eagle's host pool, over any element type and any associative operator. The input and output are
+ *  anything that reads ``samples()`` and ``(i)`` (aether array views, or a pointer and a length as the door's host scan
+ *  makes them). */
 struct Scan {
     using Self = Scan;
 
@@ -24,10 +26,10 @@ struct Scan {
      *  totals are prefixed in order, and each block adds its offset. The blocks are fixed by ``blockSize_`` and the
      *  prefix runs in block order, so the results do not depend on ``team``. */
     template<typename T, typename OP, bool Inclusive,
-        unsigned int blockSize_ = 1024>
-    static void scan(const CRefArrT<T> arr, GRefArrT<T> results,
-        GRefArrT<T> blockSums, const T& init = 0,
-        int team = exec::host_max_threads())
+        unsigned int blockSize_ = 1024, typename InT, typename OutT,
+        typename SumsT>
+    static void scan(const InT& arr, OutT&& results, SumsT&& blockSums,
+        const T& init = 0, int team = exec::host_max_threads())
     {
         const idx_t N         = arr.samples();
         const idx_t blockSize = std::min(blockSize_, N);
@@ -59,30 +61,29 @@ struct Scan {
             acc          = OP{}(acc, temp);
         }
 
-        const CRefArrT<T> offsets = blockSums.as_const();
         exec::hostFor(numBlocks, team, [&](std::int64_t b) {
             const idx_t start = idx_t(b) * blockSize;
             const idx_t end   = std::min(start + blockSize, N);
-            const T offset    = offsets(b);
+            const T offset    = blockSums(b);
             for (idx_t i = start; i < end; ++i)
                 results(i) = OP{}(results(i), offset);
         });
     }
 
     /** @brief Run the inclusive scan */
-    template<typename T, typename OP, unsigned int blockSize_ = 1024>
-    static void inclusive(const CRefArrT<T> arr, GRefArrT<T> results,
-        GRefArrT<T> blockSums, const T& init = 0,
-        int team = exec::host_max_threads())
+    template<typename T, typename OP, unsigned int blockSize_ = 1024,
+        typename InT, typename OutT, typename SumsT>
+    static void inclusive(const InT& arr, OutT&& results, SumsT&& blockSums,
+        const T& init = 0, int team = exec::host_max_threads())
     {
         Scan::scan<T, OP, true, blockSize_>(arr, results, blockSums, init, team);
     }
 
     /** @brief Run the exclusive scan */
-    template<typename T, typename OP, unsigned int blockSize_ = 1024>
-    static void exclusive(const CRefArrT<T> arr, GRefArrT<T> results,
-        GRefArrT<T> blockSums, const T& init = 0,
-        int team = exec::host_max_threads())
+    template<typename T, typename OP, unsigned int blockSize_ = 1024,
+        typename InT, typename OutT, typename SumsT>
+    static void exclusive(const InT& arr, OutT&& results, SumsT&& blockSums,
+        const T& init = 0, int team = exec::host_max_threads())
     {
         Scan::scan<T, OP, false, blockSize_>(arr, results, blockSums, init, team);
     }

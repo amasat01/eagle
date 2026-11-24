@@ -53,10 +53,16 @@ void compact(ActiveState& a, const Mask& mask) {
         a.count = static_cast<std::uint32_t>(groups * a.group);
         return;
     }
-    std::uint32_t live = 0;
-    for (std::int64_t i = 0; i < a.n; ++i)
-        if (!mask.set(i)) a.map[live++] = static_cast<std::int32_t>(i);
-    a.count = live;
+    // the runtime's one compaction (the one eg_compact runs): a mask byte that is set drops the slot
+    const std::uint8_t* bytes = reinterpret_cast<const std::uint8_t*>(mask.data);
+    if (mask.bytes != 1) {
+        a.narrowed.resize(static_cast<std::size_t>(a.n));
+        exec::hostFor(a.n, a.threads > 0 ? a.threads : exec::host_max_threads(),
+                      [&](std::int64_t i) { a.narrowed[static_cast<std::size_t>(i)] = mask.set(i); });
+        bytes = a.narrowed.data();
+    }
+    host::compact_lanes(bytes, true, a.map.data(), &a.count, a.n, a.threads > 0 ? a.threads : exec::host_max_threads(), a.scratch);
+    const std::uint32_t live = a.count;
     if (!a.reorder) return;
     std::int64_t live32 = 0;
     for (std::int64_t g = 0; g < a.n; g += 32) {
@@ -120,6 +126,7 @@ void restore(ActiveState& a, const std::vector<Owned>& owned) {
 void run_active(eg_ctx& ctx, eg_runner_s& runner, int threads, std::int64_t& iterations, std::int64_t& compactions,
                 std::int64_t& reorders) {
     ActiveState& a = runner.act;
+    a.threads = threads;
     eg_plan_s& first = *runner.plans[0];
     const std::int64_t n = a.n;
     const std::vector<Owned> owned = owned_planes(runner);

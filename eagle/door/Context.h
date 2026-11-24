@@ -545,6 +545,9 @@ struct ActiveState {
     std::int64_t span = 0;                    ///< slots a reorder may still move
     bool fire = false;                        ///< the last compaction found a reorder worth running
     std::int64_t compactions = 0, reorders = 0, restored_at = 0;
+    int threads = 0;                          ///< the host threads a compaction uses, set by the run; 0: the default budget
+    std::vector<std::uint64_t> scratch;       ///< the compaction's working memory, kept between compactions and grown with the lane count
+    std::vector<std::uint8_t> narrowed;       ///< a mask wider than a byte, one byte per lane, kept between compactions
 };
 
 }  // namespace door
@@ -953,6 +956,8 @@ void look_reset(eg_ctx& ctx, eg_runner_s& runner);
 void look_free(eg_ctx& ctx, eg_runner_s& runner);
 void seg_reset(eg_ctx& ctx, eg_plan_s& plan);
 void reduce(eg_ctx& ctx, const eg_reduce_desc* desc);
+void scan(eg_ctx& ctx, const eg_scan_desc* desc);
+void compact(eg_ctx& ctx, const eg_compact_desc* desc);
 void copy(eg_ctx& ctx, eg_plane_s* src, eg_plane_s* dst);
 void fft_new(eg_ctx& ctx, const eg_fft_desc* desc, eg_fft** out);
 void fft_run(eg_ctx& ctx, eg_fft_s* plan, eg_plane_s* in, eg_plane_s* out);

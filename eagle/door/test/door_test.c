@@ -36,6 +36,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
+#include <math.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -5091,6 +5092,675 @@ static void check_host_events(eg_ctx* ctx) {
     eg_ctx_free(other);
 }
 
+/* ---- eg_scan ------------------------------------------------------------------ */
+
+static eg_status scan_do(eg_ctx* ctx, eg_plane* in, eg_plane* out, eg_scan_op op, uint32_t flags) {
+    struct eg_scan_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.flags = flags;
+    d.in = in;
+    d.out = out;
+    d.op = op;
+    return eg_scan(ctx, &d);
+}
+
+enum { SCAN_MAX_N = 100000 };
+
+/* One scan over n values held as 64-bit integers, converted to and from the plane's type: the oracle is the left-to-right loop
+ * in wide arithmetic, which is exact for the whole numbers used (a real sum of whole numbers below 2^24 is exact in any
+ * grouping). Unsigned and signed sums wrap, so the oracle wraps to the plane's width. */
+static long long scan_wrap(long long v, uint8_t code, uint8_t bits) {
+    if (code == kDLFloat) return v;
+    if (bits == 32) return code == kDLUInt ? (long long)(uint32_t)v : (long long)(int32_t)v;
+    return v;
+}
+
+static void scan_store(void* buf, int i, long long v, uint8_t code, uint8_t bits) {
+    if (code == kDLFloat) {
+        if (bits == 32) ((float*)buf)[i] = (float)v; else ((double*)buf)[i] = (double)v;
+    } else if (bits == 32) {
+        if (code == kDLUInt) ((uint32_t*)buf)[i] = (uint32_t)v; else ((int32_t*)buf)[i] = (int32_t)v;
+    } else {
+        if (code == kDLUInt) ((uint64_t*)buf)[i] = (uint64_t)v; else ((int64_t*)buf)[i] = v;
+    }
+}
+
+static long long scan_load(const void* buf, int i, uint8_t code, uint8_t bits) {
+    if (code == kDLFloat) return bits == 32 ? (long long)((const float*)buf)[i] : (long long)((const double*)buf)[i];
+    if (bits == 32) return code == kDLUInt ? (long long)((const uint32_t*)buf)[i] : (long long)((const int32_t*)buf)[i];
+    return code == kDLUInt ? (long long)((const uint64_t*)buf)[i] : ((const int64_t*)buf)[i];
+}
+
+/* Whether @p got is a valid exclusive identity beside the input @p x: at least x for a minimum, at most x for a maximum, compared in the plane's own signedness. */
+static int scan_identity_ok(long long got, long long x, uint8_t code, int minimum) {
+    if (code == kDLUInt) return minimum ? (unsigned long long)got >= (unsigned long long)x : (unsigned long long)got <= (unsigned long long)x;
+    return minimum ? got >= x : got <= x;
+}
+
+/* Inclusive and exclusive scans of every op over the sizes that straddle the 1024-element block, one type. The exclusive
+ * identity of min and max is not a whole number a 64-bit integer holds for every type, so its first element is checked as
+ * "at least every input" (min: the largest value, max: the smallest) and the rest by the loop. */
+static int scan_type_ok(eg_ctx* ctx, uint8_t code, uint8_t bits) {
+    static const int sizes[] = { 0, 1, 2, 1023, 1024, 1025, 2048, 4097, SCAN_MAX_N };
+    static unsigned char in[SCAN_MAX_N * 8], out[SCAN_MAX_N * 8];
+    for (int i = 0; i < SCAN_MAX_N; ++i)
+        scan_store(in, i, code == kDLFloat ? (long long)((i * 7919) % 201 - 100) : (long long)((i * 2654435761u) % 100003) * 40000 - (code == kDLInt ? 2000000000 : 0), code, bits);
+    int ok = 1;
+    for (size_t si = 0; ok && si < sizeof(sizes) / sizeof(sizes[0]); ++si) {
+        const int n = sizes[si];
+        struct tensor ti, to;
+        eg_plane* pi = wrap(ctx, &ti, in, n, code, bits);
+        eg_plane* po = wrap(ctx, &to, out, n, code, bits);
+        ok = pi && po;
+        for (int op = EG_SCAN_SUM; ok && op <= EG_SCAN_MAX; ++op)
+            for (int ex = 0; ok && ex < 2; ++ex) {
+                memset(out, 0x55, sizeof(out));
+                ok = scan_do(ctx, pi, po, op, ex ? EG_SCAN_EXCLUSIVE : 0) == EG_OK;
+                long long fold = 0;
+                for (int i = 0; ok && i < n; ++i) {
+                    const long long x = scan_load(in, i, code, bits);
+                    const long long prior = fold;
+                    fold = i == 0 && op != EG_SCAN_SUM ? x : op == EG_SCAN_SUM ? scan_wrap(fold + x, code, bits) : op == EG_SCAN_MIN ? (x < fold ? x : fold) : (x > fold ? x : fold);
+                    if (ex && i == 0) ok = op == EG_SCAN_SUM ? scan_load(out, 0, code, bits) == 0 : scan_identity_ok(scan_load(out, 0, code, bits), x, code, op == EG_SCAN_MIN);
+                    else ok = scan_load(out, i, code, bits) == (ex ? prior : fold);
+                }
+            }
+        eg_plane_free(ctx, pi);
+        eg_plane_free(ctx, po);
+    }
+    return ok;
+}
+
+static eg_plane* wrap_2d_scan(eg_ctx* ctx, struct tensor* t) {
+    static double buf[200];
+    eg_plane* p = NULL;
+    tensor_init(t, buf, 1, 64);
+    tensor_as(t, kDLFloat, 64);
+    tensor_2d(t, 10, 20);
+    return eg_plane_wrap(ctx, &t->managed, &p) == EG_OK ? p : NULL;
+}
+
+/* The refusals by name, the recording, the description, the reverse, and a real sum that is the same bits at any thread count. */
+static void check_scan(eg_ctx* ctx) {
+    check(scan_type_ok(ctx, kDLInt, 32), "eg_scan int32: sum, min, max, both forms, sizes 0 to 100000 equal the left-to-right loop (the sum wraps)");
+    check(scan_type_ok(ctx, kDLInt, 64), "eg_scan int64: sum, min, max, both forms, sizes 0 to 100000 equal the left-to-right loop");
+    check(scan_type_ok(ctx, kDLUInt, 32), "eg_scan uint32: sum, min, max, both forms, sizes 0 to 100000 equal the left-to-right loop (the sum wraps)");
+    check(scan_type_ok(ctx, kDLUInt, 64), "eg_scan uint64: sum, min, max, both forms, sizes 0 to 100000 equal the left-to-right loop");
+    check(scan_type_ok(ctx, kDLFloat, 32), "eg_scan float32: sum, min, max, both forms, sizes 0 to 100000 equal the left-to-right loop (whole numbers)");
+    check(scan_type_ok(ctx, kDLFloat, 64), "eg_scan float64: sum, min, max, both forms, sizes 0 to 100000 equal the left-to-right loop (whole numbers)");
+
+    static double x[SCAN_MAX_N], one[SCAN_MAX_N], many[SCAN_MAX_N];
+    static float xf[SCAN_MAX_N];
+    for (int i = 0; i < SCAN_MAX_N; ++i) {
+        x[i] = sin((double)i * 0.37) * 1.0e3 + 1.0e-3 * (i % 7);
+        xf[i] = (float)x[i];
+    }
+    struct tensor tx, t1, tm;
+    eg_plane* px = wrap(ctx, &tx, x, SCAN_MAX_N, kDLFloat, 64);
+    eg_plane* p1 = wrap(ctx, &t1, one, SCAN_MAX_N, kDLFloat, 64);
+    eg_plane* pm = wrap(ctx, &tm, many, SCAN_MAX_N, kDLFloat, 64);
+    eg_host_threads(ctx, 1);
+    int ok = px && p1 && pm && scan_do(ctx, px, p1, EG_SCAN_SUM, 0) == EG_OK;
+    eg_host_threads(ctx, 4);
+    ok = ok && scan_do(ctx, px, pm, EG_SCAN_SUM, 0) == EG_OK && memcmp(one, many, sizeof(one)) == 0;
+    /* the bound |out[i] - exact| <= i * u * sum(|in[0..i]|), the exact value from long double */
+    long double exact = 0, mag = 0;
+    for (int i = 0; ok && i < SCAN_MAX_N; ++i) {
+        exact += (long double)x[i];
+        mag += fabsl((long double)x[i]);
+        ok = fabsl((long double)many[i] - exact) <= (long double)(i + 1) * 1.1102230246251565e-16L * mag;
+    }
+    check(ok, "eg_scan float64 sum: the same bits with 1 and with 4 threads, within i * u * sum(|in|) of a long double sum");
+    eg_host_threads(ctx, 0);
+
+    struct tensor t2, to2, tb, tl;
+    eg_plane *p2 = wrap_2d_scan(ctx, &t2), *po2 = wrap(ctx, &to2, many, SCAN_MAX_N, kDLFloat, 64);
+    check(p2 && scan_do(ctx, p2, po2, EG_SCAN_SUM, 0) == EG_BAD_REQUEST && reason_has(ctx, "run-time axes") && reason_has(ctx, "g.scan"),
+          "eg_scan of a plane of two axes: BAD_REQUEST naming the group over that axis as the way");
+    eg_plane* pl = wrap(ctx, &tl, many, 10, kDLFloat, 64);
+    tl.managed.dl_tensor.dtype.lanes = 3;
+    check(pl && scan_do(ctx, pl, po2, EG_SCAN_SUM, 0) == EG_NOT_WRITTEN && reason_has(ctx, "rank above zero"),
+          "eg_scan of a value of rank above zero: NOT_WRITTEN by name");
+    eg_plane* pb = wrap(ctx, &tb, many, 10, kDLInt, 8);
+    check(pb && scan_do(ctx, pb, pb, EG_SCAN_SUM, 0) == EG_NOT_WRITTEN && reason_has(ctx, "int32, int64, uint32, uint64, float32, float64"),
+          "eg_scan of an int8 plane: NOT_WRITTEN naming the six types");
+    check(scan_do(ctx, px, px, EG_SCAN_SUM, 0) == EG_BAD_REQUEST && reason_has(ctx, "overlaps"),
+          "eg_scan with out the plane of in: BAD_REQUEST (overlap)");
+    struct tensor ts, tshort;
+    eg_plane* pf = wrap(ctx, &ts, xf, SCAN_MAX_N, kDLFloat, 32);
+    eg_plane* pshort = wrap(ctx, &tshort, many, 5, kDLFloat, 64);
+    check(scan_do(ctx, px, pf, EG_SCAN_SUM, 0) == EG_BAD_REQUEST && reason_has(ctx, "dtype differs") &&
+              scan_do(ctx, px, pshort, EG_SCAN_SUM, 0) == EG_BAD_REQUEST && reason_has(ctx, "extent differs"),
+          "eg_scan with out of another type or another extent: BAD_REQUEST");
+    check(scan_do(ctx, px, pm, 9, 0) == EG_BAD_REQUEST && scan_do(ctx, px, pm, EG_SCAN_SUM, 2) == EG_BAD_REQUEST &&
+              scan_do(ctx, NULL, pm, EG_SCAN_SUM, 0) == EG_BAD_REQUEST && eg_scan(ctx, NULL) == EG_BAD_REQUEST,
+          "eg_scan with an unknown op, unknown flag bits, a NULL plane or a NULL descriptor: BAD_REQUEST");
+
+    /* recorded, described and replayed over changed input */
+    eg_graph* g = NULL;
+    struct eg_graph_description d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    memset(many, 0, 100 * sizeof(double));
+    ok = eg_record_begin(ctx) == EG_OK && scan_do(ctx, px, pm, EG_SCAN_MAX, EG_SCAN_EXCLUSIVE) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK &&
+         many[0] == 0.0 && eg_graph_describe(ctx, g, &d) == EG_OK && d.n_nodes == 1 && d.nodes[0].kind == EG_GNODE_SCAN &&
+         d.nodes[0].n_planes == 2 && d.nodes[0].planes[0] == px && d.nodes[0].access[0] == 1 && d.nodes[0].planes[1] == pm && d.nodes[0].access[1] == 2;
+    x[0] = 5.0;
+    x[1] = 9.0;
+    x[2] = 1.0;
+    ok = ok && eg_graph_launch(ctx, g) == EG_OK && many[0] < -1.0e300 && many[1] == 5.0 && many[2] == 9.0 && many[3] == 9.0;
+    x[0] = -7.0;
+    ok = ok && eg_graph_launch(ctx, g) == EG_OK && many[1] == -7.0 && many[2] == 9.0;
+    check(ok, "eg_scan recorded: one EG_GNODE_SCAN reading in and writing out; a replay reads the plane as it is then (exclusive max, identity first)");
+    eg_graph_free(ctx, g);
+
+    struct eg_record_end_desc diff;
+    memset(&diff, 0, sizeof(diff));
+    diff.struct_size = sizeof(diff);
+    diff.flags = EG_RECORD_DIFF;
+    g = NULL;
+    ok = eg_record_begin(ctx) == EG_OK && scan_do(ctx, px, pm, EG_SCAN_SUM, 0) == EG_OK;
+    check(ok && eg_record_end(ctx, &diff, &g) == EG_NOT_WRITTEN && reason_has(ctx, "eg_scan") && reason_has(ctx, "does not pull back a scan yet") && g == NULL,
+          "eg_scan in a DIFF recording: NOT_WRITTEN by name (its reverse is not written)");
+    eg_record_abort(ctx);
+
+    eg_plane_free(ctx, p2);
+    eg_plane_free(ctx, pl);
+    eg_plane_free(ctx, pb);
+    eg_plane_free(ctx, pf);
+    eg_plane_free(ctx, pshort);
+    eg_plane_free(ctx, po2);
+    eg_plane_free(ctx, px);
+    eg_plane_free(ctx, p1);
+    eg_plane_free(ctx, pm);
+}
+
+/* ---- eg_compact --------------------------------------------------------------- */
+
+static eg_status compact_do(eg_ctx* ctx, eg_plane* keep, eg_plane* kept, eg_plane* count) {
+    struct eg_compact_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.keep = keep;
+    d.kept = kept;
+    d.count = count;
+    return eg_compact(ctx, &d);
+}
+
+enum { COMPACT_MAX_N = 1000000 };
+
+/* One mask over n lanes: kept[:count] is the ascending list of the set lanes (the oracle is the plain loop), count their
+ * number, and the entries from count on are what the marker left there. */
+static int compact_case_ok(eg_ctx* ctx, const uint8_t* mask, int n, int32_t* kept, uint32_t* count) {
+    struct tensor tk, tc, tm;
+    eg_plane* pk = wrap(ctx, &tm, (void*)mask, n, kDLBool, 8);
+    eg_plane* pi = wrap(ctx, &tk, kept, n, kDLInt, 32);
+    eg_plane* pc = wrap(ctx, &tc, count, 1, kDLUInt, 32);
+    for (int i = 0; i < n; ++i) kept[i] = -7;
+    *count = 99u;
+    int ok = pk && pi && pc && compact_do(ctx, pk, pi, pc) == EG_OK;
+    uint32_t j = 0;
+    for (int i = 0; ok && i < n; ++i) {
+        if (mask[i] != 0) ok = kept[j++] == i;
+    }
+    ok = ok && *count == j;
+    for (int i = (int)j; ok && i < n; ++i) ok = kept[i] == -7;    /* the tail is not written */
+    eg_plane_free(ctx, pk);
+    eg_plane_free(ctx, pi);
+    eg_plane_free(ctx, pc);
+    return ok;
+}
+
+static void check_compact(eg_ctx* ctx) {
+    static const int sizes[] = { 0, 1, 2, 1023, 1024, 1025, 4097, COMPACT_MAX_N };
+    static uint8_t mask[COMPACT_MAX_N];
+    static int32_t kept[COMPACT_MAX_N];
+    uint32_t count = 0;
+    int ok = 1;
+    for (size_t si = 0; ok && si < sizeof(sizes) / sizeof(sizes[0]); ++si) {
+        const int n = sizes[si];
+        for (int pattern = 0; ok && pattern < 4; ++pattern) {
+            for (int i = 0; i < n; ++i)
+                mask[i] = pattern == 0 ? 1 : pattern == 1 ? 0 : pattern == 2 ? (uint8_t)(i & 1) : (uint8_t)(((unsigned)i * 2654435761u >> 7) % 5 == 0 ? 3 : 0);
+            ok = compact_case_ok(ctx, mask, n, kept, &count);
+        }
+    }
+    check(ok, "eg_compact: all kept, none kept, alternating and scattered masks over sizes 0 to 1000000 give the ascending lanes, the count and an untouched tail");
+
+    /* the same result with one thread (one pass) and with four (above the size where the threads pay: the scan) */
+    static int32_t one[100000], many[100000];
+    for (int i = 0; i < 100000; ++i) mask[i] = (uint8_t)((i * 7) % 3 == 0);
+    struct tensor tm, t1, t2, tc;
+    uint32_t c1 = 0, c2 = 0;
+    eg_plane* pm = wrap(ctx, &tm, mask, 100000, kDLBool, 8);
+    eg_plane* p1 = wrap(ctx, &t1, one, 100000, kDLInt, 32);
+    eg_plane* p2 = wrap(ctx, &t2, many, 100000, kDLInt, 32);
+    eg_plane* pc = wrap(ctx, &tc, &c1, 1, kDLUInt, 32);
+    eg_host_threads(ctx, 1);
+    ok = pm && p1 && p2 && pc && compact_do(ctx, pm, p1, pc) == EG_OK;
+    c1 = count = 0;
+    eg_plane_free(ctx, pc);
+    pc = wrap(ctx, &tc, &c2, 1, kDLUInt, 32);
+    eg_host_threads(ctx, 4);
+    ok = ok && pc && compact_do(ctx, pm, p2, pc) == EG_OK && c2 > 0 && memcmp(one, many, c2 * sizeof(int32_t)) == 0;
+    eg_host_threads(ctx, 0);
+    check(ok, "eg_compact: the same kept entries with 1 and with 4 threads");
+
+    /* the refusals by name */
+    struct tensor t2d, tbad, tshort, tcell2;
+    static double dbuf[8];
+    eg_plane* pf = wrap(ctx, &tbad, dbuf, 4, kDLFloat, 64);
+    eg_plane* pshort = wrap(ctx, &tshort, many, 3, kDLInt, 32);
+    eg_plane* pcell2 = wrap(ctx, &tcell2, dbuf, 2, kDLUInt, 32);
+    tensor_init(&t2d, mask, 1, 8);
+    tensor_as(&t2d, kDLBool, 8);
+    tensor_2d(&t2d, 2, 2);
+    eg_plane* p2d = NULL;
+    eg_plane_wrap(ctx, &t2d.managed, &p2d);
+    check(compact_do(ctx, pf, p2, pc) == EG_BAD_REQUEST && reason_has(ctx, "bool plane"), "eg_compact with a float keep: BAD_REQUEST");
+    check(compact_do(ctx, pm, pf, pc) == EG_BAD_REQUEST && reason_has(ctx, "int32 or uint32"), "eg_compact with a float kept: BAD_REQUEST");
+    check(compact_do(ctx, pm, pshort, pc) == EG_BAD_REQUEST && reason_has(ctx, "extent differs"), "eg_compact with a kept of another extent: BAD_REQUEST");
+    check(compact_do(ctx, pm, p2, pcell2) == EG_BAD_REQUEST && reason_has(ctx, "one-element uint32"), "eg_compact with a count of two elements: BAD_REQUEST");
+    check(p2d && compact_do(ctx, p2d, p2, pc) == EG_BAD_REQUEST && reason_has(ctx, "run-time axes"), "eg_compact with a keep of two axes: BAD_REQUEST naming the axes");
+    struct tensor tover;
+    eg_plane* pover = wrap(ctx, &tover, many, 1, kDLUInt, 32);
+    check(pover && compact_do(ctx, pm, p2, pover) == EG_BAD_REQUEST && reason_has(ctx, "distinct"), "eg_compact with a count inside kept: BAD_REQUEST (distinct planes)");
+    eg_plane_free(ctx, pover);
+    check(compact_do(ctx, NULL, p2, pc) == EG_BAD_REQUEST && eg_compact(ctx, NULL) == EG_BAD_REQUEST, "eg_compact with a NULL plane or descriptor: BAD_REQUEST");
+
+    /* recorded: a conditional on the count takes its arm when something is kept; replayed over a changed mask */
+    double src = 11.0, out = -5.0;
+    struct tensor ts, to;
+    eg_plane* psrc = wrap(ctx, &ts, &src, 1, kDLFloat, 64);
+    eg_plane* pout = wrap(ctx, &to, &out, 1, kDLFloat, 64);
+    struct eg_cond_desc cd;
+    memset(&cd, 0, sizeof(cd));
+    cd.struct_size = sizeof(cd);
+    cd.kind = EG_COND_IF;
+    cd.cell = pc;
+    eg_graph* g = NULL;
+    struct eg_graph_description d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    memset(mask, 0, 100000);
+    ok = psrc && pout && eg_record_begin(ctx) == EG_OK && compact_do(ctx, pm, p2, pc) == EG_OK && eg_record_cond_begin(ctx, &cd) == EG_OK &&
+         eg_copy(ctx, psrc, pout) == EG_OK && eg_record_cond_end(ctx) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK && out == -5.0 &&
+         eg_graph_describe(ctx, g, &d) == EG_OK && d.nodes[0].kind == EG_GNODE_COMPACT && d.nodes[0].n_planes == 3 && d.nodes[0].planes[0] == pm &&
+         d.nodes[0].access[0] == 1 && d.nodes[0].planes[1] == p2 && d.nodes[0].access[1] == 2 && d.nodes[0].planes[2] == pc && d.nodes[0].access[2] == 2;
+    ok = ok && eg_graph_launch(ctx, g) == EG_OK && c2 == 0 && out == -5.0;        /* nothing kept: the arm is not taken */
+    mask[5] = mask[4000] = 1;
+    ok = ok && eg_graph_launch(ctx, g) == EG_OK && c2 == 2 && many[0] == 5 && many[1] == 4000 && out == 11.0;   /* kept: taken */
+    check(ok, "eg_compact recorded with a conditional on its count: one EG_GNODE_COMPACT node; a replay with nothing kept skips the arm, a changed mask takes it");
+    eg_graph_free(ctx, g);
+
+    /* the reverse of a compaction */
+    struct eg_record_end_desc diff;
+    memset(&diff, 0, sizeof(diff));
+    diff.struct_size = sizeof(diff);
+    diff.flags = EG_RECORD_DIFF;
+    g = NULL;
+    ok = eg_record_begin(ctx) == EG_OK && compact_do(ctx, pm, p2, pc) == EG_OK;
+    check(ok && eg_record_end(ctx, &diff, &g) == EG_NOT_WRITTEN && reason_has(ctx, "eg_compact") && reason_has(ctx, "does not pull back a compaction yet") && g == NULL,
+          "eg_compact in a DIFF recording: NOT_WRITTEN by name (its reverse is not written)");
+    eg_record_abort(ctx);
+    eg_plane_free(ctx, psrc);
+    eg_plane_free(ctx, pout);
+    eg_plane_free(ctx, p2d);
+    eg_plane_free(ctx, pcell2);
+    eg_plane_free(ctx, pshort);
+    eg_plane_free(ctx, pf);
+    eg_plane_free(ctx, pm);
+    eg_plane_free(ctx, p1);
+    eg_plane_free(ctx, p2);
+    eg_plane_free(ctx, pc);
+}
+
+/* ---- eg_reduce with a position, and ANY ---------------------------------------- */
+
+enum { RANK_MAX_N = 1000000 };
+
+typedef struct {
+    uint8_t code, bits;
+} rank_type;
+
+static const rank_type rank_types[] = { { kDLFloat, 64 }, { kDLFloat, 32 }, { kDLInt, 32 }, { kDLUInt, 32 } };
+
+static double rank_get(const void* data, rank_type t, int64_t i) {
+    if (t.code == kDLFloat) return t.bits == 64 ? ((const double*)data)[i] : (double)((const float*)data)[i];
+    return t.code == kDLInt ? (double)((const int32_t*)data)[i] : (double)((const uint32_t*)data)[i];
+}
+
+static void rank_put(void* data, rank_type t, int64_t i, double v) {
+    if (t.code == kDLFloat) {
+        if (t.bits == 64) ((double*)data)[i] = v;
+        else ((float*)data)[i] = (float)v;
+    } else if (t.code == kDLInt) {
+        ((int32_t*)data)[i] = (int32_t)v;
+    } else {
+        ((uint32_t*)data)[i] = (uint32_t)v;
+    }
+}
+
+static eg_status rank_do(eg_ctx* ctx, eg_plane* in, eg_plane* out, eg_plane* index, eg_reduce_op op) {
+    struct eg_reduce_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.in = in;
+    d.out = out;
+    d.index = index;
+    d.op = op;
+    d.policy = EG_REDUCE_COMPENSATED;
+    return eg_reduce(ctx, &d);
+}
+
+/* The oracle: the plain loop over the non-NaN samples, the first occurrence of the extreme; no sample: lane n and a NaN. */
+static void rank_oracle(const void* data, rank_type t, int64_t n, int is_max, double* value, int64_t* lane) {
+    *value = NAN_D;
+    *lane = n;
+    for (int64_t i = 0; i < n; ++i) {
+        const double v = rank_get(data, t, i);
+        if (v != v) continue;
+        if (*lane == n || (is_max ? v > *value : v < *value)) {
+            *value = v;
+            *lane = i;
+        }
+    }
+}
+
+/* Fill n values of type t. 0: many ties; 1: constant; 2: the extremes repeated at both ends; 3: the extremes repeated across the
+ * lanes 255/256 (a slot of a leaf) and 4095/4096 (a leaf); 4: ties with a NaN in every fifth lane; 5: all NaN. */
+static void rank_fill(void* data, rank_type t, int64_t n, int kind) {
+    for (int64_t i = 0; i < n; ++i) {
+        double v = (double)((i * 37) % 101) + 10.0;
+        if (kind == 1) v = 50.0;
+        if (kind == 2 || kind == 3) v = 50.0;
+        if (kind == 4 && i % 5 == 0) v = NAN_D;
+        if (kind == 5) v = NAN_D;
+        rank_put(data, t, i, v);
+    }
+    if (kind == 2 && n > 0) {
+        rank_put(data, t, 0, 3.0);
+        rank_put(data, t, n - 1, 3.0);
+        if (n > 1) rank_put(data, t, 1, 150.0);
+        if (n > 2) rank_put(data, t, n - 2, 150.0);
+    }
+    if (kind == 3) {
+        static const int64_t high[] = { 255, 256, 4095, 8191 }, low[] = { 257, 4096, 4097, 8192 };
+        for (size_t k = 0; k < 4; ++k) {
+            if (high[k] < n) rank_put(data, t, high[k], 150.0);
+            if (low[k] < n) rank_put(data, t, low[k], 3.0);
+        }
+    }
+}
+
+/* One column plane of n samples of type t, folded with op: value and lane against the oracle (a NaN equals a NaN). */
+static int rank_case_ok(eg_ctx* ctx, rank_type t, int64_t cols, int64_t n, int is_max, const void* data) {
+    static double values[8];
+    int32_t lanes[8];
+    struct tensor tin, tout, tidx;
+    eg_plane* pin = NULL;
+    tensor_init(&tin, (void*)data, cols * n, t.bits);
+    tensor_as(&tin, t.code, t.bits);
+    if (cols > 1) tensor_2d(&tin, cols, n);
+    if (eg_plane_wrap(ctx, &tin.managed, &pin) != EG_OK) return 0;
+    eg_plane* pout = wrap(ctx, &tout, values, cols, t.code, t.bits);
+    eg_plane* pidx = wrap(ctx, &tidx, lanes, cols, kDLInt, 32);
+    if (!pout || !pidx) return 0;
+    memset(values, 0, sizeof(values));
+    const eg_status st = rank_do(ctx, pin, pout, pidx, is_max ? EG_REDUCE_MAX : EG_REDUCE_MIN);
+    int ok = st == EG_OK;
+    for (int64_t j = 0; ok && j < cols; ++j) {
+        double want;
+        int64_t lane;
+        rank_oracle((const char*)data + j * n * (t.bits / 8), t, n, is_max, &want, &lane);
+        const double got = rank_get(values, t, j);
+        ok = lanes[j] == lane && (want != want ? got != got : got == want);
+    }
+    eg_plane_free(ctx, pin);
+    eg_plane_free(ctx, pout);
+    eg_plane_free(ctx, pidx);
+    return ok;
+}
+
+static void check_reduce_position(eg_ctx* ctx) {
+    static const int64_t sizes[] = { 1, 2, 255, 256, 257, 4095, 4096, 4097, 8191, 8193, 50000, RANK_MAX_N };
+    static const char* const words[] = { "many ties", "a constant plane", "the extremes repeated at both ends",
+                                         "the extremes repeated across a slot and a leaf", "a NaN in every fifth lane", "all NaN" };
+    static double data[RANK_MAX_N];
+    for (int kind = 0; kind < 6; ++kind) {
+        int ok = 1;
+        for (size_t ti = 0; ti < sizeof(rank_types) / sizeof(rank_types[0]); ++ti) {
+            if (kind >= 4 && rank_types[ti].code != kDLFloat) continue;
+            for (size_t si = 0; si < sizeof(sizes) / sizeof(sizes[0]); ++si) {
+                rank_fill(data, rank_types[ti], sizes[si], kind);
+                ok = ok && rank_case_ok(ctx, rank_types[ti], 1, sizes[si], 0, data) && rank_case_ok(ctx, rank_types[ti], 1, sizes[si], 1, data);
+            }
+        }
+        char what[200];
+        snprintf(what, sizeof(what),
+                 "eg_reduce min and max with index over float64, float32, int32 and uint32 (the floats only for NaN) over sizes 1 to 1000000, %s: value and lane equal the plain loop (first occurrence; all NaN: lane n)",
+                 words[kind]);
+        check(ok, what);
+    }
+
+    /* the all-NaN value: what the reduction without a position returns there (NaN), the same as with one */
+    static double nans[300];
+    double plain = 0.0;
+    struct tensor tn, tp;
+    for (int i = 0; i < 300; ++i) nans[i] = NAN_D;
+    eg_plane* pn = wrap(ctx, &tn, nans, 300, kDLFloat, 64);
+    eg_plane* pp = wrap(ctx, &tp, &plain, 1, kDLFloat, 64);
+    check(pn && pp && reduce_do(ctx, pn, pp, NULL, EG_REDUCE_MIN, EG_REDUCE_COMPENSATED, 0) == EG_OK && plain != plain &&
+              reduce_do(ctx, pn, pp, NULL, EG_REDUCE_MAX, EG_REDUCE_COMPENSATED, 0) == EG_OK && plain != plain,
+          "eg_reduce min and max without index over an all-NaN plane return NaN (the value a position leaves unchanged)");
+    eg_plane_free(ctx, pn);
+    eg_plane_free(ctx, pp);
+
+    /* several columns: each its own position */
+    {
+        static double cols[3 * 5000];
+        int ok = 1;
+        for (size_t ti = 0; ti < sizeof(rank_types) / sizeof(rank_types[0]); ++ti) {
+            for (int j = 0; j < 3; ++j)
+                for (int i = 0; i < 5000; ++i) rank_put(cols, rank_types[ti], (int64_t)j * 5000 + i, (double)(((i + 7 * j) * 13) % 29) + 5.0);
+            rank_put(cols, rank_types[ti], 5000 + 4096, 1.0);
+            rank_put(cols, rank_types[ti], 5000 + 4097, 1.0);
+            ok = ok && rank_case_ok(ctx, rank_types[ti], 3, 5000, 0, cols) && rank_case_ok(ctx, rank_types[ti], 3, 5000, 1, cols);
+        }
+        check(ok, "eg_reduce min and max with index over three columns give each column its own value and lane");
+    }
+
+    /* the same value and lane at one thread, four and the default */
+    {
+        double v1 = 0, v4 = 0, v0 = 0;
+        int32_t l1 = -1, l4 = -1, l0 = -1;
+        int ok = 1;
+        struct tensor ti, tv, tl;
+        for (int is_max = 0; is_max < 2; ++is_max) {
+            rank_fill(data, rank_types[0], RANK_MAX_N, 0);
+            eg_plane* pi = wrap(ctx, &ti, data, RANK_MAX_N, kDLFloat, 64);
+            eg_plane* pv = wrap(ctx, &tv, &v1, 1, kDLFloat, 64);
+            eg_plane* pl = wrap(ctx, &tl, &l1, 1, kDLInt, 32);
+            const eg_reduce_op op = is_max ? EG_REDUCE_MAX : EG_REDUCE_MIN;
+            eg_host_threads(ctx, 1);
+            ok = ok && pi && pv && pl && rank_do(ctx, pi, pv, pl, op) == EG_OK;
+            eg_plane_free(ctx, pv);
+            eg_plane_free(ctx, pl);
+            pv = wrap(ctx, &tv, &v4, 1, kDLFloat, 64);
+            pl = wrap(ctx, &tl, &l4, 1, kDLInt, 32);
+            eg_host_threads(ctx, 4);
+            ok = ok && pv && pl && rank_do(ctx, pi, pv, pl, op) == EG_OK;
+            eg_plane_free(ctx, pv);
+            eg_plane_free(ctx, pl);
+            pv = wrap(ctx, &tv, &v0, 1, kDLFloat, 64);
+            pl = wrap(ctx, &tl, &l0, 1, kDLInt, 32);
+            eg_host_threads(ctx, 0);
+            ok = ok && pv && pl && rank_do(ctx, pi, pv, pl, op) == EG_OK && v1 == v4 && v1 == v0 && l1 == l4 && l1 == l0;
+            eg_plane_free(ctx, pi);
+            eg_plane_free(ctx, pv);
+            eg_plane_free(ctx, pl);
+        }
+        check(ok, "eg_reduce min and max with index over 1000000 float64 values: the same value and lane at 1 thread, 4 threads and the default");
+    }
+
+    /* an older, shorter descriptor: it ends before index, so no position is asked for and the plane is untouched */
+    {
+        double xs[4] = { 5.0, 2.0, 2.0, 9.0 }, got = 0.0;
+        int32_t lane = -77;
+        struct tensor tx, tg, tl;
+        eg_plane* px = wrap(ctx, &tx, xs, 4, kDLFloat, 64);
+        eg_plane* pg = wrap(ctx, &tg, &got, 1, kDLFloat, 64);
+        eg_plane* pl = wrap(ctx, &tl, &lane, 1, kDLInt, 32);
+        struct eg_reduce_desc d;
+        memset(&d, 0, sizeof(d));
+        d.struct_size = (uint32_t)offsetof(struct eg_reduce_desc, index);
+        d.in = px;
+        d.out = pg;
+        d.index = pl;
+        d.op = EG_REDUCE_MIN;
+        check(px && pg && pl && eg_reduce(ctx, &d) == EG_OK && got == 2.0 && lane == -77,
+              "eg_reduce with a descriptor that ends before index: the minimum is written and no position is asked for");
+        eg_plane_free(ctx, px);
+        eg_plane_free(ctx, pg);
+        eg_plane_free(ctx, pl);
+    }
+
+    /* ANY over a bool mask, into a bool or a uint32 result; ALL into a uint32 result */
+    {
+        static uint8_t mask[RANK_MAX_N];
+        static const int64_t any_sizes[] = { 1, 2, 4097, RANK_MAX_N };
+        int ok = 1;
+        for (size_t si = 0; ok && si < sizeof(any_sizes) / sizeof(any_sizes[0]); ++si) {
+            const int64_t n = any_sizes[si];
+            uint8_t as_bool = 7;
+            uint32_t as_cell = 7, all_cell = 7;
+            struct tensor tm, tb, tc, ta;
+            memset(mask, 0, (size_t)n);
+            eg_plane* pm = wrap(ctx, &tm, mask, n, kDLBool, 8);
+            eg_plane* pb = wrap(ctx, &tb, &as_bool, 1, kDLBool, 8);
+            eg_plane* pc = wrap(ctx, &tc, &as_cell, 1, kDLUInt, 32);
+            eg_plane* pa = wrap(ctx, &ta, &all_cell, 1, kDLUInt, 32);
+            ok = pm && pb && pc && pa && rank_do(ctx, pm, pb, NULL, EG_REDUCE_ANY) == EG_OK && as_bool == 0 &&
+                 rank_do(ctx, pm, pc, NULL, EG_REDUCE_ANY) == EG_OK && as_cell == 0 &&
+                 rank_do(ctx, pm, pa, NULL, EG_REDUCE_ALL) == EG_OK && all_cell == 0;
+            mask[n - 1] = 1;   /* a single true at the last lane */
+            ok = ok && rank_do(ctx, pm, pb, NULL, EG_REDUCE_ANY) == EG_OK && as_bool == 1 &&
+                 rank_do(ctx, pm, pc, NULL, EG_REDUCE_ANY) == EG_OK && as_cell == 1 &&
+                 rank_do(ctx, pm, pa, NULL, EG_REDUCE_ALL) == EG_OK && all_cell == (n == 1 ? 1u : 0u);
+            memset(mask, 1, (size_t)n);
+            ok = ok && rank_do(ctx, pm, pc, NULL, EG_REDUCE_ANY) == EG_OK && as_cell == 1 &&
+                 rank_do(ctx, pm, pa, NULL, EG_REDUCE_ALL) == EG_OK && all_cell == 1;
+            eg_plane_free(ctx, pm);
+            eg_plane_free(ctx, pb);
+            eg_plane_free(ctx, pc);
+            eg_plane_free(ctx, pa);
+        }
+        check(ok, "eg_reduce ANY over a bool mask of 1 to 1000000 lanes (all false, one true at the last lane, all true) equals the plain or, as a bool or a uint32 result; ALL into a uint32 result");
+    }
+
+    /* the refusals by name */
+    {
+        double xs[4] = { 1, 2, 3, 4 }, one = 0.0, two[2] = { 0, 0 };
+        int32_t lane = 0, lane2[2] = { 0, 0 };
+        float lf = 0.0f;
+        uint8_t m[4] = { 0, 1, 0, 0 }, mo = 0;
+        struct tensor tx, t1, t2, tl, tl2, tf, tm, tmo;
+        eg_plane* px = wrap(ctx, &tx, xs, 4, kDLFloat, 64);
+        eg_plane* p1 = wrap(ctx, &t1, &one, 1, kDLFloat, 64);
+        eg_plane* p2 = wrap(ctx, &t2, two, 2, kDLFloat, 64);
+        eg_plane* pl = wrap(ctx, &tl, &lane, 1, kDLInt, 32);
+        eg_plane* pl2 = wrap(ctx, &tl2, lane2, 2, kDLInt, 32);
+        eg_plane* pf = wrap(ctx, &tf, &lf, 1, kDLFloat, 32);
+        eg_plane* pm = wrap(ctx, &tm, m, 4, kDLBool, 8);
+        eg_plane* pmo = wrap(ctx, &tmo, &mo, 1, kDLBool, 8);
+        int ok = px && p1 && p2 && pl && pl2 && pf && pm && pmo;
+        ok = ok && rank_do(ctx, px, p1, pl, EG_REDUCE_SUM) == EG_BAD_REQUEST && reason_has(ctx, "index") && reason_has(ctx, "MIN or MAX");
+        ok = ok && rank_do(ctx, pm, pmo, pl, EG_REDUCE_ALL) == EG_BAD_REQUEST && reason_has(ctx, "MIN or MAX");
+        ok = ok && rank_do(ctx, pm, pmo, pl, EG_REDUCE_ANY) == EG_BAD_REQUEST && reason_has(ctx, "MIN or MAX");
+        ok = ok && rank_do(ctx, px, p1, pf, EG_REDUCE_MIN) == EG_BAD_REQUEST && reason_has(ctx, "int32 plane");
+        ok = ok && rank_do(ctx, px, p1, pl2, EG_REDUCE_MIN) == EG_BAD_REQUEST && reason_has(ctx, "index must have shape");
+        ok = ok && rank_do(ctx, px, p1, p1, EG_REDUCE_MIN) == EG_BAD_REQUEST;
+        ok = ok && rank_do(ctx, px, p1, NULL, EG_REDUCE_ANY) == EG_NOT_WRITTEN && reason_has(ctx, "ANY takes a bool plane");
+        ok = ok && rank_do(ctx, pm, pmo, NULL, EG_REDUCE_MAX) == EG_NOT_WRITTEN && reason_has(ctx, "bool plane takes op ALL or ANY");
+        ok = ok && rank_do(ctx, px, pmo, NULL, EG_REDUCE_MIN) == EG_BAD_REQUEST && reason_has(ctx, "out dtype");
+        check(ok, "eg_reduce refuses an index with a sum, all or any, a float or short index, ANY over a float plane and a bool plane under a max, each by name");
+        eg_plane_free(ctx, px);
+        eg_plane_free(ctx, p1);
+        eg_plane_free(ctx, p2);
+        eg_plane_free(ctx, pl);
+        eg_plane_free(ctx, pl2);
+        eg_plane_free(ctx, pf);
+        eg_plane_free(ctx, pm);
+        eg_plane_free(ctx, pmo);
+    }
+
+    /* recorded: a positioned minimum is one node naming index as written; a replay over a changed plane gives the new lane;
+     * a conditional on a uint32 ANY cell takes its arm only while something is set */
+    {
+        double xs[6] = { 4, 3, 9, 3, 8, 7 }, low = 0.0, src = 11.0, out = -5.0;
+        int32_t lane = -1;
+        uint8_t mask[6] = { 0 };
+        uint32_t found = 7;
+        struct tensor tx, tv, tl, tm, tf, ts, to;
+        eg_plane* px = wrap(ctx, &tx, xs, 6, kDLFloat, 64);
+        eg_plane* pv = wrap(ctx, &tv, &low, 1, kDLFloat, 64);
+        eg_plane* pl = wrap(ctx, &tl, &lane, 1, kDLInt, 32);
+        eg_plane* pm = wrap(ctx, &tm, mask, 6, kDLBool, 8);
+        eg_plane* pf = wrap(ctx, &tf, &found, 1, kDLUInt, 32);
+        eg_plane* psrc = wrap(ctx, &ts, &src, 1, kDLFloat, 64);
+        eg_plane* pout = wrap(ctx, &to, &out, 1, kDLFloat, 64);
+        eg_graph* g = NULL;
+        struct eg_graph_description d;
+        memset(&d, 0, sizeof(d));
+        d.struct_size = sizeof(d);
+        int ok = px && pv && pl && pm && pf && psrc && pout && eg_record_begin(ctx) == EG_OK && rank_do(ctx, px, pv, pl, EG_REDUCE_MIN) == EG_OK &&
+                 eg_record_end(ctx, NULL, &g) == EG_OK && lane == -1 && eg_graph_describe(ctx, g, &d) == EG_OK && d.n_nodes == 1 &&
+                 d.nodes[0].kind == EG_GNODE_REDUCE;
+        int index_written = 0;
+        for (int32_t k = 0; ok && k < d.nodes[0].n_planes; ++k)
+            if (d.nodes[0].planes[k] == pl && d.nodes[0].access[k] == 2) index_written = 1;
+        ok = ok && index_written && eg_graph_launch(ctx, g) == EG_OK && low == 3.0 && lane == 1;
+        xs[5] = -1.0;   /* a changed plane */
+        ok = ok && eg_graph_launch(ctx, g) == EG_OK && low == -1.0 && lane == 5;
+        check(ok, "eg_reduce min with index recorded: one reduce node that writes index, a replay over a changed plane gives the new value and lane");
+        eg_graph_free(ctx, g);
+
+        struct eg_cond_desc cd;
+        memset(&cd, 0, sizeof(cd));
+        cd.struct_size = sizeof(cd);
+        cd.kind = EG_COND_IF;
+        cd.cell = pf;
+        g = NULL;
+        ok = eg_record_begin(ctx) == EG_OK && rank_do(ctx, pm, pf, NULL, EG_REDUCE_ANY) == EG_OK && eg_record_cond_begin(ctx, &cd) == EG_OK &&
+             eg_copy(ctx, psrc, pout) == EG_OK && eg_record_cond_end(ctx) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK && out == -5.0;
+        ok = ok && eg_graph_launch(ctx, g) == EG_OK && found == 0 && out == -5.0;
+        mask[5] = 1;
+        ok = ok && eg_graph_launch(ctx, g) == EG_OK && found == 1 && out == 11.0;
+        check(ok, "eg_reduce ANY into a uint32 cell recorded with a conditional on it: a replay with nothing set skips the arm, a set lane takes it");
+        eg_graph_free(ctx, g);
+
+        /* the reverse: a minimum has no single answer for a gradient, with or without a position, until its rows land */
+        struct eg_record_end_desc diff;
+        memset(&diff, 0, sizeof(diff));
+        diff.struct_size = sizeof(diff);
+        diff.flags = EG_RECORD_DIFF;
+        g = NULL;
+        ok = eg_record_begin(ctx) == EG_OK && rank_do(ctx, px, pv, pl, EG_REDUCE_MIN) == EG_OK;
+        const eg_status st = eg_record_end(ctx, &diff, &g);
+        check(ok && st == EG_BAD_REQUEST && reason_has(ctx, "has no gradient eagle can pull back") && g == NULL,
+              "eg_reduce min with index in a DIFF recording: refused by name (a minimum has no gradient eagle pulls back yet)");
+        eg_record_abort(ctx);
+        eg_plane_free(ctx, px);
+        eg_plane_free(ctx, pv);
+        eg_plane_free(ctx, pl);
+        eg_plane_free(ctx, pm);
+        eg_plane_free(ctx, pf);
+        eg_plane_free(ctx, psrc);
+        eg_plane_free(ctx, pout);
+    }
+}
+
 /* ---- transforms ---------------------------------------------------------- */
 
 static void fft_move(void* dst, const void* src, size_t bytes) { memcpy(dst, src, bytes); }
@@ -6413,6 +7083,9 @@ int main(int argc, char** argv) {
     check_device_count(ctx);
     check_host_streams(ctx);
     check_host_events(ctx);
+    check_scan(ctx);
+    check_compact(ctx);
+    check_reduce_position(ctx);
 
     check_reduce(ctx);
     fft_values(ctx, 0);

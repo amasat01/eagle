@@ -104,6 +104,10 @@ void pinned_free(eg_ctx& ctx, void* data) noexcept;
 void device_cell_work(eg_plan_s& plan);
 /** @brief eg_reduce and eg_copy over device planes, on the context's stream (device/Device.cpp); checked as the host's. */
 void device_reduce(eg_ctx& ctx, const eg_reduce_desc& desc);
+/** @brief eg_scan over device planes (device/Device.cpp). */
+void device_scan(eg_ctx& ctx, const eg_scan_desc& desc);
+/** @brief eg_compact over device planes (device/Device.cpp). */
+void device_compact(eg_ctx& ctx, const eg_compact_desc& desc);
 /** @brief The already checked reduce @p r of device planes on the context's stream; kept in the recording if there is one. */
 void device_reduce_leaf(eg_ctx& ctx, const host::ReduceOp& r);
 void device_copy(eg_ctx& ctx, eg_plane_s* src, eg_plane_s* dst);

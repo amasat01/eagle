@@ -190,6 +190,8 @@ std::string leaf_name(const Node& n, std::size_t ordinal) {
     const char* const what = n.kind == Node::Run      ? "eg_run"
                              : n.kind == Node::Copy   ? "eg_copy"
                              : n.kind == Node::Reduce ? "eg_reduce"
+                             : n.kind == Node::Scan   ? "eg_scan"
+                             : n.kind == Node::Compact ? "eg_compact"
                              : n.kind == Node::Fft    ? "eg_fft_run"
                              : n.kind == Node::Host   ? "eg_host_call"
                                                       : "eg_gemm_run";
@@ -256,6 +258,7 @@ void other_leaf(eg_ctx& ctx, const Node& n, DiffNode& dn, std::size_t ordinal, c
         case Node::Reduce:
             if (!floats(n.reduce.in)) {
                 if (kept.count(n.reduce.out) != 0) dn.overwrites.push_back(track(n.reduce.out, true, at + " out", at + " out"));
+                if (kept.count(n.reduce.index) != 0) dn.overwrites.push_back(track(n.reduce.index, true, at + " index", at + " index"));
                 return;
             }
             dn.reduce = n.reduce;
@@ -294,6 +297,8 @@ void leaf_checks(const std::vector<const Node*>& others) {
                 if (others[i]->kind == Node::Run && others[i]->runner == n.runner)
                     refuse(EG_BAD_REQUEST, at + ": its runner is run twice in the recording and its record holds one run: record the second run with a second runner");
         }
+        if (n.kind == Node::Scan) refuse(EG_NOT_WRITTEN, at + ": eagle does not pull back a scan yet");
+        if (n.kind == Node::Compact) refuse(EG_NOT_WRITTEN, at + ": eagle does not pull back a compaction yet");
         if (n.kind != Node::Reduce) continue;
         if (n.reduce.op != EG_REDUCE_SUM) refuse(EG_BAD_REQUEST, at + " has no gradient eagle can pull back (a tie has no single answer); only op='sum' reverses");
         if (tensor(*n.reduce.in).dtype.code == kDLFloat && (n.reduce.cols != 1 || n.reduce.comp != nullptr))

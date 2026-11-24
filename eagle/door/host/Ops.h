@@ -8,6 +8,7 @@
 #include "eagle/door/Context.h"
 
 #include <utility>
+#include <vector>
 
 namespace eagle {
 namespace door {
@@ -18,6 +19,7 @@ struct ReduceOp {
     eg_plane_s* in = nullptr;
     eg_plane_s* out = nullptr;
     eg_plane_s* comp = nullptr;   ///< input companion, or (with ``pair``) the output compensation
+    eg_plane_s* index = nullptr;  ///< min and max only: receives the lane of each column's winner, or nullptr
     eg_reduce_op op = EG_REDUCE_SUM;
     bool pair = false;
     std::int32_t code = 0;        ///< the element type, see Ops.cpp
@@ -27,6 +29,38 @@ struct ReduceOp {
 
 ReduceOp reduce_check(const eg_ctx& ctx, const eg_reduce_desc& desc);
 void reduce_exec(const ReduceOp& r, int threads);
+
+/** @brief A checked scan: the two planes, the op, the form and the element type (see Ops.cpp). */
+struct ScanOp {
+    eg_plane_s* in = nullptr;
+    eg_plane_s* out = nullptr;
+    eg_scan_op op = EG_SCAN_SUM;
+    bool exclusive = false;
+    std::int32_t code = 0;
+    std::int64_t n = 0;
+};
+
+ScanOp scan_check(const eg_ctx& ctx, const eg_scan_desc& desc);
+/** @brief Run the checked scan @p s on at most @p threads threads: the blocks and the order of their totals depend on
+ *  the extent alone, so every result is the same bits at any thread count. */
+void scan_exec(const ScanOp& s, int threads);
+
+/** @brief A checked compaction: the three planes and the extent. */
+struct CompactOp {
+    eg_plane_s* keep = nullptr;
+    eg_plane_s* kept = nullptr;
+    eg_plane_s* count = nullptr;
+    std::int64_t n = 0;
+};
+
+CompactOp compact_check(const eg_ctx& ctx, const eg_compact_desc& desc);
+void compact_exec(const CompactOp& c, int threads);
+
+/** @brief The one compaction of the host runtime: the indices of the lanes of @p mask that are kept (a set byte keeps, or with
+ *  @p drop drops) into @p kept[0, count), ascending, and their number into @p count; the entries from @p count on are left as
+ *  they were. The same result at any @p threads. @p scratch is the working memory: grown when @p n needs more, kept by a caller that compacts again. */
+void compact_lanes(const std::uint8_t* mask, bool drop, std::int32_t* kept, std::uint32_t* count, std::int64_t n, int threads,
+                   std::vector<std::uint64_t>& scratch);
 
 /** @brief After one launch of @p plan: run each companion's fold entry over its target, then fold each cell's rows
  *  [@p first_row, @p end_row) into the cell the caller bound (the cell's op). A cell is the reduction over the lanes

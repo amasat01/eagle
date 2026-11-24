@@ -114,6 +114,8 @@ void device_active_restore(eg_ctx&, eg_runner_s&, const void*, const std::vector
 std::int64_t device_free_bytes(eg_ctx&) { return 0; }
 void device_event_op(eg_ctx&, unsigned, unsigned, const void*) {}
 void device_reduce(eg_ctx&, const eg_reduce_desc&) {}
+void device_scan(eg_ctx&, const eg_scan_desc&) { device_group_check("eg_scan"); }
+void device_compact(eg_ctx&, const eg_compact_desc&) { device_group_check("eg_compact"); }
 void device_reduce_leaf(eg_ctx&, const host::ReduceOp&) {}
 void device_copy(eg_ctx&, eg_plane_s*, eg_plane_s*) {}
 void device_fft_new(eg_ctx&, eg_fft_s&) {}
@@ -1316,7 +1318,22 @@ std::int64_t device_free_bytes(eg_ctx& ctx) {
 
 /** @brief eg_reduce over device planes: checked as the host's, then the canonical ordered tree on the context's
  *  stream (the order the host runs); returns with the result in place (in a capture, once the graph has replayed). */
-void device_reduce(eg_ctx& ctx, const eg_reduce_desc& d) { device_reduce_leaf(ctx, host::reduce_check(ctx, d)); }
+void device_reduce(eg_ctx& ctx, const eg_reduce_desc& d) {
+    if (d.index != nullptr) refuse(EG_NOT_WRITTEN, "eg_reduce: index (the position of a minimum or maximum) is not written for a device context");
+    if (d.op == EG_REDUCE_ANY) refuse(EG_NOT_WRITTEN, "eg_reduce: op ANY is not written for a device context");
+    check_handle(ctx.planes, d.in, "eg_reduce_desc.in");
+    if (d.op == EG_REDUCE_ALL && d.out != nullptr && d.out->tensor->dl_tensor.dtype.code == kDLUInt)
+        refuse(EG_NOT_WRITTEN, "eg_reduce: a uint32 result of op ALL is not written for a device context");
+    if (d.in->tensor->dl_tensor.dtype.code == kDLUInt)
+        refuse(EG_NOT_WRITTEN, "eg_reduce: a uint32 plane is not written for a device context");
+    device_reduce_leaf(ctx, host::reduce_check(ctx, d));
+}
+
+/** @brief eg_scan over device planes: not written yet. */
+void device_scan(eg_ctx&, const eg_scan_desc&) { refuse(EG_NOT_WRITTEN, "eg_scan: not written for a device context"); }
+
+/** @brief eg_compact over device planes: not written yet. */
+void device_compact(eg_ctx&, const eg_compact_desc&) { refuse(EG_NOT_WRITTEN, "eg_compact: not written for a device context"); }
 
 /** @brief The checked reduce @p r on the context's stream, kept in the recording if there is one. */
 void device_reduce_leaf(eg_ctx& ctx, const host::ReduceOp& r) {

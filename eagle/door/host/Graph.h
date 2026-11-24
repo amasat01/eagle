@@ -27,10 +27,12 @@ inline bool writes_role(std::int32_t r) { return r == EG_ROLE_MUTABLE || r == EG
 
 /** @brief One recorded call, or one conditional with an arm list per arm. */
 struct Node {
-    enum Kind { Launch, Run, Reduce, Copy, Fft, Gemm, Cond, Host } kind = Launch;
+    enum Kind { Launch, Run, Reduce, Copy, Fft, Gemm, Cond, Host, Scan, Compact } kind = Launch;
     eg_plan_s* plan = nullptr;
     eg_runner_s* runner = nullptr;
     host::ReduceOp reduce;
+    host::ScanOp scan;                          ///< a scan
+    host::CompactOp compact;                    ///< a compaction
     eg_fft_s* fft = nullptr;
     eg_gemm_s* gemm = nullptr;
     eg_host_node_s* host = nullptr;             ///< a host call's node

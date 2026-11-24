@@ -223,14 +223,17 @@ def read_box(meta: dict, *, name: str):
 def read_plane_axes(meta: dict, *, name: str) -> dict:
     """``{plane: {"payload": [...], "axes": [{"label", "extent"}, ...]}}`` for
     the sinks declared with named axes (a plane bound ``(*payload, *axes)``,
-    an ``extent`` of ``None`` the launch's runtime axis); ``{}`` when none."""
+    an ``extent`` of ``None`` the launch's runtime axis); ``{}`` when none.
+    A unit that lists stages also states the axes of the outputs its later
+    stages write, so there a plane need not be in the unit's own arg_spec."""
     declared = meta.get("plane_axes")
     if declared is None:
         return {}
     planes = {nm for _role, nm in meta.get("arg_spec", ())}
+    lists_stages = bool(meta.get("stages"))
     ok = isinstance(declared, dict)
     for plane, spec in (declared.items() if ok else ()):
-        ok = (ok and plane in planes and isinstance(spec, dict)
+        ok = (ok and (plane in planes or lists_stages) and isinstance(spec, dict)
               and isinstance(spec.get("payload"), list) and isinstance(spec.get("axes"), list)
               and all(isinstance(e, int) and e >= 1 for e in spec["payload"])
               and all(isinstance(a, dict) and isinstance(a.get("label"), str)

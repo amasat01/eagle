@@ -111,6 +111,7 @@ typedef int32_t eg_reduce_op;
 #define EG_REDUCE_MAX 1
 #define EG_REDUCE_MIN 2
 #define EG_REDUCE_ALL 3 /**< over a uint8 mask */
+#define EG_REDUCE_ANY 4 /**< the or over a uint8 mask; 0 when no element is set */
 
 typedef int32_t eg_steps_reverse;
 #define EG_STEPS_REVERSE_PER_STEP 0
@@ -544,7 +545,12 @@ struct eg_plan_counters {
 /** Reduce flags. */
 #define EG_REDUCE_PAIR (1u << 0) /**< write the (sum, compensation) pair */
 
-/** INPUT to ``eg_reduce``: ``in`` is (columns, n) samples-last; ``out`` holds columns. */
+/** INPUT to ``eg_reduce``: ``in`` is (columns, n) samples-last; ``out`` holds columns.
+ *  ``index`` (write; int32, ``columns`` elements; NULL: no position) receives the lane of each column's winner and is legal for
+ *  EG_REDUCE_MIN and EG_REDUCE_MAX only. Min and max then fold pairs (value, lane): the smaller (larger) value wins, equal
+ *  values go to the lower lane, and a NaN is never a candidate. A column whose elements are all NaN has position ``n`` (no lane)
+ *  and its value is NaN, as the reduction without ``index`` returns there. The result does not depend on the thread count.
+ *  ``index`` is the last member: a caller whose ``struct_size`` ends before it passes no position. */
 struct eg_reduce_desc {
     uint32_t struct_size;
     uint32_t flags;          /**< EG_REDUCE_PAIR */
@@ -553,6 +559,35 @@ struct eg_reduce_desc {
     eg_plane* comp;          /**< compensation companion, or NULL */
     eg_reduce_op op;
     eg_reduce_policy policy;
+    eg_plane* index;         /**< the winner's lane per column (int32), or NULL */
+};
+
+/** What ``eg_scan`` folds: the running sum, minimum or maximum. */
+typedef int32_t eg_scan_op;
+#define EG_SCAN_SUM 0
+#define EG_SCAN_MIN 1
+#define EG_SCAN_MAX 2
+
+/** Scan flags. */
+#define EG_SCAN_EXCLUSIVE (1u << 0) /**< ``out[i]`` folds ``in[0..i-1]``; ``out[0]`` is the identity of ``op`` */
+
+/** INPUT to ``eg_scan``: ``in`` and ``out`` are two distinct planes of one run-time axis, one scalar type and one extent. */
+struct eg_scan_desc {
+    uint32_t struct_size;
+    uint32_t flags;          /**< EG_SCAN_EXCLUSIVE */
+    eg_plane* in;
+    eg_plane* out;
+    eg_scan_op op;
+};
+
+/** INPUT to ``eg_compact``: ``keep`` is a bool plane of n bytes, ``kept`` n 32-bit indices (int32 or uint32), ``count`` a
+ *  one-element uint32 plane. */
+struct eg_compact_desc {
+    uint32_t struct_size;
+    uint32_t flags;          /**< none defined: 0 */
+    eg_plane* keep;
+    eg_plane* kept;
+    eg_plane* count;
 };
 
 /** ``eg_cond_desc.flags``: IF, IF_ELSE and WHILE test the cell for zero instead of non-zero. SWITCH refuses it. */
@@ -1060,9 +1095,42 @@ eg_status eg_reverse(eg_ctx* ctx, eg_runner* runner, const struct eg_bind_desc* 
  * Reduce ``in`` over samples into ``out``. Recordable.
  * Replaces: ``_graph_reduce`` reduce nodes. Calls today:
  * ``reduce_canonical_host`` (eagle_core.cpp, ``eagle::reduce::canonical``).
- * Status: OK; BAD_REQUEST (shape/dtype); NOT_WRITTEN (an op/dtype pair).
+ * Status: OK; BAD_REQUEST (shape/dtype, ``index`` with an op other than min and max); NOT_WRITTEN (an op/dtype pair; on a device
+ * context ``index``, EG_REDUCE_ANY and uint32).
  */
 eg_status eg_reduce(eg_ctx* ctx, const struct eg_reduce_desc* desc);
+
+/**
+ * Prefix scan of ``in`` into ``out`` along the one run-time axis. Recordable (node kind EG_GNODE_SCAN, reading ``in`` and
+ * writing ``out``). Inclusive: ``out[i]`` folds ``in[0..i]`` with ``op``. Exclusive (EG_SCAN_EXCLUSIVE): ``out[i]`` folds
+ * ``in[0..i-1]`` and ``out[0]`` is the identity of ``op``: 0 for a sum, the largest value of the type for a minimum and the
+ * smallest for a maximum (+infinity and -infinity for a real type). The types are int32, int64, uint32, uint64, float32 and
+ * float64; an integer sum is modular, a minimum and a maximum are exact (a NaN is ignored while a number has been seen, as
+ * ``fmin`` and ``fmax`` do). A real sum is repeatable, the same bits on every run and at any thread count, because its
+ * blocks and the order of their totals depend on the extent alone; it is not the bits of a left-to-right loop, and
+ * ``|out[i] - exact| <= i * u * sum(|in[0..i]|)`` with ``u`` the unit roundoff of the type. ``in`` and ``out`` are 1-D, of one
+ * extent and one type, and must not overlap. An extent of 0 writes nothing; above 2^31 - 1 elements it is refused.
+ * Status: OK; BAD_REQUEST (a NULL or foreign plane, unknown flag bits or op, a plane with more than one run-time axis (the
+ * text names a group over that axis as the way), ``out`` overlapping ``in`` or of another type or extent, an extent above
+ * 2^31 - 1, a plane that is not contiguous, a read-only ``out``); NOT_WRITTEN (a value of rank above zero, a type outside the
+ * six, a device context).
+ */
+eg_status eg_scan(eg_ctx* ctx, const struct eg_scan_desc* desc);
+
+/**
+ * Stream compaction of the lanes ``keep`` marks. Recordable (node kind EG_GNODE_COMPACT, reading ``keep`` and writing ``kept`` and
+ * ``count``). ``keep`` is a bool plane (one byte per lane): a non-zero byte keeps the lane. ``count`` receives the number of kept
+ * lanes and ``kept[j]`` the index of the j-th kept lane, in lane order, for j below ``count``: the same result on every run and at
+ * any thread count. The entries of ``kept`` from ``count`` on are NOT written: they hold what they held. ``kept`` is int32 or
+ * uint32 of the extent of ``keep``; ``count`` is a one-element uint32 plane, which is a valid cell of a conditional
+ * (``eg_cond_desc.cell``) and a valid loop limit (``eg_cond_desc.limit``) of a recording that holds the node. The three planes
+ * are distinct and 1-D. An extent of 0 writes a count of 0; above 2^31 - 1 elements it is refused.
+ * Status: OK; BAD_REQUEST (a NULL or foreign plane, unknown flag bits, a plane with more than one run-time axis, a ``keep`` that is
+ * not a bool plane, a ``kept`` that is not a 32-bit integer plane of the extent of ``keep``, a ``count`` that is not a one-element
+ * uint32 plane, planes that overlap, an extent above 2^31 - 1, a plane that is not contiguous, a read-only output); NOT_WRITTEN
+ * (a device context).
+ */
+eg_status eg_compact(eg_ctx* ctx, const struct eg_compact_desc* desc);
 
 /**
  * Copy ``src`` into ``dst`` (same shape and dtype). Two planes on one side
@@ -1498,6 +1566,9 @@ typedef int32_t eg_gnode_kind;
 #define EG_GNODE_JOIN 10   /**< ``eg_record_fork_end``: what the next node waits for */
 #define EG_GNODE_WAIT 11   /**< ``eg_record_wait`` */
 #define EG_GNODE_HOST 12   /**< ``eg_host_call``: ``unit`` is the host node's name, the planes are the declared ones */
+
+#define EG_GNODE_SCAN 13   /**< ``eg_scan``: reads ``in``, writes ``out`` */
+#define EG_GNODE_COMPACT 14 /**< ``eg_compact``: reads ``keep``, writes ``kept`` and ``count`` */
 
 /** What an edge of a graph description is. */
 typedef int32_t eg_gedge_kind;

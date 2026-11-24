@@ -26,7 +26,9 @@ namespace {
 /** @brief The planes a node names directly. */
 std::vector<eg_plane_s*> planes_of(const Node& n) {
     switch (n.kind) {
-        case Node::Reduce: return { n.reduce.in, n.reduce.out, n.reduce.comp };
+        case Node::Reduce: return { n.reduce.in, n.reduce.out, n.reduce.comp, n.reduce.index };
+        case Node::Scan: return { n.scan.in, n.scan.out };
+        case Node::Compact: return { n.compact.keep, n.compact.kept, n.compact.count };
         case Node::Copy:
         case Node::Fft: return { n.src, n.dst };
         case Node::Gemm: return { n.src, n.rhs, n.dst };
@@ -100,6 +102,8 @@ std::string describe(const Node& n) {
         case Node::Launch: return "eg_launch of unit '" + n.plan->unit->name + "'";
         case Node::Run: return "eg_run";
         case Node::Reduce: return "eg_reduce";
+        case Node::Scan: return "eg_scan";
+        case Node::Compact: return "eg_compact";
         case Node::Copy: return "eg_copy";
         case Node::Fft: return "eg_fft_run";
         case Node::Gemm: return "eg_gemm_run";
@@ -135,6 +139,16 @@ std::vector<PlaneUse> uses_of(const Node& n) {
             add(n.reduce.in, "in", 0);
             add(n.reduce.out, "out", 1);
             add(n.reduce.comp, "comp", n.reduce.pair ? 1 : 0);
+            add(n.reduce.index, "index", 1);
+            break;
+        case Node::Compact:
+            add(n.compact.keep, "keep", 0);
+            add(n.compact.kept, "kept", 1);
+            add(n.compact.count, "count", 1);
+            break;
+        case Node::Scan:
+            add(n.scan.in, "in", 0);
+            add(n.scan.out, "out", 1);
             break;
         case Node::Copy:
         case Node::Fft:
@@ -187,6 +201,8 @@ eg_gnode_kind gnode_kind(const Node& n) {
         case Node::Launch: return EG_GNODE_LAUNCH;
         case Node::Run: return EG_GNODE_RUN;
         case Node::Reduce: return EG_GNODE_REDUCE;
+        case Node::Scan: return EG_GNODE_SCAN;
+        case Node::Compact: return EG_GNODE_COMPACT;
         case Node::Copy: return EG_GNODE_COPY;
         case Node::Fft: return EG_GNODE_FFT;
         case Node::Gemm: return EG_GNODE_GEMM;
@@ -326,6 +342,8 @@ void run_node(eg_ctx& ctx, const Node& n, Tape* tape) {
             fault_check(ctx, *n.runner);
             break;
         case Node::Reduce: host::reduce_exec(n.reduce, host::team_threads(ctx)); break;
+        case Node::Scan: host::scan_exec(n.scan, host::team_threads(ctx)); break;
+        case Node::Compact: host::compact_exec(n.compact, host::team_threads(ctx)); break;
         case Node::Copy: host::copy_exec(*n.src, *n.dst); break;
         case Node::Fft: host::fft_exec(*n.fft, *n.src, *n.dst, host::team_threads(ctx)); break;
         case Node::Gemm: host::gemm_exec(*n.gemm, *n.src, *n.rhs, *n.dst); break;
@@ -404,6 +422,24 @@ void reduce(eg_ctx& ctx, const eg_reduce_desc* desc) {
     n.kind = Node::Reduce;
     n.reduce = host::reduce_check(ctx, d);
     if (!record(ctx, std::move(n))) host::reduce_exec(n.reduce, host::team_threads(ctx));
+}
+
+/** @brief eg_scan: check, then keep it while recording, else run it. */
+void scan(eg_ctx& ctx, const eg_scan_desc* desc) {
+    const eg_scan_desc d = read_input(desc, "eg_scan_desc");
+    Node n;
+    n.kind = Node::Scan;
+    n.scan = host::scan_check(ctx, d);
+    if (!record(ctx, std::move(n))) host::scan_exec(n.scan, host::team_threads(ctx));
+}
+
+/** @brief eg_compact: check, then keep it while recording, else run it. */
+void compact(eg_ctx& ctx, const eg_compact_desc* desc) {
+    const eg_compact_desc d = read_input(desc, "eg_compact_desc");
+    Node n;
+    n.kind = Node::Compact;
+    n.compact = host::compact_check(ctx, d);
+    if (!record(ctx, std::move(n))) host::compact_exec(n.compact, host::team_threads(ctx));
 }
 
 /** @brief eg_copy: check, then keep it while recording, else run it. */
