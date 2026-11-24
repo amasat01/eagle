@@ -1338,10 +1338,12 @@ void device_reduce(eg_ctx& ctx, const eg_reduce_desc& d) {
     device_reduce_leaf(ctx, host::reduce_check(ctx, d));
 }
 
-/** @brief The working memory of the eager scans on @p stream, at least @p bytes: kept by the context, grown (never shrunk) when a
- *  larger scan needs it, after the work queued on the stream has run. */
-void* scan_state_for(eg_ctx& ctx, std::uint64_t stream, std::size_t bytes) {
+/** @brief The working memory of the eager scans, compactions and sorts on @p stream: kept by the context, grown (never shrunk) when a larger
+ *  one needs it, after the work queued on the stream has run. Its first @p state_bytes bytes are zero and the work leaves them zero;
+ *  the @p temp_bytes after them (when asked) are any state. */
+void* scan_state_for(eg_ctx& ctx, std::uint64_t stream, std::size_t state_bytes, std::size_t temp_bytes = 0) {
     DeviceState::ScanState& have = ctx.dev.scan_state[stream];
+    const std::size_t bytes = (state_bytes + 15) / 16 * 16 + temp_bytes;
     if (have.bytes < bytes) {
         const std::size_t want = std::max(bytes, 2 * have.bytes);
         void* grown = scan_state_make(want);
@@ -1352,7 +1354,13 @@ void* scan_state_for(eg_ctx& ctx, std::uint64_t stream, std::size_t bytes) {
         }
         have.data = grown;
         have.bytes = want;
+        have.clean = want;
     }
+    if (have.clean < state_bytes) {    // memory past the zero prefix was used as temporary memory: clear what this work needs
+        zero_bytes(stream, static_cast<char*>(have.data) + have.clean, state_bytes - have.clean);
+        have.clean = state_bytes;
+    }
+    if (temp_bytes != 0) have.clean = (state_bytes + 15) / 16 * 16;    // the temporary memory after the zero prefix is now in any state
     return have.data;
 }
 
@@ -1412,11 +1420,83 @@ void device_compact(eg_ctx& ctx, const eg_compact_desc& d) {
     }
 }
 
-/** @brief eg_order_by_key over device planes: not written on a device. */
-void device_order_by_key(eg_ctx&, const eg_order_desc&)
-{
-    refuse(EG_NOT_WRITTEN,
-        "eg_order_by_key: the sort by key is not written for a device context");
+/** @brief What a recorded sort's host step reads after the replay's copy: the 32-bit count of keys outside the bound, in page-locked memory. */
+struct OutsideKeys {
+    std::uint32_t* count;
+    std::int64_t bound;
+};
+
+/** @brief eg_order_by_key over device planes: the checks and the node are the host's; the sort is stable radix passes over the bits the
+ *  bound needs (eagle/cuda/KeyedSort.cuh) on the stream in scope of the calling thread. Keys outside [0, bound) fail the call when
+ *  it runs eagerly (it waits for the count) and the next ``eg_graph_launch`` or ``eg_sync`` after a replay (a host step reads the
+ *  count the replay copied to page-locked memory). */
+void device_order_by_key(eg_ctx& ctx, const eg_order_desc& d) {
+    const host::OrderOp o = host::order_check(ctx, d);
+    const auto at = [](const eg_plane_s* p) -> void* {
+        return static_cast<char*>(p->tensor->dl_tensor.data) + p->tensor->dl_tensor.byte_offset;
+    };
+    Node leaf;
+    leaf.kind = Node::Order;
+    leaf.order = o;
+    note_leaf(ctx, "eg_order_by_key", { { o.keys, 0, -1, "keys" }, { o.order, 1, -1, "order" }, { o.starts, 1, -1, "starts" } }, std::move(leaf));
+    const std::uint64_t stream = ctx.dev.stream;
+    Current current(ctx.dev);
+    if (o.n == 0) {
+        zero_bytes(stream, at(o.starts), static_cast<std::size_t>(o.bound + 1) * sizeof(std::uint32_t));
+        return;
+    }
+    const DLDataType& type = o.keys->tensor->dl_tensor.dtype;
+    const bool is_signed = type.code == kDLInt;
+    const std::size_t state_bytes = order_state_bytes(o.n, o.bound), temp_bytes = order_temp_bytes(o.n, o.bound);
+    const auto refusal = [&](std::uint32_t outside) {
+        return "sort: " + std::to_string(outside) + " keys are outside [0, " + std::to_string(o.bound) + ")";
+    };
+    if (ctx.dev_rec == nullptr) {
+        char* memory = static_cast<char*>(scan_state_for(ctx, stream, state_bytes, temp_bytes));
+        void* temp = memory + (state_bytes + 15) / 16 * 16;
+        order_step(stream, type.bits, is_signed, at(o.keys), o.n, o.bound, at(o.order), at(o.starts), memory, temp);
+        std::uint32_t outside = 0;
+        read_bytes(stream, &outside, temp, sizeof(outside));
+        if (outside != 0) refuse(EG_BAD_REQUEST, refusal(outside));
+        return;
+    }
+    void* state = nullptr;
+    void* temp = nullptr;
+    OutsideKeys* found = nullptr;
+    const char* where = "the working memory";
+    try {
+        state = alloc_async(stream, state_bytes, true);
+        temp = alloc_async(stream, temp_bytes, false);
+        where = "the page-locked count";
+        found = new OutsideKeys{ static_cast<std::uint32_t*>(host_pinned_new(sizeof(std::uint32_t))), o.bound };
+        where = "the sort";
+        order_step(stream, type.bits, is_signed, at(o.keys), o.n, o.bound, at(o.order), at(o.starts), state, temp);
+        where = "the copy of the count";
+        queue_read_bytes(stream, found->count, temp, sizeof(std::uint32_t));    // a copy node of the capture, read by the host step after it
+    } catch (const std::exception& why) {
+        refuse(EG_FAULT, std::string("eg_order_by_key while recording: ") + where + ": " + why.what());
+    }
+    free_async(stream, stream, temp);
+    free_async(stream, stream, state);
+    try {
+        device_record_host_step(
+            ctx,
+            [](void* user, StepFailure& failure) noexcept {
+                const auto* keys = static_cast<const OutsideKeys*>(user);
+                if (*keys->count != 0)
+                    failure.set("sort: " + std::to_string(*keys->count) + " keys are outside [0, " + std::to_string(keys->bound) + ")");
+            },
+            found,
+            [](eg_ctx&, void* user) {
+                auto* keys = static_cast<OutsideKeys*>(user);
+                host_pinned_free(keys->count);
+                delete keys;
+            });
+    } catch (...) {
+        host_pinned_free(found->count);
+        delete found;
+        throw;
+    }
 }
 
 /** @brief eg_reorder over device planes: not written on a device. */

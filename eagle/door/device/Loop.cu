@@ -6,6 +6,7 @@
 // instantiated once and launched per run, as the old path's band loop
 // (``repeat_while`` under ``GraphPipeline.build``).
 #include "eagle/door/device/Loop.h"
+#include "eagle/cuda/KeyedSort.cuh"
 #include "eagle/cuda/ScanKernels.cuh"
 
 #include "eagle/cuda/CaptureAttribution.h"
@@ -90,8 +91,14 @@ __global__ void maskCountKernel(const unsigned char* mask, long long n, unsigned
 }  // namespace
 
 void* host_pinned_new(std::size_t bytes) {
+    // Page-locked memory is not a stream operation, but a call that allocates it while a stream of the process is captured
+    // invalidates the capture in the default mode: this thread allocates in the relaxed mode and puts its mode back.
+    cudaStreamCaptureMode mode = cudaStreamCaptureModeRelaxed;
+    (void)cudaThreadExchangeStreamCaptureMode(&mode);
     void* p = nullptr;
-    EAGLE_CHECK_ALWAYS(cudaHostAlloc(&p, bytes, cudaHostAllocDefault));
+    const cudaError_t made = cudaHostAlloc(&p, bytes, cudaHostAllocDefault);
+    (void)cudaThreadExchangeStreamCaptureMode(&mode);
+    EAGLE_CHECK_ALWAYS(made);
     return p;
 }
 
@@ -313,6 +320,32 @@ void scan_state_free(void* state) noexcept {
 
 std::size_t compact_state_bytes(std::int64_t n) { return cuda::scan::compact_state_bytes(n); }
 
+std::size_t order_state_bytes(std::int64_t n, std::int64_t bound) { return cuda::order::state_bytes(cuda::order::shape_of(n, bound)); }
+
+std::size_t order_temp_bytes(std::int64_t n, std::int64_t bound) { return cuda::order::layout_of(cuda::order::shape_of(n, bound)).bytes; }
+
+namespace {
+
+template <class Key>
+void order_typed(cudaStream_t s, const void* keys, std::int64_t n, std::int64_t bound, void* order, void* starts, void* state, void* temp) {
+    cuda::order::queue<Key>(s, static_cast<const Key*>(keys), cuda::order::shape_of(n, bound), static_cast<std::uint32_t*>(order),
+                            static_cast<std::uint32_t*>(starts), state, temp);
+}
+
+}  // namespace
+
+void order_step(std::uint64_t stream, unsigned bits, bool is_signed, const void* keys, std::int64_t n, std::int64_t bound, void* order, void* starts,
+                void* state, void* temp) {
+    const auto s = reinterpret_cast<cudaStream_t>(stream);
+    switch (bits) {
+        case 8: is_signed ? order_typed<std::int8_t>(s, keys, n, bound, order, starts, state, temp) : order_typed<std::uint8_t>(s, keys, n, bound, order, starts, state, temp); break;
+        case 16: is_signed ? order_typed<std::int16_t>(s, keys, n, bound, order, starts, state, temp) : order_typed<std::uint16_t>(s, keys, n, bound, order, starts, state, temp); break;
+        case 32: is_signed ? order_typed<std::int32_t>(s, keys, n, bound, order, starts, state, temp) : order_typed<std::uint32_t>(s, keys, n, bound, order, starts, state, temp); break;
+        default: is_signed ? order_typed<std::int64_t>(s, keys, n, bound, order, starts, state, temp) : order_typed<std::uint64_t>(s, keys, n, bound, order, starts, state, temp);
+    }
+    EAGLE_CHECK_ALWAYS(cudaGetLastError());
+}
+
 void compact_step(std::uint64_t stream, const void* keep, void* kept, void* count, std::int64_t n, void* state) {
     cuda::scan::compact_queue(reinterpret_cast<cudaStream_t>(stream), static_cast<const std::uint8_t*>(keep), static_cast<std::uint32_t*>(kept),
                         static_cast<std::uint32_t*>(count), n, state);
@@ -373,6 +406,10 @@ void write_bytes(std::uint64_t stream, void* dst, const void* src, std::size_t b
 void read_bytes(std::uint64_t stream, void* dst, const void* src, std::size_t bytes) {
     EAGLE_CHECK_ALWAYS(cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDeviceToHost, reinterpret_cast<cudaStream_t>(stream)));
     stream_wait(stream);
+}
+
+void queue_read_bytes(std::uint64_t stream, void* dst, const void* src, std::size_t bytes) {
+    EAGLE_CHECK_ALWAYS(cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDeviceToHost, reinterpret_cast<cudaStream_t>(stream)));
 }
 
 void zero_bytes(std::uint64_t stream, void* dst, std::size_t bytes) {

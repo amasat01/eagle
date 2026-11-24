@@ -142,6 +142,18 @@ void scan_state_free(void* state) noexcept;
 /** @brief The bytes of working memory a device compaction over @p n lanes needs (zeroed, like a scan's, and left zero). */
 std::size_t compact_state_bytes(std::int64_t n);
 
+/** @brief The bytes of ZEROED working memory (like a scan's, left zero) and of temporary memory (any state) a device sort by key of @p n
+ *  lanes with the key bound @p bound needs. */
+std::size_t order_state_bytes(std::int64_t n, std::int64_t bound);
+std::size_t order_temp_bytes(std::int64_t n, std::int64_t bound);
+
+/** @brief Queue on @p stream the stable sort by key of the @p n (above 0) lanes whose integer keys are @p keys (@p bits wide, signed or
+ *  not): ``order[j]`` (32-bit) is the lane that lands at place j and ``starts[k]`` (32-bit, ``bound + 1`` of them) the first place of
+ *  key k. @p state and @p temp are ``order_state_bytes`` and ``order_temp_bytes``; the 32-bit word at @p temp is left holding the number
+ *  of keys outside [0, @p bound), and ``order`` and ``starts`` are then unspecified. Nothing waits. */
+void order_step(std::uint64_t stream, unsigned bits, bool is_signed, const void* keys, std::int64_t n, std::int64_t bound, void* order, void* starts,
+                void* state, void* temp);
+
 /** @brief Queue on @p stream the compaction of the @p n (above 0) mask bytes of @p keep: ``kept[j]`` (32-bit) is the index of the
  *  j-th lane whose byte is non-zero, for j below ``*count`` (32-bit), which receives their number; the rest of @p kept is not
  *  written. @p state is ``compact_state_bytes`` of zeroed working memory, left zero. Nothing waits. */
@@ -166,6 +178,8 @@ void write_bytes(std::uint64_t stream, void* dst, const void* src, std::size_t b
 
 /** @brief Queue on @p stream a device-to-host copy of @p bytes and wait for it (the host bytes are the caller's, possibly pageable). */
 void read_bytes(std::uint64_t stream, void* dst, const void* src, std::size_t bytes);
+/** @brief Queue on @p stream a device-to-host copy of @p bytes into page-locked memory and do not wait (legal in a capture). */
+void queue_read_bytes(std::uint64_t stream, void* dst, const void* src, std::size_t bytes);
 
 /** @brief Queue on @p stream the zeroing of @p bytes at @p dst. */
 void zero_bytes(std::uint64_t stream, void* dst, std::size_t bytes);

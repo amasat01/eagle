@@ -3690,6 +3690,230 @@ static void device_compactions(eg_ctx* ctx) {
     }
 }
 
+/* ---- eg_order_by_key on a device context -------------------------------------------------------------------------------- */
+
+/* The key of lane @p i: uniform over [0, bound), or with the pattern 1 half the lanes in key 0 and the rest uniform. */
+static int64_t order_key(int pattern, uint64_t seed, int64_t i, int64_t bound) {
+    const uint64_t bits = mix64(seed * 0x2545F4914F6CDD1Dull + (uint64_t)i);
+    if (pattern == 1 && ((bits >> 40) & 1)) return 0;
+    return (int64_t)((bits >> 1) % (uint64_t)bound);
+}
+
+/* Wrong entries when eg_order_by_key sorts @p n lanes with the bound @p bound and keys of @p bits bits (signed or not): order is a permutation,
+ * the keys along it do not decrease, lanes of one key keep their order, and starts is the first place of every key (starts[bound] = n). The keys
+ * are regenerated from the lane number, so no key array is held on the host. -1: the call failed. */
+static int64_t order_rows(eg_ctx* ctx, int bits, int is_signed, int pattern, int64_t n, int64_t bound, eg_status* status) {
+    static uint32_t hbuf[SCAN_CHUNK];
+    static int64_t hkeys[SCAN_CHUNK];
+    void* dkeys = NULL;
+    uint32_t *dorder = NULL, *dstarts = NULL;
+    const int64_t alloc = n > 0 ? n : 1;
+    const size_t width = (size_t)bits / 8;
+    const uint64_t seed = 31 + (uint64_t)n + (uint64_t)bound + (uint64_t)pattern;
+    *status = EG_FAULT;
+    if (cudaMalloc(&dkeys, (size_t)alloc * width) != cudaSuccess || cudaMalloc((void**)&dorder, (size_t)alloc * 4) != cudaSuccess ||
+        cudaMalloc((void**)&dstarts, (size_t)(bound + 1) * 4) != cudaSuccess) {
+        cudaFree(dkeys);
+        cudaFree(dorder);
+        return -1;
+    }
+    for (int64_t at = 0; at < n; at += SCAN_CHUNK) {
+        const int64_t c = n - at < SCAN_CHUNK ? n - at : SCAN_CHUNK;
+        uint8_t* bytes = (uint8_t*)hkeys;
+        for (int64_t i = 0; i < c; ++i) {
+            const int64_t k = order_key(pattern, seed, at + i, bound);
+            memcpy(bytes + (size_t)i * width, &k, width); /* little endian: the low bytes are the key of the narrower type */
+        }
+        cudaMemcpy((char*)dkeys + (size_t)at * width, bytes, (size_t)c * width, cudaMemcpyHostToDevice);
+    }
+    cudaMemset(dorder, 0x5A, (size_t)alloc * 4);
+    cudaMemset(dstarts, 0x5A, (size_t)(bound + 1) * 4);
+    cudaDeviceSynchronize();
+    struct tensor tk, to, ts;
+    eg_plane* pk = wrap_device_typed(ctx, &tk, dkeys, n, is_signed ? kDLInt : kDLUInt, (uint8_t)bits);
+    eg_plane* po = wrap_device_typed(ctx, &to, dorder, n, kDLUInt, 32);
+    eg_plane* ps = wrap_device_typed(ctx, &ts, dstarts, bound + 1, kDLUInt, 32);
+    int64_t bad = -1;
+    if (pk && po && ps) {
+        struct eg_order_desc d = { sizeof(struct eg_order_desc), 0, pk, po, ps, bound };
+        *status = eg_order_by_key(ctx, &d);
+        if (*status == EG_OK && eg_sync(ctx) == EG_OK) {
+            bad = 0;
+            uint8_t* seen = (uint8_t*)calloc((size_t)(n / 8 + 1), 1);
+            int64_t prev_key = -1, prev_lane = -1;
+            static uint32_t hstarts[SCAN_CHUNK];
+            int64_t starts_at = 0, starts_have = -SCAN_CHUNK;
+            for (int64_t at = 0; at < n; at += SCAN_CHUNK) {
+                const int64_t c = n - at < SCAN_CHUNK ? n - at : SCAN_CHUNK;
+                cudaMemcpy(hbuf, dorder + at, (size_t)c * 4, cudaMemcpyDeviceToHost);
+                for (int64_t i = 0; i < c; ++i) {
+                    const int64_t lane = hbuf[i], j = at + i;
+                    if (lane >= n || (seen[lane >> 3] >> (lane & 7)) & 1) { ++bad; continue; }
+                    seen[lane >> 3] |= (uint8_t)(1 << (lane & 7));
+                    const int64_t key = order_key(pattern, seed, lane, bound);
+                    if (key < prev_key || (key == prev_key && lane < prev_lane)) ++bad;
+                    if (key != prev_key) { /* a run starts here: starts[key] is j, and every key skipped before it starts here too */
+                        for (int64_t k = prev_key + 1; k <= key; ++k) {
+                            if (k < starts_have || k >= starts_have + SCAN_CHUNK) {
+                                starts_have = k;
+                                const int64_t m = bound + 1 - k < SCAN_CHUNK ? bound + 1 - k : SCAN_CHUNK;
+                                cudaMemcpy(hstarts, dstarts + k, (size_t)m * 4, cudaMemcpyDeviceToHost);
+                            }
+                            bad += hstarts[k - starts_have] != (uint32_t)j;
+                        }
+                        prev_key = key;
+                    }
+                    prev_lane = lane;
+                }
+            }
+            for (int64_t k = prev_key + 1; k <= bound; ++k) { /* the keys above the largest: starts is n */
+                if (k < starts_have || k >= starts_have + SCAN_CHUNK) {
+                    starts_have = k;
+                    const int64_t m = bound + 1 - k < SCAN_CHUNK ? bound + 1 - k : SCAN_CHUNK;
+                    cudaMemcpy(hstarts, dstarts + k, (size_t)m * 4, cudaMemcpyDeviceToHost);
+                }
+                bad += hstarts[k - starts_have] != (uint32_t)n;
+            }
+            (void)starts_at;
+            free(seen);
+        }
+    }
+    eg_plane_free(ctx, pk);
+    eg_plane_free(ctx, po);
+    eg_plane_free(ctx, ps);
+    cudaFree(dkeys);
+    cudaFree(dorder);
+    cudaFree(dstarts);
+    return bad;
+}
+
+/* eg_order_by_key on a device context: key widths and bounds, uniform and half-in-key-0 keys, and the sizes where a tile ends. */
+static void device_orders(eg_ctx* ctx) {
+    const int64_t tile = 4096;
+    const int64_t sizes[7] = { 0, 1, tile - 1, tile, tile + 1, 128 * tile + 5, 4000003 };
+    struct { int bits, is_signed; const char* name; int64_t bounds[4]; } types[4] = {
+        { 8, 1, "int8", { 16, 100, 127, 2 } }, { 32, 1, "int32", { 16, 4096, 1 << 20, 0 } }, { 32, 0, "uint32", { 16, 4096, 1 << 20, 0 } },
+        { 64, 1, "int64", { 16, 4096, 1 << 20, 0 } } };
+    for (int t = 0; t < 4; ++t)
+        for (int pattern = 0; pattern < 2; ++pattern)
+            for (int b = 0; b < 4; ++b) {
+                int ok = 1;
+                for (int s = 0; s < 7; ++s) {
+                    const int64_t bound = types[t].bounds[b] != 0 ? types[t].bounds[b] : (sizes[s] > 0 ? sizes[s] : 1); /* a bound of n lanes */
+                    eg_status status = EG_OK;
+                    const int64_t bad = order_rows(ctx, types[t].bits, types[t].is_signed, pattern, sizes[s], bound, &status);
+                    ok = ok && status == EG_OK && bad == 0;
+                    if (!(status == EG_OK && bad == 0))
+                        printf("      %s %s bound %lld n=%lld: status %d, %lld wrong\n", types[t].name, pattern ? "half in key 0" : "uniform", (long long)bound,
+                               (long long)sizes[s], (int)status, (long long)bad);
+                }
+                char what[200];
+                snprintf(what, sizeof(what), "eg_order_by_key on the device, %s keys, %s, bound %lld: sizes 0, 1, tile-1, tile, tile+1, a group+5 and 4000003 sort stably with the right starts",
+                         types[t].name, pattern ? "half the lanes in key 0" : "uniform",
+                         (long long)(types[t].bounds[b] != 0 ? types[t].bounds[b] : -1));
+                check(ok, what);
+            }
+
+    {   /* the largest the card holds: 4-byte keys, a bound of 16 and a bound of n with half the lanes in key 0 */
+        size_t free_bytes = 0, total_bytes = 0;
+        cudaMemGetInfo(&free_bytes, &total_bytes);
+        const int64_t largest = (int64_t)((double)free_bytes * 0.35 / 34.0);
+        eg_status status = EG_OK;
+        const int64_t bad_small = order_rows(ctx, 32, 1, 0, largest, 16, &status);
+        const int ok_small = status == EG_OK && bad_small == 0;
+        const int64_t bad_wide = order_rows(ctx, 32, 0, 1, largest, largest, &status);
+        check(ok_small && status == EG_OK && bad_wide == 0, "eg_order_by_key on the device over the largest the card holds: bound 16 and bound n (half the lanes in key 0) sort stably with the right starts");
+        printf("      eg_order_by_key largest: %lld lanes\n", (long long)largest);
+    }
+    {   /* keys outside [0, bound): counted and reported by the call (eager), and by the sync after the replay (recorded) */
+        const int64_t n = 100003, bound = 1000;
+        static int32_t host_keys[100003];
+        static uint32_t host_order[100003], host_starts[1001];
+        int32_t* dkeys = NULL;
+        uint32_t *dorder = NULL, *dstarts = NULL;
+        int ok = cudaMalloc((void**)&dkeys, (size_t)n * 4) == cudaSuccess && cudaMalloc((void**)&dorder, (size_t)n * 4) == cudaSuccess &&
+                 cudaMalloc((void**)&dstarts, (size_t)(bound + 1) * 4) == cudaSuccess;
+        struct tensor tk, to, ts;
+        eg_plane* pk = ok ? wrap_device_typed(ctx, &tk, dkeys, n, kDLInt, 32) : NULL;
+        eg_plane* po = ok ? wrap_device_typed(ctx, &to, dorder, n, kDLUInt, 32) : NULL;
+        eg_plane* ps = ok ? wrap_device_typed(ctx, &ts, dstarts, bound + 1, kDLUInt, 32) : NULL;
+        struct eg_order_desc d = { sizeof(struct eg_order_desc), 0, pk, po, ps, bound };
+        for (int64_t i = 0; i < n; ++i) host_keys[i] = (int32_t)order_key(0, 77, i, bound);
+        host_keys[5] = -3, host_keys[17] = 1000, host_keys[90000] = 123456;
+        ok = ok && pk && po && ps && cudaMemcpy(dkeys, host_keys, (size_t)n * 4, cudaMemcpyHostToDevice) == cudaSuccess;
+        cudaDeviceSynchronize();
+        check(ok && refused(eg_order_by_key(ctx, &d), EG_BAD_REQUEST, ctx, "sort: 3 keys are outside [0, 1000)"),
+              "eg_order_by_key on the device with three keys outside [0, 1000): refused BAD_REQUEST by the call with the host's text");
+        /* recorded once, replayed on a good set then on a set with one key outside */
+        eg_graph* g = NULL;
+        ok = ok && eg_record_begin(ctx) == EG_OK;
+        if (ok) {
+            ok = eg_order_by_key(ctx, &d) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK;
+        }
+        for (int run = 0; ok && run < 2; ++run) {
+            for (int64_t i = 0; i < n; ++i) host_keys[i] = (int32_t)order_key(0, 78 + (uint64_t)run, i, bound);
+            if (run == 1) host_keys[42] = 1000;
+            cudaMemcpy(dkeys, host_keys, (size_t)n * 4, cudaMemcpyHostToDevice);
+            cudaMemset(dorder, 0x5A, (size_t)n * 4);
+            cudaDeviceSynchronize();
+            const eg_status launched = eg_graph_launch(ctx, g);
+            const eg_status synced = eg_sync(ctx);
+            if (run == 0) {
+                ok = launched == EG_OK && synced == EG_OK && cudaMemcpy(host_order, dorder, (size_t)n * 4, cudaMemcpyDeviceToHost) == cudaSuccess &&
+                     cudaMemcpy(host_starts, dstarts, (size_t)(bound + 1) * 4, cudaMemcpyDeviceToHost) == cudaSuccess;
+                uint32_t counts[1001] = { 0 };
+                for (int64_t i = 0; i < n; ++i) ++counts[host_keys[i] + 1];
+                for (int k = 0; ok && k < bound; ++k) {
+                    counts[k + 1] += counts[k];
+                    ok = host_starts[k] == counts[k];
+                }
+                ok = ok && host_starts[bound] == (uint32_t)n;
+                uint32_t next[1000];
+                memcpy(next, counts, sizeof(next));
+                for (int64_t i = 0; ok && i < n; ++i) ok = host_order[next[host_keys[i]]++] == (uint32_t)i;
+                check(ok, "eg_order_by_key recorded in a device graph and replayed on a good key set equals the stable counting sort");
+            } else {
+                const int refused_replay = (launched != EG_OK || synced != EG_OK) && (reason_has(ctx, "sort: 1 keys are outside [0, 1000)"));
+                check(refused_replay, "the replay of a recorded device sort over one key outside [0, 1000) fails at the launch or the sync with the host's text");
+            }
+        }
+        if (g) eg_graph_free(ctx, g);
+        eg_plane_free(ctx, pk);
+        eg_plane_free(ctx, po);
+        eg_plane_free(ctx, ps);
+        cudaFree(dkeys);
+        cudaFree(dorder);
+        cudaFree(dstarts);
+    }
+    {   /* the host's refusals, by name, on a device context */
+        float* dkeys = NULL;
+        uint32_t *dorder = NULL, *dstarts = NULL;
+        int ok = cudaMalloc((void**)&dkeys, 64 * 4) == cudaSuccess && cudaMalloc((void**)&dorder, 64 * 4) == cudaSuccess && cudaMalloc((void**)&dstarts, 65 * 4) == cudaSuccess;
+        struct tensor tf, ti, to, ts, tw;
+        eg_plane* real = ok ? wrap_device_typed(ctx, &tf, dkeys, 8, kDLFloat, 32) : NULL;
+        eg_plane* integer = ok ? wrap_device_typed(ctx, &ti, dkeys, 8, kDLInt, 32) : NULL;
+        eg_plane* order = ok ? wrap_device_typed(ctx, &to, dorder, 8, kDLUInt, 32) : NULL;
+        eg_plane* starts = ok ? wrap_device_typed(ctx, &ts, dstarts, 5, kDLUInt, 32) : NULL;
+        eg_plane* wrong = ok ? wrap_device_typed(ctx, &tw, dstarts, 7, kDLUInt, 32) : NULL;
+        struct eg_order_desc rd = { sizeof(struct eg_order_desc), 0, real, order, starts, 4 };
+        struct eg_order_desc zero = { sizeof(struct eg_order_desc), 0, integer, order, starts, 0 };
+        struct eg_order_desc extent = { sizeof(struct eg_order_desc), 0, integer, order, wrong, 4 };
+        struct eg_order_desc flags = { sizeof(struct eg_order_desc), 1u, integer, order, starts, 4 };
+        check(ok && refused(eg_order_by_key(ctx, &rd), EG_NOT_WRITTEN, ctx, "real keys are not written") &&
+                  refused(eg_order_by_key(ctx, &zero), EG_BAD_REQUEST, ctx, "bound is 0") &&
+                  refused(eg_order_by_key(ctx, &extent), EG_BAD_REQUEST, ctx, "bound + 1") && refused(eg_order_by_key(ctx, &flags), EG_BAD_REQUEST, ctx, "unknown bits"),
+              "eg_order_by_key on a device context refuses real keys NOT_WRITTEN, and a bound of 0, a starts of the wrong extent and unknown flags BAD_REQUEST, by name");
+        eg_plane_free(ctx, real);
+        eg_plane_free(ctx, integer);
+        eg_plane_free(ctx, order);
+        eg_plane_free(ctx, starts);
+        eg_plane_free(ctx, wrong);
+        cudaFree(dkeys);
+        cudaFree(dorder);
+        cudaFree(dstarts);
+    }
+}
+
 int main(int argc, char** argv) {
     if (argc != 3) {
         fprintf(stderr, "usage: %s <libfixture_device.so> <libfixture_unit.so>\n", argv[0]);
@@ -3853,6 +4077,7 @@ int main(int argc, char** argv) {
     device_events(ctx, host);
     device_scans(ctx);
     device_compactions(ctx);
+    device_orders(ctx);
     struct eg_reduce_desc rd;
     memset(&rd, 0, sizeof(rd));
     rd.struct_size = sizeof(rd);
