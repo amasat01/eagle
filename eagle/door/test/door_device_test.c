@@ -3481,6 +3481,7 @@ static void device_scans(eg_ctx* ctx) {
         int same = 1;
         for (int run = 0; ok && pi && po && run < 25; ++run) {
             cudaMemset(dout, 0x5A, (size_t)n * 4);
+            cudaDeviceSynchronize(); /* the legacy stream's fill is not ordered against the context's stream: settle it first */
             ok = eg_scan(ctx, &desc) == EG_OK && eg_sync(ctx) == EG_OK && cudaMemcpy(run == 0 ? first : again, dout, (size_t)n * 4, cudaMemcpyDeviceToHost) == cudaSuccess;
             if (run > 0) same = same && memcmp(first, again, (size_t)n * 4) == 0;
         }

@@ -299,6 +299,11 @@ std::size_t scan_state_bytes(unsigned bits, std::int64_t n) {
 void* scan_state_make(std::size_t bytes) {
     void* state = nullptr;
     EAGLE_CHECK_ALWAYS(cudaMalloc(&state, bytes));
+    const cudaError_t cleared = cudaMemset(state, 0, bytes);    // a scan needs it zero and leaves it zero
+    if (cleared != cudaSuccess) {
+        (void)cudaFree(state);
+        EAGLE_CHECK_ALWAYS(cleared);
+    }
     return state;
 }
 

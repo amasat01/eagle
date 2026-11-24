@@ -130,18 +130,20 @@ __host__ __device__ constexpr long long tile_values() { return static_cast<long 
 template <class T>
 inline int tiles_of(std::int64_t n) { return static_cast<int>((n + tile_values<T>() - 1) / tile_values<T>()); }
 
-/** @brief The bytes of working memory one scan over ``n`` values needs (to be zeroed before the launch): the ticket, the tile
- *  totals and the group totals. */
+/** @brief The bytes of working memory one scan over ``n`` values needs: the ticket and the finished-tile count, the tile
+ *  totals and the group totals. It is all zero before a scan and is left all zero by it: a scan of at most one group of tiles
+ *  has its last tile clear the few cells it used (no launch of its own); a larger one is followed by a clearing launch, which
+ *  costs nothing next to its own run. */
 template <class T>
 inline std::size_t state_bytes(std::int64_t n) {
     const std::size_t tiles = static_cast<std::size_t>(tiles_of<T>(n));
     const std::size_t cell = sizeof(T) == 8 ? 16 : 8;
-    return 256 + (tiles + (tiles + kGroup - 1) / kGroup) * cell;
+    return 256 + (((tiles + (tiles + kGroup - 1) / kGroup) * cell + 15) / 16) * 16;    // the last tile clears in 16-byte steps
 }
 
 /** @brief One scan: ``out[i]`` folds ``in[0..i]`` (or ``in[0..i-1]`` when ``exclusive``) with ``F``, started from its identity. */
 template <class T, int F>
-__global__ void __launch_bounds__(kBlock) scan_tiles(const T* in, T* out, long long n, bool exclusive, void* state) {
+__global__ void __launch_bounds__(kBlock) scan_tiles(const T* in, T* out, long long n, bool exclusive, bool self_clean, void* state) {
     using O = Op<T, F>;
     constexpr int kItems = items_of<T>();
     constexpr int kWarps = kBlock / kWarp;
@@ -149,11 +151,12 @@ __global__ void __launch_bounds__(kBlock) scan_tiles(const T* in, T* out, long l
     __shared__ T warp_fold[kWarps];
     __shared__ T tile_prefix;
     __shared__ unsigned tile_id;
+    __shared__ bool last_tile;
     unsigned* ticket = static_cast<unsigned*>(state);
+    unsigned* finished = ticket + 1;
     char* cells = static_cast<char*>(state) + 256;
     const long long tiles = (n + tile_values<T>() - 1) / tile_values<T>();
     const long long groups = (tiles + kGroup - 1) / kGroup;
-    (void)groups;
     void* tile_cells = cells;
     void* group_cells = cells + tiles * Cell<T>::words * 8;
     if (threadIdx.x == 0) tile_id = atomicAdd(ticket, 1u);
@@ -251,13 +254,28 @@ __global__ void __launch_bounds__(kBlock) scan_tiles(const T* in, T* out, long l
             if (at < n) out[at] = stage[i * kBlock + threadIdx.x];
         }
     }
+
+    // A scan of one group of tiles clears its own working memory: the tile that finishes last knows every other tile has read what
+    // it needs (a tile's reads of the cells were consumed before its own count).
+    if (!self_clean) return;
+    __syncthreads();
+    if (threadIdx.x == 0) last_tile = atomicAdd(finished, 1u) == static_cast<unsigned>(tiles - 1);
+    __syncthreads();
+    if (last_tile) {
+        const long long cell_bytes = (tiles + groups) * Cell<T>::words * 8;
+        for (long long at = static_cast<long long>(threadIdx.x) * 16; at < cell_bytes; at += static_cast<long long>(kBlock) * 16)
+            *reinterpret_cast<ulonglong2*>(cells + at) = make_ulonglong2(0ull, 0ull);
+        if (threadIdx.x == 0) { *ticket = 0u; *finished = 0u; }
+    }
 }
 
-/** @brief Queue the clearing of the working memory ``state`` and the scan of ``n`` values on ``stream`` (``n`` above 0). */
+/** @brief Queue the scan of ``n`` values (above 0) on ``stream``; ``state`` is ``state_bytes`` of zeroed working memory and is zero
+ *  again when the queued work has run. */
 template <class T, int F>
 inline void scan_queue(cudaStream_t stream, const T* in, T* out, std::int64_t n, bool exclusive, void* state) {
-    cudaMemsetAsync(state, 0, state_bytes<T>(n), stream);
-    scan_tiles<T, F><<<tiles_of<T>(n), kBlock, 0, stream>>>(in, out, n, exclusive, state);
+    const bool self_clean = tiles_of<T>(n) <= kGroup;
+    scan_tiles<T, F><<<tiles_of<T>(n), kBlock, 0, stream>>>(in, out, n, exclusive, self_clean, state);
+    if (!self_clean) cudaMemsetAsync(state, 0, state_bytes<T>(n), stream);
 }
 
 }  // namespace scan

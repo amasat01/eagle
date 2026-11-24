@@ -1369,7 +1369,7 @@ void device_scan(eg_ctx& ctx, const eg_scan_desc& d) {
     const std::size_t bytes = scan_state_bytes(type.bits, s.n);
     Current current(ctx.dev);
     if (ctx.dev_rec != nullptr) {
-        void* state = alloc_async(stream, bytes, false);
+        void* state = alloc_async(stream, bytes, true);
         scan_step(stream, element, s.op, s.exclusive, at(s.in), at(s.out), s.n, state);
         free_async(stream, stream, state);
     } else {
