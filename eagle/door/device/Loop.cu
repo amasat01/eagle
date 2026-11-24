@@ -6,7 +6,7 @@
 // instantiated once and launched per run, as the old path's band loop
 // (``repeat_while`` under ``GraphPipeline.build``).
 #include "eagle/door/device/Loop.h"
-#include "eagle/door/device/ScanKernels.cuh"
+#include "eagle/cuda/ScanKernels.cuh"
 
 #include "eagle/cuda/CaptureAttribution.h"
 #include "eagle/cuda/CaptureConditional.h"
@@ -284,16 +284,16 @@ void scan_by_fold(cudaStream_t s, int fold, const void* in, void* out, std::int6
     const T* src = static_cast<const T*>(in);
     T* dst = static_cast<T*>(out);
     switch (fold) {
-        case scan::kSum: scan::scan_queue<T, scan::kSum>(s, src, dst, n, exclusive, state); break;
-        case scan::kMin: scan::scan_queue<T, scan::kMin>(s, src, dst, n, exclusive, state); break;
-        default: scan::scan_queue<T, scan::kMax>(s, src, dst, n, exclusive, state);
+        case cuda::scan::kSum: cuda::scan::scan_queue<T, cuda::scan::kSum>(s, src, dst, n, exclusive, state); break;
+        case cuda::scan::kMin: cuda::scan::scan_queue<T, cuda::scan::kMin>(s, src, dst, n, exclusive, state); break;
+        default: cuda::scan::scan_queue<T, cuda::scan::kMax>(s, src, dst, n, exclusive, state);
     }
 }
 
 }  // namespace
 
 std::size_t scan_state_bytes(unsigned bits, std::int64_t n) {
-    return bits == 64 ? scan::state_bytes<double>(n) : scan::state_bytes<float>(n);
+    return bits == 64 ? cuda::scan::state_bytes<double>(n) : cuda::scan::state_bytes<float>(n);
 }
 
 void* scan_state_make(std::size_t bytes) {
@@ -311,10 +311,10 @@ void scan_state_free(void* state) noexcept {
     if (state != nullptr) (void)cudaFree(state);
 }
 
-std::size_t compact_state_bytes(std::int64_t n) { return scan::compact_state_bytes(n); }
+std::size_t compact_state_bytes(std::int64_t n) { return cuda::scan::compact_state_bytes(n); }
 
 void compact_step(std::uint64_t stream, const void* keep, void* kept, void* count, std::int64_t n, void* state) {
-    scan::compact_queue(reinterpret_cast<cudaStream_t>(stream), static_cast<const std::uint8_t*>(keep), static_cast<std::uint32_t*>(kept),
+    cuda::scan::compact_queue(reinterpret_cast<cudaStream_t>(stream), static_cast<const std::uint8_t*>(keep), static_cast<std::uint32_t*>(kept),
                         static_cast<std::uint32_t*>(count), n, state);
     EAGLE_CHECK_ALWAYS(cudaGetLastError());
 }

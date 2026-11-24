@@ -3,7 +3,11 @@
 
 #pragma once
 
-#include "eagle/filtering/scan_detail.h"
+#include <cstdint>
+#include <type_traits>
+
+#include "eagle/cuda/ScanKernels.cuh"
+#include "eagle/cuda/StreamCapturer.h"
 #include "eagle/typedefs.h"
 #include "eagle/cuda.h"
 #include "eagle/util/DeviceError.h"
@@ -15,134 +19,53 @@ namespace cuda {
 
 #ifndef EAGLE_CPU_ONLY
 
-/** @brief Perform the Prefix sum (scan) algorithm */
+/** @brief The device prefix sum: the single-pass scan of ``cuda/ScanKernels.cuh`` over a one-dimensional array. */
 struct Scan {
 
-    /** @brief Enqueue the full scan on @p stream, without capturing it.
+    /** @brief Enqueue the scan on @p stream, without capturing it.
      *
-     *  The launch sequence ``graph`` captures, issued straight onto
-     *  ``stream``: nothing is allocated, nothing is synchronised and nothing
-     *  is read back to the host, so a caller that is ALREADY capturing
-     *  ``stream`` (a graph-building consumer) records it into its own graph,
-     *  and an uncaptured caller simply runs it asynchronously. ``blockSums``
-     *  must hold at least ``arr.samples()`` elements. The exclusive variant
-     *  ends with a device-to-device copy; the inclusive one is kernels only. */
-    template<typename T, typename OP, bool Inclusive,
-        unsigned int blockSize_ = filtering::detail::ScanCore::blockSize>
+     *  The launches ``graph`` captures, issued straight onto ``stream``: nothing is read back to the host and nothing is
+     *  synchronised, so a caller that is ALREADY capturing ``stream`` records it into its own graph, and an uncaptured caller
+     *  runs it asynchronously. Only the sum is written: ``OP`` is ``aether::SumOp<T>``, started from zero (@p init must
+     *  be zero). Its working memory is @p blockSums, which is as long as @p arr.
+     *
+     *  A real sum is the same bits on every run: its grouping depends on the extent alone. */
+    template<typename T, typename OP, bool Inclusive>
     static inline void enqueue(
         const CRefArrT<T> arr, GRefArrT<T> results,
-        GRefArrT<T> blockSums, const T& init = 0,
+        [[maybe_unused]] GRefArrT<T> blockSums, const T& init = 0,
         const cudaStream_t& stream = 0)
     {
-        constexpr idx_t warpSize = 32;
-        const idx_t N            = idx_t(arr.samples());
-        auto blockSize           = [](const idx_t& size) {
-            return std::min(blockSize_,
-                          (idx_t)(((size + warpSize - 1) / warpSize) * warpSize));
-        };
-
+        static_assert(std::is_same_v<OP, aether::SumOp<T>>,
+            "cuda::Scan: only the sum is written on the device");
+        const idx_t N = idx_t(arr.samples());
         EAGLE_TRACE("Starting scan over %i elements", N);
         EAGLE_ASSERT(arr.data() != results.data(),
             "Reduction array and work buffer must be distinct!");
         EAGLE_ASSERT(idx_t(results.samples()) == N,
             "Output array `results` must be the same size as `arr`!");
-
-        /* Pre-compute the blocks and, therefore, the number of recursion steps
-         */
-        std::vector<idx_t> blockSizes;
-        std::vector<idx_t> blocks;
-        std::vector<idx_t> shmemSizes;
-        blockSizes.push_back(blockSize(N));
-        blocks.push_back(
-            filtering::detail::ScanCore::countBlocks<blockSize_>(
-                N, blockSizes.back()));
-        shmemSizes.push_back(
-            2 * sizeof(idx_t) * (blockSizes.back() / warpSize));
-        while (blocks.back() > 1) {
-            blockSizes.push_back(blockSize(blocks.back()));
-            blocks.push_back(filtering::detail::ScanCore::countBlocks<blockSize_>(
-                blocks.back(), blockSizes.back()));
-            shmemSizes.push_back(
-                2 * sizeof(idx_t) * (blockSizes.back() / warpSize));
+        EAGLE_ASSERT(init == T(0), "cuda::Scan starts from zero");
+        if (N == 0)
+            return;
+        // One tile needs no working memory. More need ``state_bytes`` (a few percent of the array), which @p blockSums
+        // (as long as the array) holds, cleared here because the scan expects it zero.
+        const std::size_t bytes = scan::state_bytes<T>(N);
+        void* state             = nullptr;
+        if (scan::tiles_of<T>(N) > 1) {
+            EAGLE_ASSERT(std::size_t(blockSums.samples()) * sizeof(T) >= bytes + 16,
+                "cuda::Scan: `blockSums` must be as long as `arr`!");
+            // the working memory is read and written in 16-byte steps: start it on a 16-byte boundary
+            const auto raw = reinterpret_cast<std::uintptr_t>(blockSums.data());
+            state          = reinterpret_cast<void*>((raw + 15) & ~std::uintptr_t(15));
+            EAGLE_CHECK_ALWAYS(cudaMemsetAsync(state, 0, bytes, stream));
         }
-
-        using RefT = GRefArrT<T>;
-        auto refOver = [](T* p, idx_t n) { return spanView<T>(p, n, deviceDevice()); };
-        /* We can safely use the bottom half of blockSums because blockSize_ >=
-         * 32 by definition */
-        const idx_t nSteps = blocks.size() - 1;
-        RefT buffer = refOver(blockSums.data() + N / 2, N / 2);
-        std::vector<RefT> res;
-        std::vector<RefT> bsums;
-        /* reserve the space for res and bsums */
-        res.reserve(nSteps);
-        bsums.reserve(nSteps);
-        idx_t start = 0;
-        for (idx_t i = 1; i < blocks.size(); i++) {
-            res.push_back(refOver(buffer.data() + start, blocks[i - 1]));
-            start += blocks[i - 1];
-            bsums.push_back(refOver(blockSums.data() + start, blocks[i]));
-        }
-
-        /* Step 1: first level scan (always run, even for single-block cases) */
-        // numBlocks is the number of blocks (blockSums size)
-        filtering::detail::inclusiveScanBlock<T, OP>
-            <<<blocks[0], blockSizes[0], shmemSizes[0], stream>>>(
-                arr, results, blockSums, init);
-
-        /* Multi-level recursion is necessary only when more than one block */
-        if (blocks.size() > 1) {
-
-            /* More scan launches for multi-block case */
-            idx_t offset = 0;
-            for (idx_t i = 0; i < res.size(); i++) {
-                /* Force inclusivity for the blocks */
-                filtering::detail::inclusiveScanBlock<T, OP>
-                    <<<blocks[i + 1], blockSizes[i + 1], shmemSizes[i + 1],
-                        stream>>>(
-                        refOver(blockSums.data() + offset, blocks[i])
-                            .as_const(),
-                        res[i], bsums[i], init);
-                offset += blocks[i];
-            }
-
-            /* apply the offsets in the opposite direction */
-            for (idx_t i = res.size(); i > 0; i--) {
-                filtering::detail::applyOffsets<T, OP>
-                    <<<blocks[i], blockSizes[i], 0, stream>>>(
-                        res[i - 1],
-                        ((i == res.size()) ? bsums[i - 1] : res[i]).as_const());
-            }
-        }
-
-        // Step 3: apply the final offsets
-        filtering::detail::applyOffsets<T, OP>
-            <<<blocks[0], blockSizes[0], 0, stream>>>(
-                results, buffer.as_const());
-
-        /* final optional step: do the right shift for exclusive case */
-        if constexpr (!Inclusive) {
-            filtering::detail::rightShift<T, OP>
-                <<<blocks[0], blockSizes[0], 0, stream>>>(
-                    blockSums, results.as_const(), init);
-            /* The exclusive shift's D2D move routes through
-             * `aether::copyAsync(View, View, Stream)` (aether/view/Copy.h)
-             * instead of a raw `cudaMemcpyAsync`: aether owns residency and
-             * the legal device-pair matrix, eagle owns only WHEN the move
-             * happens (here: inside this capture region, so it lands as a
-             * memcpy node in the captured graph). `blockSums` is a scratch
-             * span at least N long; the copy is over its FIRST N elements, so
-             * it is re-viewed at exactly N to match `results` — copyAsync
-             * refuses an extents/strides mismatch rather than moving the
-             * wrong bytes. */
-            aether::copyAsync(results,
-                refOver(blockSums.data(), N).as_const(), stream);
-        }
+        scan::scan_queue<T, scan::kSum>(
+            stream, arr.data(), results.data(), N, !Inclusive, state);
+        EAGLE_CHECK_ALWAYS(cudaGetLastError());
     }
 
-    /** @brief Capture the full scan algorithm (``enqueue``) into a graph */
-    template<typename T, typename OP, bool Inclusive,
-        unsigned int blockSize_ = filtering::detail::ScanCore::blockSize>
+    /** @brief Capture the scan (``enqueue``) into a graph */
+    template<typename T, typename OP, bool Inclusive>
     [[nodiscard]] static inline cudaGraph_t graph(
         const CRefArrT<T> arr, GRefArrT<T> results,
         GRefArrT<T> blockSums, const T& init = 0,
@@ -150,74 +73,12 @@ struct Scan {
     {
         cuda::StreamCapturer capturer(stream);
         capturer.begin();
-        enqueue<T, OP, Inclusive, blockSize_>(
-            arr, results, blockSums, init, stream);
+        enqueue<T, OP, Inclusive>(arr, results, blockSums, init, stream);
         return capturer.end();
-    }
-
-    /** @brief Instantiate and launch*/
-    template<typename T, typename OP, bool Inclusive,
-        unsigned int blockSize_ = filtering::detail::ScanCore::blockSize>
-    static inline void launch(const CRefArrT<T> arr, GRefArrT<T> results,
-        GRefArrT<T> blockSums, const T& init = 0,
-        const cudaStream_t& stream = 0)
-    {
-        cuda::Graph graph;
-        graph.addNode(cuda::CapturedGraph { Scan::graph<T, OP, blockSize_, Inclusive>(
-            arr, results, blockSums, init, stream) });
-        cuda::Launcher launcher = graph.launcher();
-        launcher.launch();
-        launcher.synchronize();
-    }
-
-    /** @brief Run a full inclusive scan algorithm */
-    template<typename T, typename OP,
-        unsigned int blockSize_ = filtering::detail::ScanCore::blockSize>
-    static cudaGraph_t inclusiveGraph(
-        const CRefArrT<T> arr, GRefArrT<T> results,
-        GRefArrT<T> blockSums, const T& init = 0,
-        const cudaStream_t& stream = 0)
-    {
-        return Scan::graph<T, OP, true, blockSize_>(
-            arr, results, blockSums, init, stream);
-    }
-
-    /** @brief Run a full exclusive scan algorithm */
-    template<typename T, typename OP,
-        unsigned int blockSize_ = filtering::detail::ScanCore::blockSize>
-    static cudaGraph_t exclusiveGraph(
-        const CRefArrT<T> arr, GRefArrT<T> results,
-        GRefArrT<T> blockSums, const T& init = 0,
-        const cudaStream_t& stream = 0)
-    {
-        return Scan::graph<T, OP, false, blockSize_>(
-            arr, results, blockSums, init, stream);
-    }
-
-    /** @brief Instantiate and launch an inclusive scan */
-    template<typename T, typename OP,
-        unsigned int blockSize_ = filtering::detail::ScanCore::blockSize>
-    static void inclusive(const CRefArrT<T> arr, GRefArrT<T> results,
-        GRefArrT<T> blockSums, const T& init = 0,
-        const cudaStream_t& stream = 0)
-    {
-        Scan::launch<T, OP, true, blockSize_>(
-            arr, results, blockSums, init, stream);
-    }
-
-    /** @brief Instantiate and launch an exclusive scan*/
-    template<typename T, typename OP,
-        unsigned int blockSize_ = filtering::detail::ScanCore::blockSize>
-    static void exclusive(const CRefArrT<T> arr, GRefArrT<T> results,
-        GRefArrT<T> blockSums, const T& init = 0,
-        const cudaStream_t& stream = 0)
-    {
-        Scan::launch<T, OP, false, blockSize_>(
-            arr, results, blockSums, init, stream);
     }
 };
 
-#endif
+#endif // EAGLE_CPU_ONLY
 
 } // namespace cuda
 } // namespace eagle

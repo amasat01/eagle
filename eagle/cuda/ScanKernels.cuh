@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // The device scan and compaction: one pass over the values with decoupled look-back, the kernels behind ``eg_scan`` and
-// ``eg_compact`` on a device context (included by device/Loop.cu only; nvcc). A tile of ``kBlock`` threads scans ``items`` values per thread and publishes its
-// total; tiles are taken in ticket order, so a tile only ever waits for tiles that run before it. The sums are laid out so
+// ``eg_compact`` on a device context, and the scan every device caller in eagle uses (nvcc only; included by cuda/Scan.h and by
+// the door's device/Loop.cu). A tile of ``kBlock`` threads scans ``items`` values per thread and publishes its total; tiles are taken in ticket order, so a tile only ever waits for tiles that run before it. The sums are laid out so
 // that their grouping depends on the extent alone, never on which tile finished first: a tile's prefix is the fold of every
 // earlier GROUP of ``kGroup`` tiles (published, in group order, by the last tile of the group before it) then the fold of the
 // totals of the tiles before it in its own group, taken in one fixed order (``fixed_fold``). A real sum is therefore the same
@@ -16,7 +16,7 @@
 #include <type_traits>
 
 namespace eagle {
-namespace door {
+namespace cuda {
 namespace scan {
 
 constexpr int kBlock = 128;   ///< threads of a tile (a multiple of the warp, at most 32 warps)
@@ -152,8 +152,10 @@ inline std::size_t state_bytes(std::int64_t n) { return state_bytes_of(static_ca
 /** @brief The working memory of a compaction over ``n`` lanes. */
 inline std::size_t compact_state_bytes(std::int64_t n) { return state_bytes_of(static_cast<std::size_t>(compact_tiles_of(n)), 8); }
 
-/** @brief The tile this block works on: tiles are drawn in the order blocks start, so a tile only waits for tiles drawn before it. */
-__device__ __forceinline__ long long take_tile(void* state, unsigned* shared_slot) {
+/** @brief The tile this block works on: tiles are drawn in the order blocks start, so a tile only waits for tiles drawn before it.
+ *  A scan of one tile has no other tile to wait for and touches no working memory at all. */
+__device__ __forceinline__ long long take_tile(void* state, long long tiles, unsigned* shared_slot) {
+    if (tiles == 1) return 0;
     if (threadIdx.x == 0) *shared_slot = atomicAdd(static_cast<unsigned*>(state), 1u);
     __syncthreads();
     return *shared_slot;
@@ -214,7 +216,7 @@ __device__ void tile_prefix(void* cells, long long tiles, long long t, T total, 
 /** @brief The end of a tile. A scan of one group of tiles clears its own working memory: the tile that finishes last knows every
  *  other tile has read what it needs (a tile's reads of the cells were consumed before its own count). */
 __device__ __forceinline__ void finish_tile(void* state, long long tiles, int cell_words, bool self_clean, bool* shared_last) {
-    if (!self_clean) return;
+    if (!self_clean || tiles == 1) return;
     unsigned* ticket = static_cast<unsigned*>(state);
     unsigned* finished = ticket + 1;
     __syncthreads();
@@ -242,7 +244,7 @@ __global__ void __launch_bounds__(kBlock) scan_tiles(const T* in, T* out, long l
     __shared__ unsigned tile_slot;
     __shared__ bool last_tile;
     const long long tiles = (n + tile_values<T>() - 1) / tile_values<T>();
-    const long long t = take_tile(state, &tile_slot);
+    const long long t = take_tile(state, tiles, &tile_slot);
     const long long base = t * tile_values<T>();
     const T identity = O::identity();
 
@@ -272,7 +274,11 @@ __global__ void __launch_bounds__(kBlock) scan_tiles(const T* in, T* out, long l
     for (int j = 0; j < kItems; ++j) { run = O::apply(run, v[j]); v[j] = run; }
     T total;
     const T before_thread = block_offsets<T, F>(run, warp_fold, total);
-    if (threadIdx.x < kWarp) tile_prefix<T, F>(static_cast<char*>(state) + 256, tiles, t, total, &shared_prefix);
+    if (tiles == 1) {
+        if (threadIdx.x == 0) shared_prefix = identity;
+    } else if (threadIdx.x < kWarp) {
+        tile_prefix<T, F>(static_cast<char*>(state) + 256, tiles, t, total, &shared_prefix);
+    }
     __syncthreads();
     const T start = O::apply(shared_prefix, before_thread);
 
@@ -308,14 +314,14 @@ __global__ void __launch_bounds__(kBlock) scan_tiles(const T* in, T* out, long l
 /** @brief One compaction: the index of every lane whose mask byte is non-zero goes to ``kept`` in lane order and their number to
  *  ``count``; the rest of ``kept`` is not written. The tile's kept lanes start at the number kept by the tiles before it, so no
  *  intermediate array is written. ``vector``: ``keep`` is 16-byte aligned. */
-__global__ void __launch_bounds__(kBlock) compact_tiles(const std::uint8_t* keep, std::uint32_t* kept, std::uint32_t* count, long long n, bool vector,
+inline __global__ void __launch_bounds__(kBlock) compact_tiles(const std::uint8_t* keep, std::uint32_t* kept, std::uint32_t* count, long long n, bool vector,
                                                         bool self_clean, void* state) {
     __shared__ std::uint32_t warp_fold[kBlock / kWarp];
     __shared__ std::uint32_t shared_prefix;
     __shared__ unsigned tile_slot;
     __shared__ bool last_tile;
     const long long tiles = (n + kCompactTile - 1) / kCompactTile;
-    const long long t = take_tile(state, &tile_slot);
+    const long long t = take_tile(state, tiles, &tile_slot);
     const long long mine = t * kCompactTile + static_cast<long long>(threadIdx.x) * kCompactItems;
     std::uint8_t mask[kCompactItems];
     if (vector && mine + kCompactItems <= n) {
@@ -328,7 +334,11 @@ __global__ void __launch_bounds__(kBlock) compact_tiles(const std::uint8_t* keep
     for (int j = 0; j < kCompactItems; ++j) mine_kept += mask[j] != 0;
     std::uint32_t total;
     const std::uint32_t before_thread = block_offsets<std::uint32_t, kSum>(mine_kept, warp_fold, total);
-    if (threadIdx.x < kWarp) tile_prefix<std::uint32_t, kSum>(static_cast<char*>(state) + 256, tiles, t, total, &shared_prefix);
+    if (tiles == 1) {
+        if (threadIdx.x == 0) shared_prefix = 0;
+    } else if (threadIdx.x < kWarp) {
+        tile_prefix<std::uint32_t, kSum>(static_cast<char*>(state) + 256, tiles, t, total, &shared_prefix);
+    }
     __syncthreads();
     std::uint32_t at = shared_prefix + before_thread;
     for (int j = 0; j < kCompactItems; ++j)
@@ -357,5 +367,5 @@ inline void compact_queue(cudaStream_t stream, const std::uint8_t* keep, std::ui
 }
 
 }  // namespace scan
-}  // namespace door
+}  // namespace cuda
 }  // namespace eagle
