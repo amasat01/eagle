@@ -6,7 +6,10 @@
 #include <cstdint>
 #include <type_traits>
 
+// The kernels are device code: a build without a device never sees them.
+#ifndef EAGLE_CPU_ONLY
 #include "eagle/cuda/ScanKernels.cuh"
+#endif
 #include "eagle/cuda/StreamCapturer.h"
 #include "eagle/typedefs.h"
 #include "eagle/cuda.h"

@@ -116,6 +116,10 @@ void device_event_op(eg_ctx&, unsigned, unsigned, const void*) {}
 void device_reduce(eg_ctx&, const eg_reduce_desc&) {}
 void device_scan(eg_ctx&, const eg_scan_desc&) { device_group_check("eg_scan"); }
 void device_compact(eg_ctx&, const eg_compact_desc&) { device_group_check("eg_compact"); }
+void device_order_by_key(eg_ctx&, const eg_order_desc&)
+{
+    device_group_check("eg_order_by_key");
+}
 void device_reduce_leaf(eg_ctx&, const host::ReduceOp&) {}
 void device_copy(eg_ctx&, eg_plane_s*, eg_plane_s*) {}
 void device_fft_new(eg_ctx&, eg_fft_s&) {}
@@ -1402,6 +1406,13 @@ void device_compact(eg_ctx& ctx, const eg_compact_desc& d) {
     } else {
         compact_step(stream, at(c.keep), at(c.kept), at(c.count), c.n, scan_state_for(ctx, stream, bytes));
     }
+}
+
+/** @brief eg_order_by_key over device planes: not written on a device. */
+void device_order_by_key(eg_ctx&, const eg_order_desc&)
+{
+    refuse(EG_NOT_WRITTEN,
+        "eg_order_by_key: the sort by key is not written for a device context");
 }
 
 /** @brief The checked reduce @p r on the context's stream, kept in the recording if there is one. */

@@ -158,6 +158,18 @@ EG_EXPORT eg_status eg_compact(eg_ctx* ctx, const struct eg_compact_desc* desc) 
         else door::compact(c, desc);
     });
 }
+EG_EXPORT eg_status eg_order_by_key(
+    eg_ctx* ctx, const struct eg_order_desc* desc)
+{
+    return door::call(ctx, [&](eg_ctx& c) {
+        const eg_order_desc d = door::read_input(desc, "eg_order_desc");
+        if (door::device_planes(
+                c, "eg_order_by_key", { d.keys, d.order, d.starts }))
+            door::device_order_by_key(c, d);
+        else
+            door::order_by_key(c, desc);
+    });
+}
 EG_EXPORT eg_status eg_copy(eg_ctx* ctx, eg_plane* src, eg_plane* dst) {
     return door::call(ctx, [&](eg_ctx& c) {
         if (door::planes_cross_sides(c, src, dst)) {

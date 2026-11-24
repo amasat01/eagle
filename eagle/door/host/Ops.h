@@ -64,6 +64,22 @@ struct CompactOp {
 CompactOp compact_check(const eg_ctx& ctx, const eg_compact_desc& desc);
 void compact_exec(const CompactOp& c, int threads);
 
+/** @brief A checked sort by key: the three planes, the key bound and the
+ * extent. */
+struct OrderOp {
+    eg_plane_s* keys   = nullptr;
+    eg_plane_s* order  = nullptr;
+    eg_plane_s* starts = nullptr;
+    std::int64_t bound = 0;
+    std::int64_t n     = 0;
+};
+
+OrderOp order_check(const eg_ctx& ctx, const eg_order_desc& desc);
+/** @brief Run the checked sort @p o on at most @p threads threads: the stable
+ * permutation is one value, so every thread count gives the same bits. Refuses
+ * (EG_BAD_REQUEST) with the number of keys outside [0, bound). */
+void order_exec(const OrderOp& o, int threads);
+
 /** @brief The one compaction of the host runtime: the indices of the lanes of @p mask that are kept (a set byte keeps, or with
  *  @p drop drops) into @p kept[0, count), ascending, and their number into @p count; the entries from @p count on are left as
  *  they were. The same result at any @p threads. @p scratch is the working memory: grown when @p n needs more, kept by a caller that compacts again. */

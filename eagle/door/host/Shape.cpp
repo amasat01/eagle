@@ -77,7 +77,12 @@ int GraphShape::add(eg_gnode_kind kind, std::string label, std::string unit, std
     Node& n = nodes_[static_cast<std::size_t>(ordinal)];
     n.facts = facts;
     if (kind == EG_GNODE_LAUNCH) n.launch = launches_++;
-    else if (kind == EG_GNODE_RUN || kind == EG_GNODE_COPY || kind == EG_GNODE_REDUCE || kind == EG_GNODE_SCAN || kind == EG_GNODE_COMPACT || kind == EG_GNODE_FFT || kind == EG_GNODE_GEMM || kind == EG_GNODE_HOST) n.other = others_++;
+    else if (kind == EG_GNODE_RUN || kind == EG_GNODE_COPY
+        || kind == EG_GNODE_REDUCE || kind == EG_GNODE_SCAN
+        || kind == EG_GNODE_COMPACT || kind == EG_GNODE_ORDER
+        || kind == EG_GNODE_FFT || kind == EG_GNODE_GEMM
+        || kind == EG_GNODE_HOST)
+        n.other = others_++;
     return ordinal;
 }
 

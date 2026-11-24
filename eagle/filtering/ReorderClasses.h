@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "eagle/filtering/KeyedSort.h"
 #include "eagle/filtering/Reorder.h"
 
 #include <algorithm>
@@ -350,7 +351,8 @@ inline void classTriggerHost(const std::uint8_t* mask, std::uint32_t flags, std:
         mixed, live32, *span, t.classTheta, t.stale != nullptr ? *t.stale : 0u, *count, liveFire);
 }
 
-/** @brief The host face of ``reorderClassesDevice`` (serial stable counting sort). */
+/** @brief The host face of ``reorderClassesDevice`` (the stable sort of
+ * ``orderByKeyHost``). */
 inline void reorderClassesHost(const ReorderPlane* planes, std::uint32_t nPlanes, const std::uint8_t* mask,
     std::uint32_t flags, std::uint32_t classes, const std::uint8_t* classPlane, std::int32_t* perm, std::int32_t* inv,
     std::int32_t* indexMap, std::uint32_t* count, std::uint32_t* span, std::uint32_t* fire, std::uint32_t* offsets,
@@ -364,18 +366,19 @@ inline void reorderClassesHost(const ReorderPlane* planes, std::uint32_t nPlanes
     const bool drop   = (flags & kCompactMaskIsDrop) != 0;
     std::int64_t lim  = std::int64_t(within ? *count : *span);
     lim               = std::min<std::int64_t>(lim, n);
+    // The one stable sort of the runtime: the keys are the classes, with the
+    // dead as one more key.
     std::vector<std::uint32_t> off(classes + 2u, 0u);
-    std::vector<std::int32_t> dst(std::size_t(lim > 0 ? lim : 0));
-    std::vector<std::uint32_t> key(std::size_t(lim > 0 ? lim : 0));
-    for (std::int64_t i = 0; i < lim; ++i) {
-        key[i] = detail::classKey(mask[i], classPlane[i], drop, within, classes);
-        ++off[key[i] + 1u];
-    }
-    for (std::uint32_t c = 0; c <= classes; ++c)
-        off[c + 1u] += off[c];
-    std::vector<std::uint32_t> next(off.begin(), off.end());
+    std::vector<std::int32_t> order(std::size_t(lim > 0 ? lim : 0));
+    std::vector<std::int32_t> dst(order.size());
+    std::vector<std::uint8_t> key(order.size());
     for (std::int64_t i = 0; i < lim; ++i)
-        dst[i] = std::int32_t(next[key[i]]++);
+        key[i] = std::uint8_t(
+            detail::classKey(mask[i], classPlane[i], drop, within, classes));
+    orderByKeyHost(
+        key.data(), lim, std::int64_t(classes) + 1, order.data(), off.data());
+    for (std::int64_t j = 0; j < lim; ++j)
+        dst[order[j]] = std::int32_t(j);
     const auto move = [&]<typename T>(void* data) {
         T* p = static_cast<T*>(data);
         std::vector<T> tmp(p, p + lim);

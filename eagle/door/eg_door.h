@@ -590,6 +590,18 @@ struct eg_compact_desc {
     eg_plane* count;
 };
 
+/** INPUT to ``eg_order_by_key``: ``keys`` is an integer plane of n lanes (8 to
+ * 64 bits), ``order`` n 32-bit indices (int32 or uint32), ``starts`` ``bound +
+ * 1`` 32-bit indices of the same type as ``order``. */
+struct eg_order_desc {
+    uint32_t struct_size;
+    uint32_t flags; /**< none defined: 0 */
+    eg_plane* keys;
+    eg_plane* order;
+    eg_plane* starts;
+    int64_t bound; /**< K: every key lies in [0, K) */
+};
+
 /** ``eg_cond_desc.flags``: IF, IF_ELSE and WHILE test the cell for zero instead of non-zero. SWITCH refuses it. */
 #define EG_COND_NEGATE (1u << 0)
 
@@ -1133,6 +1145,30 @@ eg_status eg_scan(eg_ctx* ctx, const struct eg_scan_desc* desc);
 eg_status eg_compact(eg_ctx* ctx, const struct eg_compact_desc* desc);
 
 /**
+ * Stable sort of the lanes by integer key. Recordable (node kind
+ * EG_GNODE_ORDER, reading ``keys`` and writing ``order`` and
+ * ``starts``). Every key lies in [0, ``bound``). ``order[j]`` is the lane that
+ * lands at sorted place j; lanes of equal key keep their lane order, so the
+ * permutation is the same on every run and at any thread count. ``starts[k]``
+ * is the first sorted place of key k and ``starts[bound]`` is the lane count.
+ * The host sorts 8 bits of the key per pass, only as many passes as
+ * ``bound`` needs. A key outside [0, ``bound``) fails the call (eagerly) or the
+ * replay (recorded) with the number of such keys;
+ * ``order`` and ``starts`` are then unspecified. ``keys`` is a 1-D integer
+ * plane of 8, 16, 32 or 64 bits, ``order`` an int32 or uint32 plane of its
+ * extent, ``starts`` an int32 or uint32 plane of ``bound + 1`` elements; the
+ * three are distinct. An extent of 0 writes ``starts`` all zero; above 2^31 - 1
+ * elements, or a ``bound`` above 2^31 - 1, it is refused. Status: OK;
+ * BAD_REQUEST (a NULL or foreign plane, unknown flag bits, a ``bound`` below 1
+ * or above 2^31 - 1, a plane with more than one run-time axis, a ``keys`` that
+ * is not an integer plane, an ``order`` or ``starts`` that is not a 32-bit
+ * integer plane of the stated extent, planes that overlap, an extent above 2^31
+ * - 1, a plane that is not contiguous, a read-only output, a key outside [0,
+ * ``bound``)); NOT_WRITTEN (a real ``keys`` plane, a device context).
+ */
+eg_status eg_order_by_key(eg_ctx* ctx, const struct eg_order_desc* desc);
+
+/**
  * Copy ``src`` into ``dst`` (same shape and dtype). Two planes on one side
  * copy on that side; one host plane and one device plane of the context's
  * device copy across, either way, on the context's stream, and the call
@@ -1569,6 +1605,9 @@ typedef int32_t eg_gnode_kind;
 
 #define EG_GNODE_SCAN 13   /**< ``eg_scan``: reads ``in``, writes ``out`` */
 #define EG_GNODE_COMPACT 14 /**< ``eg_compact``: reads ``keep``, writes ``kept`` and ``count`` */
+#define EG_GNODE_ORDER                                                         \
+    15 /**< ``eg_order_by_key``: reads ``keys``, writes ``order`` and          \
+          ``starts`` */
 
 /** What an edge of a graph description is. */
 typedef int32_t eg_gedge_kind;

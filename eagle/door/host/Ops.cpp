@@ -10,8 +10,9 @@
 #include "eagle/door/host/Ops.h"
 
 #include "eagle/cpu/Scan.h"
-#include "eagle/filtering/Compact.h"
 #include "eagle/exec/HostTeam.h"
+#include "eagle/filtering/Compact.h"
+#include "eagle/filtering/KeyedSort.h"
 #include "eagle/reduce/canonical.h"
 
 
@@ -594,6 +595,130 @@ CompactOp compact_check(const eg_ctx& ctx, const eg_compact_desc& desc) {
 void compact_exec(const CompactOp& c, int threads) {
     std::vector<std::uint64_t> scratch;
     compact_lanes(data_of<std::uint8_t>(*c.keep), false, mut_data_of<std::int32_t>(*c.kept), mut_data_of<std::uint32_t>(*c.count), c.n, threads, scratch);
+}
+
+namespace {
+
+/** @brief Whether @p t holds one 32-bit integer per element (int32 or uint32),
+ * what an index plane is. */
+bool is_index_plane(const DLTensor& t)
+{
+    return t.dtype.lanes == 1 && t.dtype.bits == 32
+        && (t.dtype.code == kDLInt || t.dtype.code == kDLUInt);
+}
+
+template<class Key>
+std::int64_t order_keys(const OrderOp& o, int threads)
+{
+    return filtering::orderByKeyHost(data_of<Key>(*o.keys), o.n, o.bound,
+        mut_data_of<std::int32_t>(*o.order),
+        mut_data_of<std::uint32_t>(*o.starts), threads);
+}
+
+} // namespace
+
+/** @brief Check a sort request; refuses as eg_order_by_key states. */
+OrderOp order_check(const eg_ctx& ctx, const eg_order_desc& desc)
+{
+    if (desc.flags != 0)
+        refuse(EG_BAD_REQUEST,
+            "eg_order_desc.flags: unknown bits " + std::to_string(desc.flags));
+    check_handle(ctx.planes, desc.keys, "eg_order_desc.keys");
+    check_handle(ctx.planes, desc.order, "eg_order_desc.order");
+    check_handle(ctx.planes, desc.starts, "eg_order_desc.starts");
+    const DLTensor& keys   = desc.keys->tensor->dl_tensor;
+    const DLTensor& order  = desc.order->tensor->dl_tensor;
+    const DLTensor& starts = desc.starts->tensor->dl_tensor;
+    if (desc.bound < 1)
+        refuse(EG_BAD_REQUEST,
+            "eg_order_by_key: bound is " + std::to_string(desc.bound)
+                + ", it must be 1 or more");
+    if (desc.bound > std::numeric_limits<std::int32_t>::max())
+        refuse(EG_BAD_REQUEST,
+            "eg_order_by_key: bound " + std::to_string(desc.bound)
+                + " is above the 2^31 - 1 a place index holds");
+    const auto axes = [](const DLTensor& t, const char* name) {
+        if (t.ndim != 1)
+            refuse(EG_BAD_REQUEST,
+                std::string("eg_order_by_key: ") + name + " has "
+                    + std::to_string(t.ndim)
+                    + " run-time axes, a sort runs along exactly one; sort a "
+                      "group over that axis to sort along one of several");
+    };
+    axes(keys, "keys");
+    axes(order, "order");
+    axes(starts, "starts");
+    if (keys.dtype.lanes == 1 && keys.dtype.code == kDLFloat)
+        refuse(EG_NOT_WRITTEN,
+            "eg_order_by_key: real keys are not written; keys must be an "
+            "integer plane of 8 to 64 bits");
+    const bool integer = keys.dtype.lanes == 1
+        && (keys.dtype.code == kDLInt || keys.dtype.code == kDLUInt);
+    if (!integer || keys.dtype.bits < 8 || keys.dtype.bits > 64)
+        refuse(EG_BAD_REQUEST,
+            "eg_order_by_key: keys must be an integer plane of 8 to 64 bits");
+    if (!is_index_plane(order))
+        refuse(EG_BAD_REQUEST,
+            "eg_order_by_key: order must be an int32 or uint32 plane");
+    if (order.shape[0] != keys.shape[0])
+        refuse(
+            EG_BAD_REQUEST, "eg_order_by_key: order extent differs from keys");
+    if (!is_index_plane(starts))
+        refuse(EG_BAD_REQUEST,
+            "eg_order_by_key: starts must be an int32 or uint32 plane");
+    if (starts.shape[0] != desc.bound + 1)
+        refuse(EG_BAD_REQUEST,
+            "eg_order_by_key: starts has " + std::to_string(starts.shape[0])
+                + " elements, bound + 1 is " + std::to_string(desc.bound + 1));
+    if (keys.shape[0] > std::numeric_limits<std::int32_t>::max())
+        refuse(EG_BAD_REQUEST,
+            "eg_order_by_key: " + std::to_string(keys.shape[0])
+                + " elements is above the 2^31 - 1 a sort indexes");
+    check_access(*desc.keys, false, "eg_order_by_key keys");
+    check_access(*desc.order, true, "eg_order_by_key order");
+    check_access(*desc.starts, true, "eg_order_by_key starts");
+    if (overlaps(keys, order) || overlaps(keys, starts)
+        || overlaps(order, starts))
+        refuse(EG_BAD_REQUEST,
+            "eg_order_by_key: keys, order and starts must be three distinct "
+            "planes");
+    OrderOp o;
+    o.keys   = desc.keys;
+    o.order  = desc.order;
+    o.starts = desc.starts;
+    o.bound  = desc.bound;
+    o.n      = keys.shape[0];
+    return o;
+}
+
+/** @brief Run a checked sort: ``filtering::orderByKeyHost`` over the key type
+ * of the plane. */
+void order_exec(const OrderOp& o, int threads)
+{
+    const DLDataType& type = o.keys->tensor->dl_tensor.dtype;
+    const bool is_signed   = type.code == kDLInt;
+    std::int64_t outside   = 0;
+    switch (type.bits) {
+    case 8:
+        outside = is_signed ? order_keys<std::int8_t>(o, threads)
+                            : order_keys<std::uint8_t>(o, threads);
+        break;
+    case 16:
+        outside = is_signed ? order_keys<std::int16_t>(o, threads)
+                            : order_keys<std::uint16_t>(o, threads);
+        break;
+    case 32:
+        outside = is_signed ? order_keys<std::int32_t>(o, threads)
+                            : order_keys<std::uint32_t>(o, threads);
+        break;
+    default:
+        outside = is_signed ? order_keys<std::int64_t>(o, threads)
+                            : order_keys<std::uint64_t>(o, threads);
+    }
+    if (outside != 0)
+        refuse(EG_BAD_REQUEST,
+            "sort: " + std::to_string(outside) + " keys are outside [0, "
+                + std::to_string(o.bound) + ")");
 }
 
 /** @brief Check a copy request; refuses as eg_copy states. */

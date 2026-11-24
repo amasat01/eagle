@@ -5186,6 +5186,11 @@ static long long scan_load(const void* buf, int i, uint8_t code, uint8_t bits) {
     return code == kDLUInt ? (long long)((const uint64_t*)buf)[i] : ((const int64_t*)buf)[i];
 }
 
+/* The value of a real plane at @p i, as stored (an infinity stays one: converting it to an integer is undefined in C). */
+static double scan_load_real(const void* buf, int i, uint8_t bits) {
+    return bits == 32 ? (double)((const float*)buf)[i] : ((const double*)buf)[i];
+}
+
 /* Whether @p got is a valid exclusive identity beside the input @p x: at least x for a minimum, at most x for a maximum, compared in the plane's own signedness. */
 static int scan_identity_ok(long long got, long long x, uint8_t code, int minimum) {
     if (code == kDLUInt) return minimum ? (unsigned long long)got >= (unsigned long long)x : (unsigned long long)got <= (unsigned long long)x;
@@ -5193,8 +5198,9 @@ static int scan_identity_ok(long long got, long long x, uint8_t code, int minimu
 }
 
 /* Inclusive and exclusive scans of every op over the sizes that straddle the 1024-element block, one type. The exclusive
- * identity of min and max is not a whole number a 64-bit integer holds for every type, so its first element is checked as
- * "at least every input" (min: the largest value, max: the smallest) and the rest by the loop. */
+ * identity of min and max is not a whole number a 64-bit integer holds for every type, so on an integer plane its first
+ * element is checked as "at least every input" (min: the largest value, max: the smallest); on a real plane it is the
+ * infinity of that sign exactly. The rest is checked by the loop. */
 static int scan_type_ok(eg_ctx* ctx, uint8_t code, uint8_t bits) {
     static const int sizes[] = { 0, 1, 2, 1023, 1024, 1025, 2048, 4097, SCAN_MAX_N };
     static unsigned char in[SCAN_MAX_N * 8], out[SCAN_MAX_N * 8];
@@ -5216,7 +5222,8 @@ static int scan_type_ok(eg_ctx* ctx, uint8_t code, uint8_t bits) {
                     const long long x = scan_load(in, i, code, bits);
                     const long long prior = fold;
                     fold = i == 0 && op != EG_SCAN_SUM ? x : op == EG_SCAN_SUM ? scan_wrap(fold + x, code, bits) : op == EG_SCAN_MIN ? (x < fold ? x : fold) : (x > fold ? x : fold);
-                    if (ex && i == 0) ok = op == EG_SCAN_SUM ? scan_load(out, 0, code, bits) == 0 : scan_identity_ok(scan_load(out, 0, code, bits), x, code, op == EG_SCAN_MIN);
+                    if (ex && i == 0 && op != EG_SCAN_SUM && code == kDLFloat) ok = scan_load_real(out, 0, bits) == (op == EG_SCAN_MIN ? INFINITY : -INFINITY);
+                    else if (ex && i == 0) ok = op == EG_SCAN_SUM ? scan_load(out, 0, code, bits) == 0 : scan_identity_ok(scan_load(out, 0, code, bits), x, code, op == EG_SCAN_MIN);
                     else ok = scan_load(out, i, code, bits) == (ex ? prior : fold);
                 }
             }
@@ -5468,6 +5475,295 @@ static void check_compact(eg_ctx* ctx) {
     eg_plane_free(ctx, p1);
     eg_plane_free(ctx, p2);
     eg_plane_free(ctx, pc);
+}
+
+/* ---- eg_order_by_key
+ * ---------------------------------------------------------- */
+
+static eg_status order_do(eg_ctx* ctx, eg_plane* keys, eg_plane* order,
+    eg_plane* starts, int64_t bound, uint32_t flags)
+{
+    struct eg_order_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.flags       = flags;
+    d.keys        = keys;
+    d.order       = order;
+    d.starts      = starts;
+    d.bound       = bound;
+    return eg_order_by_key(ctx, &d);
+}
+
+enum { ORDER_MAX_N = 100000, ORDER_MAX_K = 1 << 20 };
+
+static int32_t order_want[ORDER_MAX_N], order_got[ORDER_MAX_N];
+static uint32_t order_starts_want[ORDER_MAX_K + 1],
+    order_starts_got[ORDER_MAX_K + 1];
+
+/* The oracle: a sequential stable counting sort over the plain key values
+ * (counts, their exclusive scan, lanes placed in lane order). It shares no code
+ * with the runtime's radix passes. */
+static void order_oracle(const int64_t* key, int n, int64_t bound)
+{
+    memset(order_starts_want, 0, (size_t)(bound + 1) * sizeof(uint32_t));
+    for (int i = 0; i < n; ++i)
+        ++order_starts_want[key[i] + 1];
+    for (int64_t k = 0; k < bound; ++k)
+        order_starts_want[k + 1] += order_starts_want[k];
+    static uint32_t next[ORDER_MAX_K + 1];
+    memcpy(next, order_starts_want, (size_t)(bound + 1) * sizeof(uint32_t));
+    for (int i = 0; i < n; ++i)
+        order_want[next[key[i]]++] = i;
+}
+
+/* Keys of one type stored from the 64-bit values; the plane over them. */
+static void order_store(void* buf, int i, int64_t v, uint8_t bits)
+{
+    if (bits == 8)
+        ((uint8_t*)buf)[i] = (uint8_t)v;
+    else if (bits == 16)
+        ((uint16_t*)buf)[i] = (uint16_t)v;
+    else if (bits == 32)
+        ((uint32_t*)buf)[i] = (uint32_t)v;
+    else
+        ((int64_t*)buf)[i] = v;
+}
+
+/* One sort of n keys in [0, bound) held in `key`, stored as (code, bits): the
+ * permutation and the starts equal the oracle's, at 1, 4 and the default number
+ * of threads. */
+static int order_case_ok(eg_ctx* ctx, const int64_t* key, int n, int64_t bound,
+    uint8_t code, uint8_t bits)
+{
+    static int64_t store[ORDER_MAX_N];
+    struct tensor tk, to, ts;
+    for (int i = 0; i < n; ++i)
+        order_store(store, i, key[i], bits);
+    eg_plane* pk = wrap(ctx, &tk, store, n, code, bits);
+    eg_plane* po = wrap(ctx, &to, order_got, n, kDLInt, 32);
+    eg_plane* ps = wrap(ctx, &ts, order_starts_got, bound + 1, kDLUInt, 32);
+    order_oracle(key, n, bound);
+    int ok                     = pk && po && ps;
+    static const int threads[] = { 1, 4, 0 };
+    for (size_t t = 0; ok && t < sizeof(threads) / sizeof(threads[0]); ++t) {
+        eg_host_threads(ctx, threads[t]);
+        memset(order_got, 0x55, (size_t)n * sizeof(int32_t));
+        memset(order_starts_got, 0x55, (size_t)(bound + 1) * sizeof(uint32_t));
+        ok = order_do(ctx, pk, po, ps, bound, 0) == EG_OK
+            && memcmp(order_got, order_want, (size_t)n * sizeof(int32_t)) == 0
+            && memcmp(order_starts_got, order_starts_want,
+                   (size_t)(bound + 1) * sizeof(uint32_t))
+                == 0;
+    }
+    eg_host_threads(ctx, 0);
+    eg_plane_free(ctx, pk);
+    eg_plane_free(ctx, po);
+    eg_plane_free(ctx, ps);
+    return ok;
+}
+
+/* n keys in [0, bound): uniform, or (skew) half of the lanes in key 0. */
+static void order_keys(
+    int64_t* key, int n, int64_t bound, int skew, uint64_t seed)
+{
+    uint64_t state = seed * 6364136223846793005ull + 1442695040888963407ull;
+    for (int i = 0; i < n; ++i) {
+        state = state * 6364136223846793005ull + 1442695040888963407ull;
+        const uint64_t hi = state >> 20;
+        key[i] = skew && (state & 1) ? 0 : (int64_t)(hi % (uint64_t)bound);
+    }
+}
+
+static void check_order(eg_ctx* ctx)
+{
+    static int64_t key[ORDER_MAX_N];
+    int ok = 1;
+    /* the prototype's eight cases at a size a test can afford: keys 16, 4096,
+     * 2^20 and one per lane; uniform and half in key 0 */
+    static const int64_t bounds[] = { 16, 4096, ORDER_MAX_K, ORDER_MAX_N };
+    for (size_t b = 0; ok && b < sizeof(bounds) / sizeof(bounds[0]); ++b) {
+        for (int skew = 0; ok && skew < 2; ++skew) {
+            order_keys(
+                key, ORDER_MAX_N, bounds[b], skew, (uint64_t)(b * 2 + skew));
+            ok = order_case_ok(ctx, key, ORDER_MAX_N, bounds[b], kDLInt, 32);
+        }
+    }
+    check(ok,
+        "eg_order_by_key: the eight cases (16, 4096, 2^20 and n keys; uniform "
+        "and half in key 0) over 100000 lanes equal a sequential stable sort, "
+        "order and starts, with 1, 4 and the default number of threads");
+
+    ok                       = 1;
+    static const int sizes[] = { 0, 1, 255, 256, 257, ORDER_MAX_N };
+    for (size_t si = 0; ok && si < sizeof(sizes) / sizeof(sizes[0]); ++si) {
+        for (int skew = 0; ok && skew < 2; ++skew) {
+            order_keys(key, sizes[si], 300, skew, 99 + si);
+            ok = order_case_ok(ctx, key, sizes[si], 300, kDLInt, 32)
+                && order_case_ok(ctx, key, sizes[si], 70000, kDLInt, 32);
+        }
+    }
+    check(ok,
+        "eg_order_by_key: sizes 0, 1, 255, 256, 257 and 100000 (two passes and "
+        "three) equal a sequential stable sort; an empty plane gives starts of "
+        "zeros");
+
+    /* every integer type a plane can carry (int8, int32, uint32, int64), a
+     * bound inside the type and one beyond it (a narrow type sorts only the
+     * passes it holds) */
+    static const struct {
+        uint8_t code, bits;
+        int64_t bound, reach;
+    } types[] = { { kDLInt, 8, 100, 100 }, { kDLInt, 8, 1000, 128 },
+        { kDLInt, 32, 300, 300 }, { kDLInt, 32, 70000, 70000 },
+        { kDLUInt, 32, 70000, 70000 },
+        { kDLUInt, 32, ORDER_MAX_K, ORDER_MAX_K }, { kDLInt, 64, 5000, 5000 },
+        { kDLInt, 64, 70000, 70000 } };
+    ok        = 1;
+    for (size_t t = 0; ok && t < sizeof(types) / sizeof(types[0]); ++t) {
+        order_keys(key, ORDER_MAX_N, types[t].reach, 0, 7 + t);
+        ok = order_case_ok(ctx, key, ORDER_MAX_N, types[t].bound, types[t].code,
+            types[t].bits);
+    }
+    check(ok,
+        "eg_order_by_key: int8, int32, uint32 and int64 keys, bounds inside "
+        "and beyond the type, equal a sequential stable sort");
+
+    /* a bound of one: every lane in key 0, the identity order and starts {0, n}
+     */
+    for (int i = 0; i < 1000; ++i)
+        key[i] = 0;
+    ok = order_case_ok(ctx, key, 1000, 1, kDLInt, 8);
+    check(ok,
+        "eg_order_by_key with a bound of 1: the identity order and starts {0, "
+        "n}");
+
+    /* the refusals by name */
+    static int32_t kbuf[16], obuf[16], sbuf[40];
+    static double fbuf[16];
+    for (int i = 0; i < 16; ++i)
+        kbuf[i] = i % 4;
+    struct tensor tk, to, ts, tf, tb, t2d, tsh, tov, ts32;
+    eg_plane* pk     = wrap(ctx, &tk, kbuf, 16, kDLInt, 32);
+    eg_plane* po     = wrap(ctx, &to, obuf, 16, kDLInt, 32);
+    eg_plane* ps     = wrap(ctx, &ts, sbuf, 5, kDLInt, 32);
+    eg_plane* pf     = wrap(ctx, &tf, fbuf, 16, kDLFloat, 64);
+    eg_plane* pb     = wrap(ctx, &tb, kbuf, 16, kDLBool, 8);
+    eg_plane* pshort = wrap(ctx, &tsh, obuf, 7, kDLInt, 32);
+    eg_plane* pover  = wrap(ctx, &tov, kbuf + 4, 5, kDLInt, 32);
+    eg_plane* pwide  = wrap(ctx, &ts32, fbuf, 5, kDLFloat, 32);
+    tensor_init(&t2d, kbuf, 1, 32);
+    tensor_as(&t2d, kDLInt, 32);
+    tensor_2d(&t2d, 4, 4);
+    eg_plane* p2d = NULL;
+    eg_plane_wrap(ctx, &t2d.managed, &p2d);
+    check(pk && po && ps && order_do(ctx, pf, po, ps, 4, 0) == EG_NOT_WRITTEN
+            && reason_has(ctx, "real keys"),
+        "eg_order_by_key with float keys: NOT_WRITTEN by name");
+    check(order_do(ctx, pb, po, ps, 4, 0) == EG_BAD_REQUEST
+            && reason_has(ctx, "integer plane of 8 to 64 bits"),
+        "eg_order_by_key with bool keys: BAD_REQUEST naming the integer types");
+    check(order_do(ctx, pk, po, ps, 0, 0) == EG_BAD_REQUEST
+            && reason_has(ctx, "bound is 0")
+            && order_do(ctx, pk, po, ps, -3, 0) == EG_BAD_REQUEST,
+        "eg_order_by_key with a bound below 1: BAD_REQUEST by name");
+    check(order_do(ctx, pk, po, ps, 2147483648ll, 0) == EG_BAD_REQUEST
+            && reason_has(ctx, "2^31 - 1"),
+        "eg_order_by_key with a bound above 2^31 - 1: BAD_REQUEST by name");
+    check(order_do(ctx, pk, po, ps, 5, 0) == EG_BAD_REQUEST
+            && reason_has(ctx, "starts has 5 elements, bound + 1 is 6"),
+        "eg_order_by_key with starts of the wrong extent: BAD_REQUEST by name");
+    check(order_do(ctx, pk, pshort, ps, 4, 0) == EG_BAD_REQUEST
+            && reason_has(ctx, "order extent differs"),
+        "eg_order_by_key with an order of another extent: BAD_REQUEST");
+    check(order_do(ctx, pk, pf, ps, 4, 0) == EG_BAD_REQUEST
+            && reason_has(ctx, "order must be an int32 or uint32 plane")
+            && order_do(ctx, pk, po, pwide, 4, 0) == EG_BAD_REQUEST
+            && reason_has(ctx, "starts must be an int32 or uint32 plane"),
+        "eg_order_by_key with an order or starts that is not a 32-bit integer "
+        "plane: BAD_REQUEST");
+    check(p2d && order_do(ctx, p2d, po, ps, 4, 0) == EG_BAD_REQUEST
+            && reason_has(ctx, "run-time axes"),
+        "eg_order_by_key with keys of two axes: BAD_REQUEST naming the axes");
+    check(pover && order_do(ctx, pk, po, pover, 4, 0) == EG_BAD_REQUEST
+            && reason_has(ctx, "distinct"),
+        "eg_order_by_key with starts inside keys: BAD_REQUEST (distinct "
+        "planes)");
+    check(order_do(ctx, pk, po, ps, 4, 2) == EG_BAD_REQUEST
+            && order_do(ctx, NULL, po, ps, 4, 0) == EG_BAD_REQUEST
+            && eg_order_by_key(ctx, NULL) == EG_BAD_REQUEST,
+        "eg_order_by_key with unknown flag bits, a NULL plane or a NULL "
+        "descriptor: BAD_REQUEST");
+
+    /* a key outside [0, K) is found in the first pass and counted: here the
+     * bound is 3 and four lanes hold key 3 */
+    eg_plane_free(ctx, ps);
+    ps = wrap(ctx, &ts, sbuf, 4, kDLInt, 32);
+    check(ps && order_do(ctx, pk, po, ps, 3, 0) == EG_BAD_REQUEST
+            && reason_has(ctx, "sort: 4 keys are outside [0, 3)"),
+        "eg_order_by_key with keys outside [0, K): BAD_REQUEST with the count "
+        "in the text");
+    kbuf[0] = -1;
+    check(order_do(ctx, pk, po, ps, 3, 0) == EG_BAD_REQUEST
+            && reason_has(ctx, "sort: 5 keys are outside [0, 3)"),
+        "eg_order_by_key with a negative key: counted among the keys outside "
+        "[0, K)");
+    for (int i = 0; i < 16; ++i)
+        kbuf[i] = i % 3;
+
+    /* recorded, described and replayed over changed keys; a replay that meets a
+     * key outside [0, K) fails with the count */
+    eg_graph* g = NULL;
+    struct eg_graph_description d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    ok            = ps && eg_record_begin(ctx) == EG_OK
+        && order_do(ctx, pk, po, ps, 3, 0) == EG_OK
+        && eg_record_end(ctx, NULL, &g) == EG_OK
+        && eg_graph_describe(ctx, g, &d) == EG_OK && d.n_nodes == 1
+        && d.nodes[0].kind == EG_GNODE_ORDER && d.nodes[0].n_planes == 3
+        && d.nodes[0].planes[0] == pk && d.nodes[0].access[0] == 1
+        && d.nodes[0].planes[1] == po && d.nodes[0].access[1] == 2
+        && d.nodes[0].planes[2] == ps && d.nodes[0].access[2] == 2;
+    memset(obuf, 0, sizeof(obuf));
+    for (int i = 0; i < 16; ++i)
+        kbuf[i] = (i * 5) % 3;
+    ok = ok && eg_graph_launch(ctx, g) == EG_OK && sbuf[0] == 0
+        && sbuf[3] == 16;
+    for (int j = 1; ok && j < 16; ++j)
+        ok = kbuf[obuf[j - 1]] < kbuf[obuf[j]]
+            || (kbuf[obuf[j - 1]] == kbuf[obuf[j]] && obuf[j - 1] < obuf[j]);
+    kbuf[9] = 3;
+    ok      = ok && eg_graph_launch(ctx, g) == EG_BAD_REQUEST
+        && reason_has(ctx, "sort: 1 keys are outside [0, 3)");
+    check(ok,
+        "eg_order_by_key recorded: one EG_GNODE_ORDER node reading keys and "
+        "writing order and starts; a replay reads the keys as they are then, "
+        "and a key outside [0, K) at the replay fails with the count");
+    eg_graph_free(ctx, g);
+
+    struct eg_record_end_desc diff;
+    memset(&diff, 0, sizeof(diff));
+    diff.struct_size = sizeof(diff);
+    diff.flags       = EG_RECORD_DIFF;
+    g                = NULL;
+    ok               = eg_record_begin(ctx) == EG_OK
+        && order_do(ctx, pk, po, ps, 3, 0) == EG_OK;
+    check(ok && eg_record_end(ctx, &diff, &g) == EG_NOT_WRITTEN
+            && reason_has(ctx, "eg_order_by_key")
+            && reason_has(ctx, "does not pull back a sort yet") && g == NULL,
+        "eg_order_by_key in a DIFF recording: NOT_WRITTEN by name (an integer "
+        "result; its reverse is not written)");
+    eg_record_abort(ctx);
+
+    eg_plane_free(ctx, pk);
+    eg_plane_free(ctx, po);
+    eg_plane_free(ctx, ps);
+    eg_plane_free(ctx, pf);
+    eg_plane_free(ctx, pb);
+    eg_plane_free(ctx, pshort);
+    eg_plane_free(ctx, pover);
+    eg_plane_free(ctx, pwide);
+    eg_plane_free(ctx, p2d);
 }
 
 /* ---- eg_reduce with a position, and ANY ---------------------------------------- */
@@ -7139,6 +7435,7 @@ int main(int argc, char** argv) {
     check_host_events(ctx);
     check_scan(ctx);
     check_compact(ctx);
+    check_order(ctx);
     check_reduce_position(ctx);
     check_cell_position(ctx);
 

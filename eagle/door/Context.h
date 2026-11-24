@@ -962,6 +962,7 @@ void seg_reset(eg_ctx& ctx, eg_plan_s& plan);
 void reduce(eg_ctx& ctx, const eg_reduce_desc* desc);
 void scan(eg_ctx& ctx, const eg_scan_desc* desc);
 void compact(eg_ctx& ctx, const eg_compact_desc* desc);
+void order_by_key(eg_ctx& ctx, const eg_order_desc* desc);
 void copy(eg_ctx& ctx, eg_plane_s* src, eg_plane_s* dst);
 void fft_new(eg_ctx& ctx, const eg_fft_desc* desc, eg_fft** out);
 void fft_run(eg_ctx& ctx, eg_fft_s* plan, eg_plane_s* in, eg_plane_s* out);

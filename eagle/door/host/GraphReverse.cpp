@@ -187,14 +187,15 @@ using Track = std::function<int(eg_plane_s*, bool, const std::string&, const std
 
 /** @brief The words that name the run, copy, reduce, transform or product leaf @p n (the @p ordinal-th of them) in a refusal. */
 std::string leaf_name(const Node& n, std::size_t ordinal) {
-    const char* const what = n.kind == Node::Run      ? "eg_run"
-                             : n.kind == Node::Copy   ? "eg_copy"
-                             : n.kind == Node::Reduce ? "eg_reduce"
-                             : n.kind == Node::Scan   ? "eg_scan"
-                             : n.kind == Node::Compact ? "eg_compact"
-                             : n.kind == Node::Fft    ? "eg_fft_run"
-                             : n.kind == Node::Host   ? "eg_host_call"
-                                                      : "eg_gemm_run";
+    const char* const what = n.kind == Node::Run ? "eg_run"
+        : n.kind == Node::Copy                   ? "eg_copy"
+        : n.kind == Node::Reduce                 ? "eg_reduce"
+        : n.kind == Node::Scan                   ? "eg_scan"
+        : n.kind == Node::Compact                ? "eg_compact"
+        : n.kind == Node::Order                  ? "eg_order_by_key"
+        : n.kind == Node::Fft                    ? "eg_fft_run"
+        : n.kind == Node::Host                   ? "eg_host_call"
+                                                 : "eg_gemm_run";
     return std::string("eg_record_end: ") + what + " (leaf " + std::to_string(ordinal) + ")";
 }
 
@@ -299,6 +300,11 @@ void leaf_checks(const std::vector<const Node*>& others) {
         }
         if (n.kind == Node::Scan) refuse(EG_NOT_WRITTEN, at + ": eagle does not pull back a scan yet");
         if (n.kind == Node::Compact) refuse(EG_NOT_WRITTEN, at + ": eagle does not pull back a compaction yet");
+        if (n.kind == Node::Order)
+            refuse(EG_NOT_WRITTEN,
+                at
+                    + ": eagle does not pull back a sort yet; its order and "
+                      "starts are integer results that carry no gradient");
         if (n.kind != Node::Reduce) continue;
         if (n.reduce.op != EG_REDUCE_SUM) refuse(EG_BAD_REQUEST, at + " has no gradient eagle can pull back (a tie has no single answer); only op='sum' reverses");
         if (tensor(*n.reduce.in).dtype.code == kDLFloat && (n.reduce.cols != 1 || n.reduce.comp != nullptr))

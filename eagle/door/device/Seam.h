@@ -108,6 +108,9 @@ void device_reduce(eg_ctx& ctx, const eg_reduce_desc& desc);
 void device_scan(eg_ctx& ctx, const eg_scan_desc& desc);
 /** @brief eg_compact over device planes (device/Device.cpp). */
 void device_compact(eg_ctx& ctx, const eg_compact_desc& desc);
+/** @brief eg_order_by_key over device planes (device/Device.cpp): refused
+ * NOT_WRITTEN by name. */
+void device_order_by_key(eg_ctx& ctx, const eg_order_desc& desc);
 /** @brief The already checked reduce @p r of device planes on the context's stream; kept in the recording if there is one. */
 void device_reduce_leaf(eg_ctx& ctx, const host::ReduceOp& r);
 void device_copy(eg_ctx& ctx, eg_plane_s* src, eg_plane_s* dst);
