@@ -81,11 +81,15 @@ void device_stream_use(eg_ctx& ctx, std::uint64_t stream);
 void device_stream_new(eg_ctx& ctx, const std::string& device, std::uint64_t* stream);
 /** @brief eg_stream_free: release the queue @p stream made by device_stream_new. */
 void device_stream_free(eg_ctx& ctx, std::uint64_t stream);
-/** @brief eg_stream_sync: wait until the queue @p stream is idle. */
+/** @brief eg_stream_sync: wait until the queue @p stream (a handle of device_stream_new or a raw stream adopted by device_stream_use) is idle. */
 void device_stream_sync(eg_ctx& ctx, std::uint64_t stream);
-/** @brief Refuse EG_NOT_WRITTEN naming @p call when @p ctx is a device context: the five event calls are written for the host
- *  only. A host context passes. */
-void device_events_check(const eg_ctx& ctx, const char* call);
+/** @brief The five event calls of a DEVICE context (the caller has checked that it is one): the handle is the door's event
+ *  handle (Context.cpp) and carries a driver event of the context's device; a record marks the stream in scope. */
+void device_event_new(eg_ctx& ctx, eg_event** out);
+void device_event_free(eg_ctx& ctx, eg_event* event);
+void device_event_record(eg_ctx& ctx, eg_event* event);
+void device_event_wait(eg_ctx& ctx, eg_event* event);
+void device_event_elapsed(eg_ctx& ctx, const eg_event* start, const eg_event* stop, double* ms);
 void device_quiet(const eg_ctx& ctx, const char* call, eg_status status, const char* why);
 /** @brief The refusal reason of the host calls a device recording does not keep (eg_reverse). */
 inline constexpr const char* kHostWorkInGraph = "host work inside a device graph is not written in this build of the door";

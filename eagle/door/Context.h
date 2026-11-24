@@ -627,13 +627,36 @@ struct eg_runner_s {
 namespace eagle {
 namespace door {
 
+/**
+ * @brief The stream in scope of one context: a fact of the calling thread, so two threads that each call eg_stream_use
+ * and then launch never put a launch on each other's stream. A thread that has not set one reads the context's own
+ * stream. Assigning the context's own stream (or 0) puts the thread back on the default. A thread's entry for a context
+ * stays until it sets that context's default again; it holds two integers.
+ */
+class ThreadStream {
+public:
+    ThreadStream();
+    operator std::uint64_t() const;
+    ThreadStream& operator=(std::uint64_t stream);
+    /** The stream a thread reads before it sets one (the context's own); also drops the calling thread's entry. */
+    void set_default(std::uint64_t stream);
+
+private:
+    std::uint64_t serial_;                    ///< names this context's entry in every thread's table
+    std::uint64_t default_ = 0;
+};
+
 /** @brief The device of a device context and the facts a launch reads (device/Device.cpp). */
 struct DeviceState {
     std::int32_t ordinal = -1;                ///< -1: a host-only context
     int handle = 0;                           ///< the driver's device (a CUdevice)
     std::uint64_t context = 0;                ///< its primary context (a CUcontext), retained while the context lives
-    std::uint64_t stream = 0;                 ///< the stream in scope (a CUstream): eagle's own or the caller's (eg_stream_use)
+    ThreadStream stream;                      ///< the stream in scope for the calling thread (a CUstream): eagle's own, a queue of eg_stream_new, or the caller's (eg_stream_use)
     std::uint64_t own_stream = 0;             ///< eagle's own stream, destroyed with the context
+    std::unordered_map<std::uint64_t, std::uint64_t> made_streams;   ///< eg_stream_new handle (bit 63 set, never a driver pointer) -> its CUstream
+    std::uint64_t next_made_stream = 0;       ///< the counter the next handle is made from
+    std::unordered_set<std::uint64_t> adopted_streams;               ///< raw streams the caller passed to eg_stream_use (never destroyed here)
+    std::unordered_map<const void*, std::uint64_t> events;           ///< eg_event handle -> its CUevent (device/Device.cpp)
     int sms = 0, regs_per_sm = 0, smem_per_sm = 0, threads_per_sm = 0, cc_major = 0, cc_minor = 0;
     int clock_khz = 0, memory_clock_khz = 0, bus_bits = 0, l2_bytes = 0;   ///< the device's clocks, memory bus and L2: what its peak rates are derived from
     int fp64_ratio = 1;                       ///< FP32:FP64 throughput ratio (1 when not reported)

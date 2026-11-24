@@ -13,6 +13,8 @@
 #include "eagle/door/host/Ops.h"
 #include "eagle/door/host/Segment.h"
 
+#include <atomic>
+
 #ifndef EAGLE_CPU_ONLY
 #include "eagle/door/device/Fft.h"
 #include "eagle/door/device/Gemm.h"
@@ -35,6 +37,39 @@
 
 namespace eagle {
 namespace door {
+
+namespace {
+
+/** @brief The streams the calling thread has in scope: one entry per context that thread gave a stream other than its default. */
+std::unordered_map<std::uint64_t, std::uint64_t>& thread_streams() {
+    thread_local std::unordered_map<std::uint64_t, std::uint64_t> streams;
+    return streams;
+}
+
+std::atomic<std::uint64_t> streams_in_use_serial{ 0 };
+
+}  // namespace
+
+ThreadStream::ThreadStream() : serial_(++streams_in_use_serial) {}
+
+ThreadStream::operator std::uint64_t() const {
+    const auto& mine = thread_streams();
+    const auto at = mine.find(serial_);
+    return at != mine.end() ? at->second : default_;
+}
+
+ThreadStream& ThreadStream::operator=(std::uint64_t stream) {
+    if (stream == default_)
+        thread_streams().erase(serial_);
+    else
+        thread_streams()[serial_] = stream;
+    return *this;
+}
+
+void ThreadStream::set_default(std::uint64_t stream) {
+    default_ = stream;
+    thread_streams().erase(serial_);
+}
 
 #ifdef EAGLE_CPU_ONLY
 
@@ -118,7 +153,11 @@ void device_stream_use(eg_ctx&, std::uint64_t) { device_group_check("eg_stream_u
 void device_stream_new(eg_ctx&, const std::string&, std::uint64_t*) { device_group_check("eg_stream_new"); }
 void device_stream_free(eg_ctx&, std::uint64_t) { device_group_check("eg_stream_free"); }
 void device_stream_sync(eg_ctx&, std::uint64_t) { device_group_check("eg_stream_sync"); }
-void device_events_check(const eg_ctx&, const char*) {}
+void device_event_new(eg_ctx&, eg_event**) { device_group_check("eg_event_new"); }
+void device_event_free(eg_ctx&, eg_event*) { device_group_check("eg_event_free"); }
+void device_event_record(eg_ctx&, eg_event*) { device_group_check("eg_event_record"); }
+void device_event_wait(eg_ctx&, eg_event*) { device_group_check("eg_event_wait"); }
+void device_event_elapsed(eg_ctx&, const eg_event*, const eg_event*, double*) { device_group_check("eg_event_elapsed"); }
 void device_group_check(const char* call) {
     refuse(EG_NOT_WRITTEN, std::string(call) + ": the device group is not built");
 }
@@ -436,7 +475,7 @@ void release_hooks(eg_ctx& ctx, std::vector<std::unique_ptr<HostHook>>& hooks) n
 void drain_stream(eg_ctx& ctx) {
     EG_DRIVER(cuStreamSynchronize);
     Current current(ctx.dev);
-    check(cuStreamSynchronize_(reinterpret_cast<CUstream>(ctx.dev.stream)), "cuStreamSynchronize");
+    check(cuStreamSynchronize_(reinterpret_cast<CUstream>(static_cast<std::uint64_t>(ctx.dev.stream))), "cuStreamSynchronize");
 }
 
 /** @brief Refuse FAULT with the first failure a host node of @p failure kept, and clear it. */
@@ -545,7 +584,8 @@ void device_open(eg_ctx& ctx, std::int32_t device) {
     Current current(d);
     CUstream stream = nullptr;
     check(cuStreamCreate_(&stream, CU_STREAM_NON_BLOCKING), "cuStreamCreate");
-    d.stream = d.own_stream = reinterpret_cast<std::uint64_t>(stream);
+    d.own_stream = reinterpret_cast<std::uint64_t>(stream);
+    d.stream.set_default(d.own_stream);
     d.sms = attribute(dev, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, "SMs");
     d.regs_per_sm = attribute(dev, CU_DEVICE_ATTRIBUTE_MAX_REGISTERS_PER_MULTIPROCESSOR, "registers per SM");
     d.smem_per_sm = attribute(dev, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR, "shared memory per SM");
@@ -568,11 +608,12 @@ void device_close(eg_ctx& ctx) noexcept {
             Current current(d);
             gemm_handles_free(ctx);
         }
-        if (d.own_stream != 0) {    // never the caller's stream
-            EG_DRIVER(cuStreamDestroy);
-            Current current(d);
-            cuStreamDestroy_(reinterpret_cast<CUstream>(d.own_stream));
-        }
+        EG_DRIVER(cuStreamDestroy);
+        EG_DRIVER(cuEventDestroy);
+        Current current(d);
+        for (const auto& e : d.events) cuEventDestroy_(reinterpret_cast<CUevent>(e.second));
+        for (const auto& m : d.made_streams) cuStreamDestroy_(reinterpret_cast<CUstream>(m.second));    // never the caller's streams
+        if (d.own_stream != 0) cuStreamDestroy_(reinterpret_cast<CUstream>(d.own_stream));
         EG_DRIVER(cuDevicePrimaryCtxRelease);
         cuDevicePrimaryCtxRelease_(d.handle);
     } catch (...) {
@@ -801,7 +842,7 @@ void device_gemm_run(eg_ctx& ctx, const eg_gemm_s& gemm, eg_plane_s* a, eg_plane
 void launch_split(const eg_plan_s& plan) {
     const DeviceState& d = plan.ctx->dev;
     const eg_unit_s& u = *plan.unit;
-    const auto s = reinterpret_cast<CUstream>(d.stream);
+    const auto s = reinterpret_cast<CUstream>(static_cast<std::uint64_t>(d.stream));
     EG_DRIVER(cuMemsetD32Async);
     EG_DRIVER(cuLaunchKernel);
     for (std::size_t k = 0; k < u.team_planes.size(); ++k) {
@@ -906,7 +947,7 @@ void classify_on_device(const eg_plan_s& plan) {
     std::uint32_t n32 = static_cast<std::uint32_t>(n);
     std::vector<seg::Owned> none;
     std::vector<void*> p = seg::params_of(plan, static_cast<std::size_t>(g.k), *g.classify, none, &n32);
-    exec::DeviceKernel::run(reinterpret_cast<CUfunction>(g.classify->function), p, exec::Partition{ 0, n, n }, reinterpret_cast<CUstream>(plan.ctx->dev.stream), 256);
+    exec::DeviceKernel::run(reinterpret_cast<CUfunction>(g.classify->function), p, exec::Partition{ 0, n, n }, reinterpret_cast<CUstream>(static_cast<std::uint64_t>(plan.ctx->dev.stream)), 256);
 }
 
 /** @brief One launch of a SEGMENTED plan on the device (a dynamic selector adds the guarded run's stale compaction and the sweep): the classify unit, eagle's stable K-class sort of copies of the owned planes
@@ -1246,10 +1287,10 @@ void device_launch_prefix(eg_plan_s& plan, std::int64_t count, std::int64_t of) 
     const eg_unit_s& u = *plan.unit;
     Current current(d);
     exec::DeviceKernel::run(reinterpret_cast<CUfunction>(u.function), plan.params, exec::Partition{ 0, count, of },
-                            reinterpret_cast<CUstream>(d.stream), u.block > 0 ? static_cast<unsigned>(u.block) : resolved_block(d, u, of));
+                            reinterpret_cast<CUstream>(static_cast<std::uint64_t>(d.stream)), u.block > 0 ? static_cast<unsigned>(u.block) : resolved_block(d, u, of));
     for (const CompanionFacts& c : u.companions) {    // a plan with a companion folds it into its target after the launch, as eg_launch does
         const std::int64_t size = elements(plan.bindings[c.target].plane->tensor->dl_tensor);
-        exec::DeviceKernel::run(reinterpret_cast<CUfunction>(c.device_fold), plan.params, exec::Partition{ 0, size, size }, reinterpret_cast<CUstream>(d.stream));
+        exec::DeviceKernel::run(reinterpret_cast<CUfunction>(c.device_fold), plan.params, exec::Partition{ 0, size, size }, reinterpret_cast<CUstream>(static_cast<std::uint64_t>(d.stream)));
     }
 }
 
@@ -1325,7 +1366,7 @@ void device_copy(eg_ctx& ctx, eg_plane_s* src, eg_plane_s* dst) {
     if (crosses && ctx.dev_rec != nullptr) {    // one memcpy node of the capture, in the direction of the planes; the caller keeps the host plane alive until the graph has run
         EG_DRIVER(cuMemcpyAsync);
         Current current(ctx.dev);
-        check(cuMemcpyAsync_(reinterpret_cast<CUdeviceptr>(pd), reinterpret_cast<CUdeviceptr>(ps), bytes, reinterpret_cast<CUstream>(ctx.dev.stream)), "cuMemcpyAsync");
+        check(cuMemcpyAsync_(reinterpret_cast<CUdeviceptr>(pd), reinterpret_cast<CUdeviceptr>(ps), bytes, reinterpret_cast<CUstream>(static_cast<std::uint64_t>(ctx.dev.stream))), "cuMemcpyAsync");
         return;
     }
     if (s.device.device_type == kDLCPU) {
@@ -2291,7 +2332,7 @@ void device_record_host_step(eg_ctx& ctx, void (*run)(void*, StepFailure&) noexc
     if (!rec.failure) rec.failure = std::make_shared<StepFailure>();
     rec.hooks.push_back(std::make_unique<HostHook>(HostHook{ run, user, release, rec.failure }));
     Current current(ctx.dev);
-    const CUresult r = cuLaunchHostFunc_(reinterpret_cast<CUstream>(ctx.dev.stream), &host_hook_run, rec.hooks.back().get());
+    const CUresult r = cuLaunchHostFunc_(reinterpret_cast<CUstream>(static_cast<std::uint64_t>(ctx.dev.stream)), &host_hook_run, rec.hooks.back().get());
     if (r != CUDA_SUCCESS) {
         rec.hooks.pop_back();    // the caller still owns the step it passed
         check(r, "cuLaunchHostFunc");
@@ -2714,24 +2755,51 @@ void device_graphs_drop(eg_ctx& ctx) noexcept {
     ctx.dev_graphs.clear();
 }
 
-/** @brief eg_stream_use: make @p stream (a stream of the context's device; 0: eagle's own) the stream in scope; the
- *  launches, runs and replays after it are ordered on it (the old path's ``stream_create`` over an external stream). */
+/** @brief The marker bit of a handle eg_stream_new makes: a driver stream is a pointer and never has it, so a handle and a
+ *  caller's raw stream cannot be mistaken for each other. */
+constexpr std::uint64_t kMadeStreamTag = std::uint64_t{ 1 } << 63;
+
+/** @brief Refuse BAD_REQUEST naming @p call while a recording is open: the capture is on the stream in scope. */
+void refuse_stream_call_in_recording(const eg_ctx& ctx, const char* call) {
+    if (ctx.dev_rec != nullptr)
+        refuse(EG_BAD_REQUEST, std::string(call) + " while recording: the capture is on the stream in scope; call it before "
+               "eg_record_begin or after eg_record_end");
+}
+
+/** @brief The CUstream of the handle @p stream of eg_stream_new, refusing one the context did not make or already freed. */
+std::uint64_t made_stream(const eg_ctx& ctx, std::uint64_t stream, const char* call) {
+    const auto at = ctx.dev.made_streams.find(stream);
+    if (at == ctx.dev.made_streams.end())
+        refuse(EG_BAD_REQUEST, std::string(call) + ": stream handle " + std::to_string(stream) +
+               " was not made by eg_stream_new on this context, or it was already freed");
+    return at->second;
+}
+
+/** @brief Refuse BAD_REQUEST unless the raw stream @p stream belongs to the context's device. */
+void check_raw_stream(const eg_ctx& ctx, std::uint64_t stream, const char* call) {
+    EG_DRIVER(cuStreamGetCtx);
+    Current current(ctx.dev);
+    CUcontext owner = nullptr;
+    check(cuStreamGetCtx_(reinterpret_cast<CUstream>(stream), &owner), std::string(call) + ": cuStreamGetCtx");
+    if (owner != reinterpret_cast<CUcontext>(ctx.dev.context))
+        refuse(EG_BAD_REQUEST, std::string(call) + ": the stream belongs to another context than device " +
+               std::to_string(ctx.dev.ordinal) + "'s primary context");
+}
+
+/** @brief eg_stream_use: make @p stream (0: eagle's own; a handle of eg_stream_new; or a raw stream of the context's device)
+ *  the stream in scope of the calling thread; the launches, runs and replays that thread makes after it are ordered on it. */
 void device_stream_use(eg_ctx& ctx, std::uint64_t stream) {
     if (ctx.dev.ordinal < 0)
         refuse(EG_BAD_REQUEST, "eg_stream_use on a host-only context (made without EG_CTX_DEVICE): it has no stream");
-    if (ctx.dev_rec != nullptr)
-        refuse(EG_BAD_REQUEST, "eg_stream_use while recording: the capture is on the stream in scope; call it before "
-               "eg_record_begin or after eg_record_end");
-    if (stream != 0) {
-        EG_DRIVER(cuStreamGetCtx);
-        Current current(ctx.dev);
-        CUcontext owner = nullptr;
-        check(cuStreamGetCtx_(reinterpret_cast<CUstream>(stream), &owner), "eg_stream_use: cuStreamGetCtx");
-        if (owner != reinterpret_cast<CUcontext>(ctx.dev.context))
-            refuse(EG_BAD_REQUEST, "eg_stream_use: the stream belongs to another context than device " +
-                   std::to_string(ctx.dev.ordinal) + "'s primary context");
+    refuse_stream_call_in_recording(ctx, "eg_stream_use");
+    std::uint64_t scope = ctx.dev.own_stream;
+    if ((stream & kMadeStreamTag) != 0) {
+        scope = made_stream(ctx, stream, "eg_stream_use");
+    } else if (stream != 0) {
+        check_raw_stream(ctx, stream, "eg_stream_use");
+        ctx.dev.adopted_streams.insert(stream);
+        scope = stream;
     }
-    const std::uint64_t scope = stream != 0 ? stream : ctx.dev.own_stream;
     if (!ctx.dev.gemm_handles.empty()) {    // a gemm unit was planned: the stream gets its handle now, outside any capture
         Current current(ctx.dev);
         gemm_handle_make(ctx, scope);
@@ -2739,28 +2807,160 @@ void device_stream_use(eg_ctx& ctx, std::uint64_t stream) {
     ctx.dev.stream = scope;
 }
 
-/** @brief eg_stream_new, eg_stream_free and eg_stream_sync of a device context: not written yet. */
-void device_stream_new(eg_ctx&, const std::string&, std::uint64_t*) {
-    refuse(EG_NOT_WRITTEN, "eg_stream_new: not written for a device context");
-}
-void device_stream_free(eg_ctx&, std::uint64_t) {
-    refuse(EG_NOT_WRITTEN, "eg_stream_free: not written for a device context");
-}
-void device_stream_sync(eg_ctx&, std::uint64_t) {
-    refuse(EG_NOT_WRITTEN, "eg_stream_sync: not written for a device context");
-}
-
-/** @brief The five event calls of a device context: not written yet. */
-void device_events_check(const eg_ctx& ctx, const char* call) {
-    if (ctx.dev.ordinal >= 0) refuse(EG_NOT_WRITTEN, std::string(call) + ": not written for a device context");
+/** @brief The ordinal the text @p device of eg_stream_new names: "" the context's own device, else "cuda:N" or "N". */
+std::int32_t stream_device(const eg_ctx& ctx, const std::string& device) {
+    if (device.empty()) return ctx.dev.ordinal;
+    const std::string digits = device.rfind("cuda:", 0) == 0 ? device.substr(5) : device;
+    const bool numeric = !digits.empty() && digits.size() < 9 && digits.find_first_not_of("0123456789") == std::string::npos;
+    std::string why;
+    if (!numeric || std::stoi(digits) >= driver_device_count(why))
+        refuse(EG_BAD_REQUEST, "eg_stream_new: '" + device + "' names no device of this backend (write cuda:N, N below the device count)");
+    return std::stoi(digits);
 }
 
-/** @brief eg_sync: wait until the context's stream is idle (a host-only context has nothing queued). */
+/** @brief eg_stream_new: a queue the library owns on the context's device; its handle carries kMadeStreamTag. */
+void device_stream_new(eg_ctx& ctx, const std::string& device, std::uint64_t* stream) {
+    refuse_stream_call_in_recording(ctx, "eg_stream_new");
+    const std::int32_t ordinal = stream_device(ctx, device);
+    if (ordinal != ctx.dev.ordinal)
+        refuse(EG_NOT_WRITTEN, "eg_stream_new: device " + std::to_string(ordinal) + " is not the context's device " +
+               std::to_string(ctx.dev.ordinal) + "; a stream of another device needs a context of that device (several devices are not written)");
+    EG_DRIVER(cuStreamCreate);
+    Current current(ctx.dev);
+    CUstream made = nullptr;
+    check(cuStreamCreate_(&made, CU_STREAM_NON_BLOCKING), "eg_stream_new: cuStreamCreate");
+    const std::uint64_t handle = kMadeStreamTag | ++ctx.dev.next_made_stream;
+    ctx.dev.made_streams[handle] = reinterpret_cast<std::uint64_t>(made);
+    *stream = handle;
+}
+
+/** @brief eg_stream_free: wait for the work queued on the handle @p stream, hand the planes made on it to the context's own
+ *  stream (their release must not name a dead stream) and destroy it; the calling thread's scope falls back to the own stream. */
+void device_stream_free(eg_ctx& ctx, std::uint64_t stream) {
+    refuse_stream_call_in_recording(ctx, "eg_stream_free");
+    const std::uint64_t queue = made_stream(ctx, stream, "eg_stream_free");
+    EG_DRIVER(cuStreamSynchronize);
+    EG_DRIVER(cuStreamDestroy);
+    Current current(ctx.dev);
+    check(cuStreamSynchronize_(reinterpret_cast<CUstream>(queue)), "eg_stream_free: cuStreamSynchronize");
+    for (auto& block : ctx.dev.alloc_stream)
+        if (block.second == queue) block.second = ctx.dev.own_stream;
+    gemm_handle_drop(ctx, queue);
+    if (static_cast<std::uint64_t>(ctx.dev.stream) == queue) ctx.dev.stream = ctx.dev.own_stream;
+    check(cuStreamDestroy_(reinterpret_cast<CUstream>(queue)), "eg_stream_free: cuStreamDestroy");
+    ctx.dev.made_streams.erase(stream);
+}
+
+/** @brief eg_stream_sync: wait for the work queued on @p stream only (0: eagle's own, a handle of eg_stream_new, or a raw
+ *  stream adopted by eg_stream_use); a host node of a device graph that failed meanwhile is reported as eg_sync does. */
+void device_stream_sync(eg_ctx& ctx, std::uint64_t stream) {
+    refuse_stream_call_in_recording(ctx, "eg_stream_sync");
+    std::uint64_t queue = ctx.dev.own_stream;
+    if ((stream & kMadeStreamTag) != 0) {
+        queue = made_stream(ctx, stream, "eg_stream_sync");
+    } else if (stream != 0) {
+        if (ctx.dev.adopted_streams.count(stream) == 0)
+            refuse(EG_BAD_REQUEST, "eg_stream_sync: stream " + std::to_string(stream) +
+                   " is neither a handle of eg_stream_new nor a raw stream given to eg_stream_use on this context");
+        queue = stream;
+    }
+    EG_DRIVER(cuStreamSynchronize);
+    Current current(ctx.dev);
+    check(cuStreamSynchronize_(reinterpret_cast<CUstream>(queue)), "eg_stream_sync: cuStreamSynchronize");
+    for (DeviceGraph* g : ctx.dev_graphs)
+        if (g->failure) raise_step_failure(*g->failure);
+}
+
+/** @brief Refuse BAD_REQUEST naming @p call while a device recording is open: an event is a mark of the eager level. */
+void refuse_event_in_recording(const eg_ctx& ctx, const char* call) {
+    if (ctx.dev_rec != nullptr)
+        refuse(EG_BAD_REQUEST, std::string(call) + ": an event is a mark of the eager level, not a node of a recording; "
+               "order inside one is eg_record_wait");
+}
+
+/** @brief The CUevent of the door's event handle @p event, refusing one this context's device did not make. */
+CUevent driver_event(const eg_ctx& ctx, const void* event, const char* call) {
+    const auto at = ctx.dev.events.find(event);
+    if (at == ctx.dev.events.end()) refuse(EG_BAD_REQUEST, std::string(call) + ": the event was not made on this context, or it was already freed");
+    return reinterpret_cast<CUevent>(at->second);
+}
+
+/** @brief eg_event_new: the door's handle (its registry and its refusals) plus a driver event of the context's device. */
+void device_event_new(eg_ctx& ctx, eg_event** out) {
+    event_new(ctx, out);
+    try {
+        EG_DRIVER(cuEventCreate);
+        Current current(ctx.dev);
+        CUevent made = nullptr;
+        check(cuEventCreate_(&made, CU_EVENT_DEFAULT), "eg_event_new: cuEventCreate");
+        ctx.dev.events[*out] = reinterpret_cast<std::uint64_t>(made);
+    } catch (...) {
+        event_free(ctx, *out);
+        *out = nullptr;
+        throw;
+    }
+}
+
+/** @brief eg_event_free: the driver event first (the driver releases it when the mark it holds is reached), then the handle. */
+void device_event_free(eg_ctx& ctx, eg_event* event) {
+    const auto at = ctx.dev.events.find(event);
+    if (at != ctx.dev.events.end()) {
+        EG_DRIVER(cuEventDestroy);
+        Current current(ctx.dev);
+        cuEventDestroy_(reinterpret_cast<CUevent>(at->second));
+        ctx.dev.events.erase(at);
+    }
+    event_free(ctx, event);
+}
+
+/** @brief eg_event_record: mark the stream in scope of the calling thread. */
+void device_event_record(eg_ctx& ctx, eg_event* event) {
+    refuse_event_in_recording(ctx, "eg_event_record");
+    event_record(ctx, event);    // the refusals of a foreign handle or a recording, and the "recorded" fact
+    EG_DRIVER(cuEventRecord);
+    Current current(ctx.dev);
+    check(cuEventRecord_(driver_event(ctx, event, "eg_event_record"), reinterpret_cast<CUstream>(static_cast<std::uint64_t>(ctx.dev.stream))),
+          "eg_event_record: cuEventRecord");
+}
+
+/** @brief eg_event_wait: the stream in scope of the calling thread waits for the mark; the host thread does not. */
+void device_event_wait(eg_ctx& ctx, eg_event* event) {
+    refuse_event_in_recording(ctx, "eg_event_wait");
+    event_wait(ctx, event);    // the refusals of a foreign handle, a recording and an event never recorded
+    EG_DRIVER(cuStreamWaitEvent);
+    Current current(ctx.dev);
+    check(cuStreamWaitEvent_(reinterpret_cast<CUstream>(static_cast<std::uint64_t>(ctx.dev.stream)), driver_event(ctx, event, "eg_event_wait"), 0),
+          "eg_event_wait: cuStreamWaitEvent");
+}
+
+/** @brief eg_event_elapsed: wait for both marks, then the driver's milliseconds from @p start to @p stop. */
+void device_event_elapsed(eg_ctx& ctx, const eg_event* start, const eg_event* stop, double* ms) {
+    refuse_event_in_recording(ctx, "eg_event_elapsed");
+    event_elapsed(ctx, start, stop, ms);    // the refusals; the host's figure is replaced below
+    EG_DRIVER(cuEventSynchronize);
+    EG_DRIVER(cuEventElapsedTime);
+    Current current(ctx.dev);
+    const CUevent first = driver_event(ctx, start, "eg_event_elapsed");
+    const CUevent second = driver_event(ctx, stop, "eg_event_elapsed");
+    check(cuEventSynchronize_(first), "eg_event_elapsed: cuEventSynchronize");
+    check(cuEventSynchronize_(second), "eg_event_elapsed: cuEventSynchronize");
+    float elapsed = 0.0f;
+    check(cuEventElapsedTime_(&elapsed, first, second), "eg_event_elapsed: cuEventElapsedTime");
+    *ms = static_cast<double>(elapsed);
+}
+
+/** @brief eg_sync: wait until every stream of the context is idle: eagle's own, every queue of eg_stream_new and the caller's
+ *  raw stream when it is in scope (a host-only context has nothing queued). */
 void device_sync(eg_ctx& ctx) {
     if (ctx.dev.ordinal < 0) return;
     EG_DRIVER(cuStreamSynchronize);
     Current current(ctx.dev);
-    check(cuStreamSynchronize_(reinterpret_cast<CUstream>(ctx.dev.stream)), "eg_sync: cuStreamSynchronize");
+    check(cuStreamSynchronize_(reinterpret_cast<CUstream>(ctx.dev.own_stream)), "eg_sync: cuStreamSynchronize");
+    for (const auto& made : ctx.dev.made_streams)
+        check(cuStreamSynchronize_(reinterpret_cast<CUstream>(made.second)), "eg_sync: cuStreamSynchronize");
+    const std::uint64_t scope = ctx.dev.stream;
+    if (ctx.dev.adopted_streams.count(scope) != 0)    // a caller's stream is waited for while it is in scope; the caller owns the others
+        check(cuStreamSynchronize_(reinterpret_cast<CUstream>(scope)), "eg_sync: cuStreamSynchronize");
     for (DeviceGraph* g : ctx.dev_graphs)    // a host node of a replay that has run now reports its failure
         if (g->failure) raise_step_failure(*g->failure);
 }

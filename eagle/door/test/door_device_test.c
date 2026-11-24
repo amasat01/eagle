@@ -22,9 +22,11 @@
 #include <dlfcn.h>
 #include <float.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define N 1000
 
@@ -2966,6 +2968,260 @@ static void graph_builder_device(const char* dev_lib) {
     gb_free(&g);
 }
 
+/* ---- streams and events ---------------------------------------------------------------------------------------------- */
+
+#define SN 4096 /* doubles of one stream row's plane */
+
+static volatile int gate_open;
+
+/* Holds the stream it is queued on until the test opens the gate: work behind it cannot run. */
+static void CUDART_CB wait_for_gate(void* flag) {
+    const struct timespec nap = { 0, 100000 };
+    while (!*(volatile int*)flag) nanosleep(&nap, NULL);
+}
+
+/* The raw stream the calling thread has in scope (eg_ctx_info reports it). */
+static int64_t stream_in_scope(eg_ctx* ctx) {
+    struct eg_ctx_info info;
+    memset(&info, 0, sizeof(info));
+    info.struct_size = sizeof(info);
+    return eg_ctx_info(ctx, &info) == EG_OK ? info.stream : -1;
+}
+
+/* A device plane of SN doubles: its memory, its tensor and the plane. */
+struct splane {
+    double* data;
+    struct tensor t;
+    eg_plane* plane;
+};
+
+static int splane_make(eg_ctx* ctx, struct splane* p, const double* values) {
+    if (cudaMalloc((void**)&p->data, SN * sizeof(double)) != cudaSuccess) return 0;
+    if (values != NULL) cudaMemcpy(p->data, values, SN * sizeof(double), cudaMemcpyHostToDevice);
+    else cudaMemset(p->data, 0, SN * sizeof(double));
+    cudaDeviceSynchronize(); /* the legacy stream does not order against the context's non-blocking streams: settle the fill first */
+    p->plane = wrap(ctx, &p->t, p->data, 1, SN, 0, 1, 0);
+    return p->plane != NULL;
+}
+
+static void splane_free(eg_ctx* ctx, struct splane* p) {
+    if (p->plane) eg_plane_free(ctx, p->plane);
+    if (p->data) cudaFree(p->data);
+}
+
+/* Reads a plane through the legacy stream, which never waits for the context's non-blocking streams. */
+static int splane_equals(const struct splane* p, const double* want) {
+    static double got[SN];
+    return cudaMemcpy(got, p->data, sizeof(got), cudaMemcpyDeviceToHost) == cudaSuccess && memcmp(got, want, sizeof(got)) == 0;
+}
+
+struct stream_thread {
+    eg_ctx* ctx;
+    uint64_t handle;
+    eg_plane *src, *dst;
+    pthread_barrier_t* step;
+    int blocks_its_stream; /* queue the gate on the stream in scope before the copy */
+    int ok;
+};
+
+/* Set a stream, wait for the other thread to set its own, then copy: the interleaving of one set-and-launch pair per thread. */
+static void* use_then_copy(void* arg) {
+    struct stream_thread* t = (struct stream_thread*)arg;
+    const int64_t raw = eg_stream_use(t->ctx, t->handle) == EG_OK ? stream_in_scope(t->ctx) : -1;
+    t->ok = raw > 0 && (!t->blocks_its_stream || cudaLaunchHostFunc((cudaStream_t)raw, wait_for_gate, (void*)&gate_open) == cudaSuccess);
+    pthread_barrier_wait(t->step);
+    t->ok = t->ok && eg_copy(t->ctx, t->src, t->dst) == EG_OK;
+    pthread_barrier_wait(t->step);
+    return NULL;
+}
+
+/* eg_stream_new / eg_stream_use / eg_stream_free / eg_stream_sync and eg_sync on a device context. */
+static void device_streams(eg_ctx* ctx, eg_ctx* host) {
+    uint64_t ha = 0, hb = 0;
+    int ok = eg_stream_new(ctx, NULL, &ha) == EG_OK && eg_stream_new(ctx, "cuda:0", &hb) == EG_OK && ha != hb && ha != 0 && (ha >> 63) != 0 &&
+             (hb >> 63) != 0;
+    uint64_t hc = 0;
+    ok = ok && eg_stream_new(ctx, "", &hc) == EG_OK && eg_stream_free(ctx, hc) == EG_OK && eg_stream_new(ctx, "0", &hc) == EG_OK;
+    check(ok, "eg_stream_new: NULL, \"\", \"0\" and \"cuda:0\" name the context's device and give distinct handles marked by bit 63");
+    check(refused(eg_stream_new(ctx, NULL, NULL), EG_BAD_REQUEST, ctx, "stream is NULL") &&
+              refused(eg_stream_new(ctx, "tpu:0", &hc), EG_BAD_REQUEST, ctx, "names no device") &&
+              refused(eg_stream_new(ctx, "cuda:99", &hc), EG_BAD_REQUEST, ctx, "names no device"),
+          "eg_stream_new refuses a NULL out, a text of another backend and a device the driver does not see, BAD_REQUEST by name");
+    {
+        uint64_t unused = 0;
+        check(refused(eg_stream_new(host, NULL, &unused), EG_BAD_REQUEST, host, "host-only context: it has one queue") &&
+                  refused(eg_stream_free(host, 1), EG_BAD_REQUEST, host, "host-only context: it has one queue") &&
+                  refused(eg_stream_sync(host, 1), EG_BAD_REQUEST, host, "host-only context: it has one queue"),
+              "the three stream calls refuse a host-only context BAD_REQUEST (host-only context: it has one queue)");
+    }
+    const uint64_t dead = hc;
+    ok = eg_stream_free(ctx, hc) == EG_OK && refused(eg_stream_free(ctx, dead), EG_BAD_REQUEST, ctx, "already freed") &&
+         refused(eg_stream_use(ctx, dead), EG_BAD_REQUEST, ctx, "already freed") &&
+         refused(eg_stream_sync(ctx, dead), EG_BAD_REQUEST, ctx, "already freed") &&
+         refused(eg_stream_free(ctx, 12345), EG_BAD_REQUEST, ctx, "not made by eg_stream_new") &&
+         refused(eg_stream_sync(ctx, 12345), EG_BAD_REQUEST, ctx, "neither a handle of eg_stream_new");
+    check(ok, "eg_stream_free ends a handle's life: freed twice, used, synced and a handle never made are refused BAD_REQUEST by name");
+    {   /* eg_stream_sync waits for that stream only; eg_sync waits for every stream of the context */
+        cudaStream_t own = NULL;
+        void *big_a = NULL, *big_b = NULL;
+        const size_t big = (size_t)128 << 20;
+        ok = eg_stream_use(ctx, 0) == EG_OK && cudaMalloc(&big_a, big) == cudaSuccess && cudaMalloc(&big_b, big) == cudaSuccess;
+        own = (cudaStream_t)stream_in_scope(ctx);
+        for (int k = 0; ok && k < 40; ++k) ok = cudaMemcpyAsync(big_b, big_a, big, cudaMemcpyDeviceToDevice, own) == cudaSuccess;
+        ok = ok && cudaStreamQuery(own) == cudaErrorNotReady && eg_stream_use(ctx, ha) == EG_OK;
+        const cudaStream_t made = (cudaStream_t)stream_in_scope(ctx);
+        ok = ok && made != own && eg_stream_sync(ctx, ha) == EG_OK && cudaStreamQuery(made) == cudaSuccess;
+        const int others_untouched = ok && cudaStreamQuery(own) == cudaErrorNotReady; /* the context's own stream is still busy */
+        for (int k = 0; ok && k < 40; ++k) ok = cudaMemcpyAsync(big_b, big_a, big, cudaMemcpyDeviceToDevice, made) == cudaSuccess;
+        ok = ok && eg_sync(ctx) == EG_OK && cudaStreamQuery(own) == cudaSuccess && cudaStreamQuery(made) == cudaSuccess;
+        check(ok && others_untouched,
+              "eg_stream_sync of a library stream returns while another stream still runs; eg_sync then waits for the own stream and every library stream");
+        cudaFree(big_a);
+        cudaFree(big_b);
+    }
+    {   /* a library stream in scope when it is freed: the context's own stream is in scope again, and planes made on it stay valid */
+        const int64_t own = (eg_stream_use(ctx, 0) == EG_OK) ? stream_in_scope(ctx) : -1;
+        double init[SN];
+        for (int i = 0; i < SN; ++i) init[i] = 0.5 * i - 7.0;
+        struct splane a = { 0 }, b = { 0 };
+        ok = eg_stream_use(ctx, hb) == EG_OK && stream_in_scope(ctx) != own && splane_make(ctx, &a, init) && splane_make(ctx, &b, NULL) &&
+             eg_copy(ctx, a.plane, b.plane) == EG_OK && eg_stream_free(ctx, hb) == EG_OK && stream_in_scope(ctx) == own &&
+             eg_sync(ctx) == EG_OK && splane_equals(&b, init);
+        check(ok, "freeing the library stream in scope puts the context's own stream back in scope, after the copy queued on it");
+        splane_free(ctx, &a);
+        splane_free(ctx, &b);
+    }
+    {   /* the stream in scope is a fact of the calling thread: two threads set one each, then both copy; every copy lands on its own stream */
+        uint64_t sa = 0, sb = 0;
+        double va[SN], vb[SN], zero[SN];
+        for (int i = 0; i < SN; ++i) va[i] = 1.0 + i, vb[i] = -3.0 - 2.0 * i, zero[i] = 0.0;
+        struct splane src_a = { 0 }, dst_a = { 0 }, src_b = { 0 }, dst_b = { 0 };
+        pthread_barrier_t step;
+        ok = eg_stream_use(ctx, 0) == EG_OK && eg_stream_new(ctx, NULL, &sa) == EG_OK && eg_stream_new(ctx, NULL, &sb) == EG_OK &&
+             splane_make(ctx, &src_a, va) && splane_make(ctx, &dst_a, NULL) && splane_make(ctx, &src_b, vb) && splane_make(ctx, &dst_b, NULL) &&
+             pthread_barrier_init(&step, NULL, 2) == 0;
+        gate_open = 0;
+        struct stream_thread ta = { ctx, sa, src_a.plane, dst_a.plane, &step, 1, 0 }, tb = { ctx, sb, src_b.plane, dst_b.plane, &step, 0, 0 };
+        pthread_t a, b;
+        ok = ok && pthread_create(&a, NULL, use_then_copy, &ta) == 0;
+        ok = ok && pthread_create(&b, NULL, use_then_copy, &tb) == 0;
+        if (ok) pthread_join(a, NULL), pthread_join(b, NULL);
+        ok = ok && ta.ok && tb.ok && eg_stream_sync(ctx, sb) == EG_OK && splane_equals(&dst_b, vb);
+        const int a_waits_behind_its_gate = ok && splane_equals(&dst_a, zero); /* A's copy is queued behind the gate on A's stream, not on B's */
+        gate_open = 1;
+        ok = ok && eg_stream_sync(ctx, sa) == EG_OK && splane_equals(&dst_a, va);
+        check(ok && a_waits_behind_its_gate,
+              "two threads, two library streams, one door: each thread's copy runs on its own stream (B's finishes while A's gate holds A's stream; A's then equals its source)");
+        pthread_barrier_destroy(&step);
+        splane_free(ctx, &src_a);
+        splane_free(ctx, &dst_a);
+        splane_free(ctx, &src_b);
+        splane_free(ctx, &dst_b);
+        ok = eg_stream_free(ctx, sa) == EG_OK && eg_stream_free(ctx, sb) == EG_OK;
+        check(ok, "both library streams of the two-thread row are freed");
+    }
+    {   /* inside a recording the stream calls are refused by name */
+        uint64_t spare = 0;
+        eg_graph* g = NULL;
+        struct splane a = { 0 }, b = { 0 };
+        ok = eg_stream_new(ctx, NULL, &spare) == EG_OK && splane_make(ctx, &a, NULL) && splane_make(ctx, &b, NULL) && eg_record_begin(ctx) == EG_OK;
+        uint64_t other = 0;
+        const int refusals = ok && refused(eg_stream_new(ctx, NULL, &other), EG_BAD_REQUEST, ctx, "while recording") &&
+                             refused(eg_stream_use(ctx, spare), EG_BAD_REQUEST, ctx, "while recording") &&
+                             refused(eg_stream_free(ctx, spare), EG_BAD_REQUEST, ctx, "while recording") &&
+                             refused(eg_stream_sync(ctx, spare), EG_BAD_REQUEST, ctx, "while recording");
+        ok = ok && eg_copy(ctx, a.plane, b.plane) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK;
+        check(ok && refusals, "eg_stream_new, eg_stream_use, eg_stream_free and eg_stream_sync inside a recording are refused BAD_REQUEST (while recording)");
+        if (g) eg_graph_free(ctx, g);
+        ok = eg_stream_free(ctx, spare) == EG_OK;
+        splane_free(ctx, &a);
+        splane_free(ctx, &b);
+    }
+}
+
+/* eg_event_new / record / wait / elapsed / free on a device context. */
+static void device_events(eg_ctx* ctx, eg_ctx* host) {
+    eg_event *e0 = NULL, *e1 = NULL;
+    int ok = eg_stream_use(ctx, 0) == EG_OK && eg_event_new(ctx, &e0) == EG_OK && eg_event_new(ctx, &e1) == EG_OK && e0 != e1;
+    double ms = 0.0;
+    check(ok && refused(eg_event_new(ctx, NULL), EG_BAD_REQUEST, ctx, "out is NULL") &&
+              refused(eg_event_wait(ctx, e0), EG_BAD_REQUEST, ctx, "never recorded") &&
+              refused(eg_event_elapsed(ctx, e0, e1, &ms), EG_BAD_REQUEST, ctx, "never recorded"),
+          "a device event never recorded is refused by name: wait and elapsed say \"never recorded\"");
+    {   /* the milliseconds between two marks of one stream equal the CUDA runtime's own timing of the same span */
+        cudaStream_t s = NULL;
+        cudaEvent_t r0, r1;
+        void *big_a = NULL, *big_b = NULL;
+        const size_t big = (size_t)128 << 20;
+        ok = eg_stream_use(ctx, 0) == EG_OK && (s = (cudaStream_t)stream_in_scope(ctx)) != NULL && cudaMalloc(&big_a, big) == cudaSuccess &&
+             cudaMalloc(&big_b, big) == cudaSuccess && cudaEventCreate(&r0) == cudaSuccess && cudaEventCreate(&r1) == cudaSuccess;
+        ok = ok && eg_event_record(ctx, e0) == EG_OK && cudaEventRecord(r0, s) == cudaSuccess;
+        for (int k = 0; ok && k < 40; ++k) ok = cudaMemcpyAsync(big_b, big_a, big, cudaMemcpyDeviceToDevice, s) == cudaSuccess;
+        ok = ok && cudaEventRecord(r1, s) == cudaSuccess && eg_event_record(ctx, e1) == EG_OK;
+        float reference = 0.0f;
+        double forward = 0.0, backward = 0.0;
+        ok = ok && eg_event_elapsed(ctx, e0, e1, &forward) == EG_OK && eg_event_elapsed(ctx, e1, e0, &backward) == EG_OK &&
+             cudaEventSynchronize(r1) == cudaSuccess && cudaEventElapsedTime(&reference, r0, r1) == cudaSuccess;
+        check(ok && reference > 5.0f && fabs(forward - reference) < 0.05 * reference && backward == -forward,
+              "eg_event_elapsed of two marks around 40 copies equals the CUDA runtime's timing of the same span (5%), and is negative when the marks are swapped");
+        cudaEventDestroy(r0);
+        cudaEventDestroy(r1);
+        cudaFree(big_a);
+        cudaFree(big_b);
+    }
+    {   /* a stream that waits on an event sees what the recording stream wrote before it: 50 rounds, no host wait between */
+        uint64_t sa = 0, sb = 0;
+        struct splane src = { 0 }, mid = { 0 }, out = { 0 };
+        double pattern[SN];
+        ok = eg_stream_new(ctx, NULL, &sa) == EG_OK && eg_stream_new(ctx, NULL, &sb) == EG_OK;
+        for (int i = 0; i < SN; ++i) pattern[i] = 0.0;
+        ok = ok && splane_make(ctx, &src, pattern) && splane_make(ctx, &mid, NULL) && splane_make(ctx, &out, NULL);
+        void* big_a = NULL;
+        void* big_b = NULL;
+        const size_t big = (size_t)64 << 20;
+        ok = ok && cudaMalloc(&big_a, big) == cudaSuccess && cudaMalloc(&big_b, big) == cudaSuccess;
+        int rounds_ok = 0;
+        for (int round = 0; ok && round < 50; ++round) {
+            for (int i = 0; i < SN; ++i) pattern[i] = round * 1000.0 + i;
+            ok = cudaMemcpy(src.data, pattern, sizeof(pattern), cudaMemcpyHostToDevice) == cudaSuccess && eg_stream_use(ctx, sa) == EG_OK;
+            cudaStream_t raw_a = (cudaStream_t)stream_in_scope(ctx);
+            for (int k = 0; ok && k < 4; ++k) ok = cudaMemcpyAsync(big_b, big_a, big, cudaMemcpyDeviceToDevice, raw_a) == cudaSuccess; /* delay A's write */
+            ok = ok && eg_copy(ctx, src.plane, mid.plane) == EG_OK && eg_event_record(ctx, e0) == EG_OK && eg_stream_use(ctx, sb) == EG_OK &&
+                 eg_event_wait(ctx, e0) == EG_OK && eg_copy(ctx, mid.plane, out.plane) == EG_OK && eg_stream_sync(ctx, sb) == EG_OK;
+            rounds_ok += ok && splane_equals(&out, pattern);
+        }
+        check(ok && rounds_ok == 50, "a stream that waits on an event recorded after another stream's copy reads that copy's values in 50 of 50 rounds");
+        ok = eg_sync(ctx) == EG_OK && eg_stream_free(ctx, sa) == EG_OK && eg_stream_free(ctx, sb) == EG_OK;
+        splane_free(ctx, &src);
+        splane_free(ctx, &mid);
+        splane_free(ctx, &out);
+        cudaFree(big_a);
+        cudaFree(big_b);
+        check(ok, "the library streams of the event rows are freed");
+    }
+    {   /* inside a recording: record, wait and elapsed are refused by name, new and free are not calls of the capture */
+        eg_graph* g = NULL;
+        struct splane a = { 0 }, b = { 0 };
+        ok = splane_make(ctx, &a, NULL) && splane_make(ctx, &b, NULL) && eg_event_record(ctx, e0) == EG_OK && eg_event_record(ctx, e1) == EG_OK &&
+             eg_record_begin(ctx) == EG_OK;
+        const int refusals = ok && refused(eg_event_record(ctx, e0), EG_BAD_REQUEST, ctx, "an event is a mark of the eager level") &&
+                             refused(eg_event_wait(ctx, e0), EG_BAD_REQUEST, ctx, "an event is a mark of the eager level") &&
+                             refused(eg_event_elapsed(ctx, e0, e1, &ms), EG_BAD_REQUEST, ctx, "an event is a mark of the eager level");
+        ok = ok && eg_copy(ctx, a.plane, b.plane) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK;
+        check(ok && refusals, "eg_event_record, eg_event_wait and eg_event_elapsed inside a recording are refused by name (an event is a mark of the eager level)");
+        if (g) eg_graph_free(ctx, g);
+        splane_free(ctx, &a);
+        splane_free(ctx, &b);
+    }
+    {   /* a handle's life: freed once; a second free, a use after it, and an event of another context are refused BAD_REQUEST */
+        eg_event* foreign = NULL;
+        ok = eg_event_new(host, &foreign) == EG_OK && eg_event_free(ctx, e1) == EG_OK && refused(eg_event_free(ctx, e1), EG_BAD_REQUEST, ctx, "event") &&
+             refused(eg_event_record(ctx, e1), EG_BAD_REQUEST, ctx, "event") && refused(eg_event_record(ctx, foreign), EG_BAD_REQUEST, ctx, "event") &&
+             eg_event_free(host, foreign) == EG_OK && eg_event_free(ctx, e0) == EG_OK && eg_event_free(ctx, NULL) == EG_OK;
+        check(ok, "eg_event_free ends a device event's life: freed twice, used after, and an event of another context are refused BAD_REQUEST");
+    }
+}
+
 int main(int argc, char** argv) {
     if (argc != 3) {
         fprintf(stderr, "usage: %s <libfixture_device.so> <libfixture_unit.so>\n", argv[0]);
@@ -3125,6 +3381,8 @@ int main(int argc, char** argv) {
           "a device plane in a host plan refused BAD_REQUEST");
     eg_plan_free(ctx, hp);
     copy_across(ctx);
+    device_streams(ctx, host);
+    device_events(ctx, host);
     struct eg_reduce_desc rd;
     memset(&rd, 0, sizeof(rd));
     rd.struct_size = sizeof(rd);

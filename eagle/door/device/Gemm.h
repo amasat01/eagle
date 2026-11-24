@@ -12,6 +12,8 @@ namespace door {
 
 /** @brief Make the cuBLAS handle of @p stream if the context has none: opens cuBLAS the first time (EG_FAULT naming the libraries tried). */
 void gemm_handle_make(eg_ctx& ctx, std::uint64_t stream);
+/** @brief Destroy the cuBLAS handle of @p stream, if the context made one (the stream is about to be destroyed). */
+void gemm_handle_drop(eg_ctx& ctx, std::uint64_t stream) noexcept;
 /** @brief Destroy every cuBLAS handle of @p ctx. */
 void gemm_handles_free(eg_ctx& ctx) noexcept;
 /** @brief Queue one row-major product on @p stream, with the handle made for that stream (never makes one): C (+)= op(A) op(B) as

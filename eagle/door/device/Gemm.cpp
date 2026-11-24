@@ -106,6 +106,13 @@ void gemm_handle_make(eg_ctx& ctx, std::uint64_t stream) {
     ctx.dev.gemm_handles[stream] = reinterpret_cast<std::uint64_t>(handle);
 }
 
+void gemm_handle_drop(eg_ctx& ctx, std::uint64_t stream) noexcept {
+    const auto at = ctx.dev.gemm_handles.find(stream);
+    if (at == ctx.dev.gemm_handles.end()) return;
+    cublas().destroy(reinterpret_cast<void*>(at->second));
+    ctx.dev.gemm_handles.erase(at);
+}
+
 void gemm_handles_free(eg_ctx& ctx) noexcept {
     for (const auto& h : ctx.dev.gemm_handles) cublas().destroy(reinterpret_cast<void*>(h.second));
     ctx.dev.gemm_handles.clear();

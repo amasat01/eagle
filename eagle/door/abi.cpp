@@ -379,32 +379,32 @@ EG_EXPORT eg_status eg_stream_sync(eg_ctx* ctx, uint64_t stream) {
 
 EG_EXPORT eg_status eg_event_new(eg_ctx* ctx, eg_event** out) {
     return door::call(ctx, [out](eg_ctx& c) {
-        door::device_events_check(c, "eg_event_new");
+        if (c.dev.ordinal >= 0) return door::device_event_new(c, out);
         door::event_new(c, out);
     });
 }
 EG_EXPORT eg_status eg_event_free(eg_ctx* ctx, eg_event* event) {
     if (event == nullptr) return EG_OK;
     return door::call(ctx, [event](eg_ctx& c) {
-        door::device_events_check(c, "eg_event_free");
+        if (c.dev.ordinal >= 0) return door::device_event_free(c, event);
         door::event_free(c, event);
     });
 }
 EG_EXPORT eg_status eg_event_record(eg_ctx* ctx, eg_event* event) {
     return door::call(ctx, [event](eg_ctx& c) {
-        door::device_events_check(c, "eg_event_record");
+        if (c.dev.ordinal >= 0) return door::device_event_record(c, event);
         door::event_record(c, event);
     });
 }
 EG_EXPORT eg_status eg_event_wait(eg_ctx* ctx, eg_event* event) {
     return door::call(ctx, [event](eg_ctx& c) {
-        door::device_events_check(c, "eg_event_wait");
+        if (c.dev.ordinal >= 0) return door::device_event_wait(c, event);
         door::event_wait(c, event);
     });
 }
 EG_EXPORT eg_status eg_event_elapsed(eg_ctx* ctx, const eg_event* start, const eg_event* stop, double* ms) {
     return door::call(ctx, [=](eg_ctx& c) {
-        door::device_events_check(c, "eg_event_elapsed");
+        if (c.dev.ordinal >= 0) return door::device_event_elapsed(c, start, stop, ms);
         door::event_elapsed(c, start, stop, ms);
     });
 }
