@@ -1277,6 +1277,8 @@ static void dcount_free(eg_ctx* ctx, struct dcount* c) {
     cudaFree(c->dm);
 }
 
+static void runner_follows_scope(eg_ctx* ctx, eg_unit* active);
+
 /* Run, eg_runner_reset, write the inputs again, run again: planes and report bitwise those of a fresh runner's run. */
 static void reset_device_case(eg_ctx* ctx, eg_unit* unit, int64_t every, double theta, const char* what) {
     static struct dcount fresh, reused;
@@ -1748,6 +1750,7 @@ static void reset_device(eg_ctx* ctx, const char* dev_lib) {
         cudaStreamDestroy(sa);
         cudaStreamDestroy(sb);
     }
+    runner_follows_scope(ctx, active);
     eg_unit_free(ctx, plain);
     eg_unit_free(ctx, active);
 }
@@ -3220,6 +3223,50 @@ static void device_events(eg_ctx* ctx, eg_ctx* host) {
              eg_event_free(host, foreign) == EG_OK && eg_event_free(ctx, e0) == EG_OK && eg_event_free(ctx, NULL) == EG_OK;
         check(ok, "eg_event_free ends a device event's life: freed twice, used after, and an event of another context are refused BAD_REQUEST");
     }
+}
+
+/* Opens the gate after @p arg seconds, so a run that waits behind it fails the row instead of hanging the test. */
+static void* open_gate_later(void* arg) {
+    const struct timespec nap = { 0, 100000000 };
+    for (int tenths = 0; tenths < 10 * *(const int*)arg && !gate_open; ++tenths) nanosleep(&nap, NULL);
+    gate_open = 1;
+    return NULL;
+}
+
+/* A runner's run to completion inside a stream scope lands on that stream: the context's own stream is held by a gate, the run is
+ * made and executed with a library stream in scope, and it finishes with the values of a fresh runner's run on the own stream. */
+static void runner_follows_scope(eg_ctx* ctx, eg_unit* active) {
+    static struct dcount fresh, held;
+    static int watchdog_seconds = 20;
+    struct eg_run_report report_fresh, report_held;
+    uint64_t scope = 0;
+    gate_open = 0;
+    int ok = eg_stream_use(ctx, 0) == EG_OK && dcount_new(ctx, active, 4, 0.5, &fresh) == EG_OK;
+    if (ok) dcount_inputs(&fresh), ok = dcount_run(ctx, &fresh, &report_fresh) == EG_OK;
+    const int64_t own = ok ? stream_in_scope(ctx) : -1;
+    ok = ok && own > 0 && eg_stream_new(ctx, NULL, &scope) == EG_OK && eg_stream_use(ctx, scope) == EG_OK &&
+         dcount_new(ctx, active, 4, 0.5, &held) == EG_OK;
+    if (ok) dcount_inputs(&held);
+    pthread_t watchdog = 0;
+    ok = ok && cudaLaunchHostFunc((cudaStream_t)own, wait_for_gate, (void*)&gate_open) == cudaSuccess &&
+         pthread_create(&watchdog, NULL, open_gate_later, &watchdog_seconds) == 0;
+    memset(&report_held, 0, sizeof(report_held));
+    report_held.struct_size = sizeof(report_held);
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    ok = ok && eg_run(ctx, held.runner, &report_held) == EG_OK && eg_stream_sync(ctx, scope) == EG_OK;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    const int finished_behind_the_gate = ok && !gate_open && t1.tv_sec - t0.tv_sec < 10;
+    cudaMemcpy(held.k, held.dk, sizeof(held.k), cudaMemcpyDeviceToHost);
+    cudaMemcpy(held.mask, held.dm, sizeof(held.mask), cudaMemcpyDeviceToHost);
+    check(ok && finished_behind_the_gate && memcmp(held.k, fresh.k, sizeof(held.k)) == 0 && memcmp(held.mask, fresh.mask, sizeof(held.mask)) == 0,
+          "a runner's run inside a library stream's scope finishes while the context's own stream is held, with the values of a fresh runner's run");
+    gate_open = 1;
+    if (watchdog != 0) pthread_join(watchdog, NULL);
+    eg_stream_use(ctx, 0);
+    dcount_free(ctx, &held);
+    dcount_free(ctx, &fresh);
+    check(eg_stream_free(ctx, scope) == EG_OK, "the library stream of the runner row is freed");
 }
 
 int main(int argc, char** argv) {
