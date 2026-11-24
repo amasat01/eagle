@@ -3467,6 +3467,31 @@ static void device_scans(eg_ctx* ctx) {
         cudaFree(din);
         cudaFree(dout);
     }
+    {   /* planes that start off a 16-byte boundary take the scalar path and equal the sequential loop */
+        const int64_t n = 100003;
+        static double host_in[100004], host_out[100004];
+        double *din = NULL, *dout = NULL;
+        int ok = cudaMalloc((void**)&din, (size_t)(n + 1) * 8) == cudaSuccess && cudaMalloc((void**)&dout, (size_t)(n + 1) * 8) == cudaSuccess;
+        for (int64_t i = 0; i < n; ++i) host_in[i] = (double)(1 + i % 5);
+        ok = ok && cudaMemcpy(din + 1, host_in, (size_t)n * 8, cudaMemcpyHostToDevice) == cudaSuccess;
+        struct tensor ti, to;
+        eg_plane* pi = ok ? wrap_device_typed(ctx, &ti, din + 1, n, kDLFloat, 64) : NULL;
+        eg_plane* po = ok ? wrap_device_typed(ctx, &to, dout + 1, n, kDLFloat, 64) : NULL;
+        struct eg_scan_desc desc = { sizeof(struct eg_scan_desc), 0, pi, po, EG_SCAN_SUM };
+        cudaDeviceSynchronize();
+        ok = ok && pi && po && eg_scan(ctx, &desc) == EG_OK && eg_sync(ctx) == EG_OK &&
+             cudaMemcpy(host_out, dout + 1, (size_t)n * 8, cudaMemcpyDeviceToHost) == cudaSuccess;
+        double acc = 0.0;
+        for (int64_t i = 0; ok && i < n; ++i) {
+            acc += host_in[i];
+            ok = host_out[i] == acc;
+        }
+        check(ok, "eg_scan of float64 planes that start 8 bytes off a 16-byte boundary equals the sequential loop");
+        eg_plane_free(ctx, pi);
+        eg_plane_free(ctx, po);
+        cudaFree(din);
+        cudaFree(dout);
+    }
     {   /* a real sum is the same bits on every run */
         const int64_t n = 3000003;
         float* host = (float*)malloc((size_t)n * sizeof(float));
@@ -3493,6 +3518,175 @@ static void device_scans(eg_ctx* ctx) {
         free(host);
         free(first);
         free(again);
+    }
+}
+
+/* ---- eg_compact on a device context ------------------------------------------------------------------------------------- */
+
+/* The mask byte of lane @p i for the pattern @p pattern: 0 about half kept, 1 all kept, 2 none kept, 3 one lane in a thousand. A kept byte
+ * is 1 or another non-zero value, because any non-zero byte keeps. */
+static uint8_t compact_mask(int pattern, uint64_t seed, int64_t i) {
+    const uint64_t bits = mix64(seed * 0x2545F4914F6CDD1Dull + (uint64_t)i);
+    const uint8_t loud = (bits >> 40) & 1 ? 1 : 0xC3;
+    if (pattern == 1) return loud;
+    if (pattern == 2) return 0;
+    if (pattern == 3) return bits % 1000 == 0 ? loud : 0;
+    return (bits & 1) ? loud : 0;
+}
+
+/* Wrong entries when eg_compact runs over @p n lanes of the pattern with a kept plane of the type @p code (kDLInt or kDLUInt): the count, the
+ * first count entries of kept (the lane indices in order) and the untouched tail, against the sequential loop. -1: the call failed. */
+static int64_t compact_rows(eg_ctx* ctx, uint8_t code, int pattern, int64_t n, eg_status* status) {
+    static uint8_t hmask[SCAN_CHUNK];
+    static uint32_t hkept[SCAN_CHUNK];
+    uint8_t* dkeep = NULL;
+    uint32_t *dkept = NULL, *dcount = NULL;
+    const int64_t alloc = n > 0 ? n : 1;
+    const uint64_t seed = 21 + (uint64_t)n + (uint64_t)pattern;
+    const uint32_t sentinel = 0x5A5A5A5Au;
+    *status = EG_FAULT;
+    if (cudaMalloc((void**)&dkeep, (size_t)alloc) != cudaSuccess || cudaMalloc((void**)&dkept, (size_t)alloc * 4) != cudaSuccess ||
+        cudaMalloc((void**)&dcount, 4) != cudaSuccess) {
+        cudaFree(dkeep);
+        cudaFree(dkept);
+        return -1;
+    }
+    for (int64_t at = 0; at < n; at += SCAN_CHUNK) {
+        const int64_t c = n - at < SCAN_CHUNK ? n - at : SCAN_CHUNK;
+        for (int64_t i = 0; i < c; ++i) hmask[i] = compact_mask(pattern, seed, at + i);
+        cudaMemcpy(dkeep + at, hmask, (size_t)c, cudaMemcpyHostToDevice);
+    }
+    cudaMemset(dkept, 0x5A, (size_t)alloc * 4);
+    cudaMemset(dcount, 0xFF, 4);
+    cudaDeviceSynchronize();
+    struct tensor tk, tx, tc;
+    eg_plane* pk = wrap_device_typed(ctx, &tk, dkeep, n, kDLBool, 8);
+    eg_plane* px = wrap_device_typed(ctx, &tx, dkept, n, code, 32);
+    eg_plane* pc = wrap_device_typed(ctx, &tc, dcount, 1, kDLUInt, 32);
+    int64_t bad = -1;
+    if (pk && px && pc) {
+        struct eg_compact_desc d = { sizeof(struct eg_compact_desc), 0, pk, px, pc };
+        *status = eg_compact(ctx, &d);
+        uint32_t count = 0;
+        if (*status == EG_OK && eg_sync(ctx) == EG_OK && cudaMemcpy(&count, dcount, 4, cudaMemcpyDeviceToHost) == cudaSuccess) {
+            bad = 0;
+            int64_t expected = 0, chunk_at = -SCAN_CHUNK;
+            for (int64_t at = 0; at < n; at += SCAN_CHUNK) {
+                const int64_t c = n - at < SCAN_CHUNK ? n - at : SCAN_CHUNK;
+                for (int64_t i = 0; i < c; ++i) {
+                    if (compact_mask(pattern, seed, at + i) == 0) continue;
+                    if (expected >= chunk_at + SCAN_CHUNK || expected < chunk_at) {
+                        chunk_at = expected;
+                        const int64_t m = (int64_t)alloc - chunk_at < SCAN_CHUNK ? (int64_t)alloc - chunk_at : SCAN_CHUNK;
+                        cudaMemcpy(hkept, dkept + chunk_at, (size_t)m * 4, cudaMemcpyDeviceToHost);
+                    }
+                    bad += hkept[expected - chunk_at] != (uint32_t)(at + i);
+                    ++expected;
+                }
+            }
+            bad += (int64_t)count != expected;
+            for (int64_t at = expected; at < n; at += SCAN_CHUNK) {    /* the tail holds what it held */
+                const int64_t m = n - at < SCAN_CHUNK ? n - at : SCAN_CHUNK;
+                cudaMemcpy(hkept, dkept + at, (size_t)m * 4, cudaMemcpyDeviceToHost);
+                for (int64_t i = 0; i < m; ++i) bad += hkept[i] != sentinel;
+            }
+        }
+    }
+    eg_plane_free(ctx, pk);
+    eg_plane_free(ctx, px);
+    eg_plane_free(ctx, pc);
+    cudaFree(dkeep);
+    cudaFree(dkept);
+    cudaFree(dcount);
+    return bad;
+}
+
+/* eg_compact on a device context: both index types, four mask patterns, the sizes where a tile ends, and the largest the card holds. */
+static void device_compactions(eg_ctx* ctx) {
+    const char* const patterns[4] = { "about half kept", "all kept", "none kept", "one lane in a thousand kept" };
+    size_t free_bytes = 0, total_bytes = 0;
+    cudaMemGetInfo(&free_bytes, &total_bytes);
+    const int64_t tile = 128 * 16, largest = (int64_t)((double)free_bytes * 0.4 / 5.0);
+    const int64_t sizes[10] = { 0, 1, 15, tile - 1, tile, tile + 1, 3 * tile + 17, 128 * tile + 5, 4000003, largest };
+    for (int type = 0; type < 2; ++type)
+        for (int pattern = 0; pattern < 4; ++pattern) {
+            int ok = 1;
+            for (int s = 0; s < 10; ++s) {
+                eg_status status = EG_OK;
+                const int64_t bad = compact_rows(ctx, type == 0 ? kDLInt : kDLUInt, pattern, sizes[s], &status);
+                ok = ok && status == EG_OK && bad == 0;
+                if (!(status == EG_OK && bad == 0))
+                    printf("      %s %s n=%lld: status %d, %lld wrong\n", type == 0 ? "int32" : "uint32", patterns[pattern], (long long)sizes[s], (int)status, (long long)bad);
+            }
+            char what[200];
+            snprintf(what, sizeof(what), "eg_compact on the device, %s kept, %s: sizes 0, 1, 15, tile-1, tile, tile+1, 3 tiles+17, a group+5, 4000003 and %lld lanes equal the sequential loop",
+                     type == 0 ? "int32" : "uint32", patterns[pattern], (long long)largest);
+            check(ok, what);
+        }
+    {   /* a mask that starts off a 16-byte boundary takes the scalar path */
+        const int64_t n = 50021;
+        static uint8_t host_mask[50021];
+        static uint32_t host_kept[50021];
+        uint8_t* dkeep = NULL;
+        uint32_t *dkept = NULL, *dcount = NULL;
+        int ok = cudaMalloc((void**)&dkeep, (size_t)n + 1) == cudaSuccess && cudaMalloc((void**)&dkept, (size_t)n * 4) == cudaSuccess && cudaMalloc((void**)&dcount, 4) == cudaSuccess;
+        for (int64_t i = 0; i < n; ++i) host_mask[i] = compact_mask(0, 5, i);
+        ok = ok && cudaMemcpy(dkeep + 1, host_mask, (size_t)n, cudaMemcpyHostToDevice) == cudaSuccess;
+        struct tensor tk, tx, tc;
+        eg_plane* pk = ok ? wrap_device_typed(ctx, &tk, dkeep + 1, n, kDLBool, 8) : NULL;
+        eg_plane* px = ok ? wrap_device_typed(ctx, &tx, dkept, n, kDLUInt, 32) : NULL;
+        eg_plane* pc = ok ? wrap_device_typed(ctx, &tc, dcount, 1, kDLUInt, 32) : NULL;
+        struct eg_compact_desc d = { sizeof(struct eg_compact_desc), 0, pk, px, pc };
+        cudaDeviceSynchronize();
+        uint32_t count = 0, expected = 0;
+        ok = ok && pk && px && pc && eg_compact(ctx, &d) == EG_OK && eg_sync(ctx) == EG_OK && cudaMemcpy(&count, dcount, 4, cudaMemcpyDeviceToHost) == cudaSuccess &&
+             cudaMemcpy(host_kept, dkept, (size_t)n * 4, cudaMemcpyDeviceToHost) == cudaSuccess;
+        for (int64_t i = 0; ok && i < n; ++i)
+            if (host_mask[i] != 0) ok = host_kept[expected++] == (uint32_t)i;
+        check(ok && count == expected, "eg_compact of a mask that starts 1 byte off a 16-byte boundary equals the sequential loop");
+        eg_plane_free(ctx, pk);
+        eg_plane_free(ctx, px);
+        eg_plane_free(ctx, pc);
+        cudaFree(dkeep);
+        cudaFree(dkept);
+        cudaFree(dcount);
+    }
+    {   /* recorded once and replayed on two masks */
+        const int64_t n = 100003;
+        static uint8_t host_mask[100003];
+        static uint32_t host_kept[100003];
+        uint8_t* dkeep = NULL;
+        uint32_t *dkept = NULL, *dcount = NULL;
+        int ok = cudaMalloc((void**)&dkeep, (size_t)n) == cudaSuccess && cudaMalloc((void**)&dkept, (size_t)n * 4) == cudaSuccess &&
+                 cudaMalloc((void**)&dcount, 4) == cudaSuccess;
+        struct tensor tk, tx, tc;
+        eg_plane* pk = ok ? wrap_device_typed(ctx, &tk, dkeep, n, kDLBool, 8) : NULL;
+        eg_plane* px = ok ? wrap_device_typed(ctx, &tx, dkept, n, kDLInt, 32) : NULL;
+        eg_plane* pc = ok ? wrap_device_typed(ctx, &tc, dcount, 1, kDLUInt, 32) : NULL;
+        struct eg_compact_desc d = { sizeof(struct eg_compact_desc), 0, pk, px, pc };
+        eg_graph* g = NULL;
+        ok = ok && pk && px && pc && eg_record_begin(ctx) == EG_OK && eg_compact(ctx, &d) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK;
+        for (int run = 0; ok && run < 2; ++run) {
+            for (int64_t i = 0; i < n; ++i) host_mask[i] = compact_mask(run == 0 ? 0 : 3, 77 + (uint64_t)run, i);
+            cudaMemcpy(dkeep, host_mask, (size_t)n, cudaMemcpyHostToDevice);
+            cudaMemset(dkept, 0x5A, (size_t)n * 4);
+            cudaDeviceSynchronize();
+            uint32_t count = 0;
+            ok = eg_graph_launch(ctx, g) == EG_OK && eg_sync(ctx) == EG_OK && cudaMemcpy(&count, dcount, 4, cudaMemcpyDeviceToHost) == cudaSuccess &&
+                 cudaMemcpy(host_kept, dkept, (size_t)n * 4, cudaMemcpyDeviceToHost) == cudaSuccess;
+            uint32_t expected = 0;
+            for (int64_t i = 0; ok && i < n; ++i)
+                if (host_mask[i] != 0) ok = host_kept[expected++] == (uint32_t)i;
+            ok = ok && count == expected;
+        }
+        check(ok, "eg_compact recorded in a device graph and replayed on two masks equals the sequential loop");
+        if (g) eg_graph_free(ctx, g);
+        eg_plane_free(ctx, pk);
+        eg_plane_free(ctx, px);
+        eg_plane_free(ctx, pc);
+        cudaFree(dkeep);
+        cudaFree(dkept);
+        cudaFree(dcount);
     }
 }
 
@@ -3658,6 +3852,7 @@ int main(int argc, char** argv) {
     device_streams(ctx, host);
     device_events(ctx, host);
     device_scans(ctx);
+    device_compactions(ctx);
     struct eg_reduce_desc rd;
     memset(&rd, 0, sizeof(rd));
     rd.struct_size = sizeof(rd);

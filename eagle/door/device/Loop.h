@@ -139,6 +139,14 @@ void* scan_state_make(std::size_t bytes);
 /** @brief Free scan working memory (NULL-safe): waits for the device. */
 void scan_state_free(void* state) noexcept;
 
+/** @brief The bytes of working memory a device compaction over @p n lanes needs (zeroed, like a scan's, and left zero). */
+std::size_t compact_state_bytes(std::int64_t n);
+
+/** @brief Queue on @p stream the compaction of the @p n (above 0) mask bytes of @p keep: ``kept[j]`` (32-bit) is the index of the
+ *  j-th lane whose byte is non-zero, for j below ``*count`` (32-bit), which receives their number; the rest of @p kept is not
+ *  written. @p state is ``compact_state_bytes`` of zeroed working memory, left zero. Nothing waits. */
+void compact_step(std::uint64_t stream, const void* keep, void* kept, void* count, std::int64_t n, void* state);
+
 /** @brief Queue on @p stream the scan of the @p n (above 0) values of @p in into @p out (distinct): ``out[i]`` folds ``in[0..i]``
  *  (``in[0..i-1]`` when @p exclusive) with @p fold (0 sum, 1 minimum, 2 maximum) from its identity; @p state is
  *  ``scan_state_bytes`` of ZEROED working memory, left zero. Nothing waits. A real sum has the same bits on every run. */

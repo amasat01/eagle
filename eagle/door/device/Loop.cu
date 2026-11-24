@@ -311,6 +311,14 @@ void scan_state_free(void* state) noexcept {
     if (state != nullptr) (void)cudaFree(state);
 }
 
+std::size_t compact_state_bytes(std::int64_t n) { return scan::compact_state_bytes(n); }
+
+void compact_step(std::uint64_t stream, const void* keep, void* kept, void* count, std::int64_t n, void* state) {
+    scan::compact_queue(reinterpret_cast<cudaStream_t>(stream), static_cast<const std::uint8_t*>(keep), static_cast<std::uint32_t*>(kept),
+                        static_cast<std::uint32_t*>(count), n, state);
+    EAGLE_CHECK_ALWAYS(cudaGetLastError());
+}
+
 void scan_step(std::uint64_t stream, ScanElement type, int fold, bool exclusive, const void* in, void* out, std::int64_t n, void* state) {
     const auto s = reinterpret_cast<cudaStream_t>(stream);
     switch (type) {

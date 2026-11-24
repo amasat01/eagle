@@ -1377,8 +1377,32 @@ void device_scan(eg_ctx& ctx, const eg_scan_desc& d) {
     }
 }
 
-/** @brief eg_compact over device planes: not written yet. */
-void device_compact(eg_ctx&, const eg_compact_desc&) { refuse(EG_NOT_WRITTEN, "eg_compact: not written for a device context"); }
+/** @brief eg_compact over device planes: the checks and the node are the host's; the compaction is one pass over the mask
+ *  (device/ScanKernels.cuh) on the stream in scope of the calling thread, with the working memory of a scan. */
+void device_compact(eg_ctx& ctx, const eg_compact_desc& d) {
+    const host::CompactOp c = host::compact_check(ctx, d);
+    const auto at = [](const eg_plane_s* p) -> void* {
+        return static_cast<char*>(p->tensor->dl_tensor.data) + p->tensor->dl_tensor.byte_offset;
+    };
+    Node leaf;
+    leaf.kind = Node::Compact;
+    leaf.compact = c;
+    note_leaf(ctx, "eg_compact", { { c.keep, 0, -1, "keep" }, { c.kept, 1, -1, "kept" }, { c.count, 1, -1, "count" } }, std::move(leaf));
+    const std::uint64_t stream = ctx.dev.stream;
+    Current current(ctx.dev);
+    if (c.n == 0) {
+        zero_bytes(stream, at(c.count), sizeof(std::uint32_t));
+        return;
+    }
+    const std::size_t bytes = compact_state_bytes(c.n);
+    if (ctx.dev_rec != nullptr) {
+        void* state = alloc_async(stream, bytes, true);
+        compact_step(stream, at(c.keep), at(c.kept), at(c.count), c.n, state);
+        free_async(stream, stream, state);
+    } else {
+        compact_step(stream, at(c.keep), at(c.kept), at(c.count), c.n, scan_state_for(ctx, stream, bytes));
+    }
+}
 
 /** @brief The checked reduce @p r on the context's stream, kept in the recording if there is one. */
 void device_reduce_leaf(eg_ctx& ctx, const host::ReduceOp& r) {
