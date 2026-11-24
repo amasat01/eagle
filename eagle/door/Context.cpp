@@ -27,8 +27,10 @@ void check_settings(eg_ctx& ctx, const eg_ctx_settings* in) {
                ": this eagle speaks eagle-door/" + std::to_string(EG_DOOR_VERSION_MAJOR));
     if (!(s.flags & EG_CTX_DEVICE)) {
         if (s.device != 0)
-            refuse(EG_BAD_REQUEST, "eg_ctx_settings.device " + std::to_string(s.device) +
-                   " without EG_CTX_DEVICE: a host-only context takes device 0");
+            refuse(EG_BAD_REQUEST,
+                "eg_ctx_settings.device " + std::to_string(s.device)
+                    + " without EG_CTX_DEVICE: host-only context: it has one "
+                      "member, device 0");
         return;
     }
     if (s.device < 0)

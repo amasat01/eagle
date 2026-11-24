@@ -27,7 +27,8 @@ namespace {
 std::vector<eg_plane_s*> planes_of(const Node& n) {
     switch (n.kind) {
         case Node::Reduce: return { n.reduce.in, n.reduce.out, n.reduce.comp, n.reduce.index };
-        case Node::Scan: return { n.scan.in, n.scan.out };
+        case Node::Scan:
+            return { n.scan.in, n.scan.out, n.scan.index };
         case Node::Compact: return { n.compact.keep, n.compact.kept, n.compact.count };
         case Node::Order:
             return { n.order.keys, n.order.order, n.order.starts };
@@ -170,6 +171,7 @@ std::vector<PlaneUse> uses_of(const Node& n) {
         case Node::Scan:
             add(n.scan.in, "in", 0);
             add(n.scan.out, "out", 1);
+            add(n.scan.index, "index", 1);
             break;
         case Node::Copy:
         case Node::Fft:

@@ -42,6 +42,7 @@ ReduceOp cell_reduce_check(const eg_ctx& ctx, eg_reduce_desc desc, bool position
 struct ScanOp {
     eg_plane_s* in = nullptr;
     eg_plane_s* out = nullptr;
+    eg_plane_s* index = nullptr; ///< the running winner's lane, or none
     eg_scan_op op = EG_SCAN_SUM;
     bool exclusive = false;
     std::int32_t code = 0;
@@ -57,9 +58,12 @@ void scan_exec(const ScanOp& s, int threads);
  * @p dy, the adjoint of ``out``, and @p in, the values the scan read (not read
  * for a sum). A sum is the suffix scan of @p dy, inclusive for an inclusive
  * scan and exclusive for an exclusive one, run by the forward's own machinery
- * over the reversed adjoint, so the bits are the same at any @p threads. */
-void scan_pullback(
-    const ScanOp& s, const char* in, const char* dy, char* bar, int threads);
+ * over the reversed adjoint, so the bits are the same at any @p threads. A
+ * minimum or maximum goes to the winners the forward wrote (@p winners, int32,
+ * the extent of ``in``), or when that is null to the winners of the forward's
+ * own scan over @p in. */
+void scan_pullback(const ScanOp& s, const char* in, const char* dy, char* bar,
+    int threads, const std::int32_t* winners = nullptr);
 
 /** @brief A checked compaction: the three planes and the extent. */
 struct CompactOp {

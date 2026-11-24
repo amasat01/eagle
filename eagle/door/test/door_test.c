@@ -439,8 +439,10 @@ static void check_settings(void) {
     if (!device_group)    /* with the group, a device context is made or refused for want of a device: check_device_count */
         check(settings_status(sizeof(struct eg_ctx_settings), EG_CTX_DEVICE, 0) == EG_NOT_WRITTEN,
               "EG_CTX_DEVICE refused NOT_WRITTEN (device group not built)");
-    check(settings_status(sizeof(struct eg_ctx_settings), 0, 1) == EG_BAD_REQUEST,
-          "device != 0 without EG_CTX_DEVICE refused BAD_REQUEST");
+    check(
+        settings_status(sizeof(struct eg_ctx_settings), 0, 1) == EG_BAD_REQUEST,
+        "device != 0 without EG_CTX_DEVICE refused BAD_REQUEST (a host-only "
+        "context has one member)");
 }
 
 static void check_bad_input(eg_ctx* ctx, eg_unit* unit) {
@@ -4905,6 +4907,54 @@ static void check_alloc(eg_ctx* ctx, eg_unit* axpb) {
         ok = ok && eg_plane_free(ctx, q) == EG_OK && eg_plane_dlpack(ctx, q, &e) == EG_BAD_REQUEST && e == NULL;
         check(ok, "eg_plane_dlpack: a NULL out, a NULL plane and a freed plane each refused BAD_REQUEST by reason");
     }
+    { /* the member a plane sits on: the default and member 0 are the host's one
+         member, another is refused by name */
+        eg_plane *q0 = NULL, *q1 = NULL, *q2 = NULL;
+        struct eg_plane_desc m = d;
+        m.device               = EG_DEVICE_DEFAULT;
+        ok                     = eg_plane_new(ctx, &m, &q0) == EG_OK;
+        m.device               = 0;
+        ok                     = ok && eg_plane_new(ctx, &m, &q1) == EG_OK;
+        check(ok,
+            "eg_plane_new with device EG_DEVICE_DEFAULT and with member 0: "
+            "both the host's one member");
+        m.device = 1;
+        ok       = eg_plane_new(ctx, &m, &q2) == EG_BAD_REQUEST && q2 == NULL
+            && reason_has(ctx, "host-only context: it has one member");
+        check(ok,
+            "eg_plane_new on member 1 of a host-only context: BAD_REQUEST, "
+            "\"host-only context: it has one member\"");
+        struct eg_plane_desc old = d;
+        old.struct_size = (uint32_t)offsetof(struct eg_plane_desc, device);
+        old.device      = 7; /* beyond the struct_size: never read */
+        eg_plane* q3    = NULL;
+        check(eg_plane_new(ctx, &old, &q3) == EG_OK && q3 != NULL,
+            "eg_plane_new with a struct_size that stops before device: "
+            "accepted, the default member");
+        eg_plane_free(ctx, q0);
+        eg_plane_free(ctx, q1);
+        eg_plane_free(ctx, q3);
+    }
+    { /* a wrapped plane states its member by its DLPack device: only the host's
+         is taken */
+        static double w[4];
+        struct tensor t;
+        eg_plane* q = NULL;
+        tensor_init(&t, w, 4, 64);
+        t.managed.dl_tensor.device.device_id = 1;
+        ok = eg_plane_wrap(ctx, &t.managed, &q) == EG_BAD_REQUEST && q == NULL
+            && t.deleted == 0 && reason_has(ctx, "host memory has one member");
+        check(ok,
+            "eg_plane_wrap of a kDLCPU tensor of device 1: BAD_REQUEST by "
+            "name, the caller keeps the tensor");
+        t.managed.dl_tensor.device.device_id   = 0;
+        t.managed.dl_tensor.device.device_type = kDLCUDA;
+        ok = eg_plane_wrap(ctx, &t.managed, &q) != EG_OK && q == NULL
+            && t.deleted == 0 && reason_has(ctx, "host-only context");
+        check(ok,
+            "eg_plane_wrap of a kDLCUDA tensor on a host-only context: refused "
+            "by name, the caller keeps the tensor");
+    }
 }
 
 /* eg_runner_figures and eg_plan_entry_figures on the host: no launch figures and no device entry, by a flag and -1, not by
@@ -5337,6 +5387,218 @@ static void check_scan(eg_ctx* ctx) {
     eg_plane_free(ctx, px);
     eg_plane_free(ctx, p1);
     eg_plane_free(ctx, pm);
+}
+
+/* ---- eg_scan with a running winner
+ * ------------------------------------------- */
+
+static eg_status scan_winner_do(eg_ctx* ctx, eg_plane* in, eg_plane* out,
+    eg_plane* index, eg_scan_op op, uint32_t flags)
+{
+    struct eg_scan_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.flags       = flags;
+    d.in          = in;
+    d.out         = out;
+    d.op          = op;
+    d.index       = index;
+    return eg_scan(ctx, &d);
+}
+
+/* The value of lane @p i as a double: exact for the integers used (below 2^31)
+ * and for the reals. */
+static double winner_value(const void* buf, int i, uint8_t code, uint8_t bits)
+{
+    return code == kDLFloat ? scan_load_real(buf, i, bits)
+                            : (double)scan_load(buf, i, code, bits);
+}
+
+/* The oracle: the running winner of every prefix by the loop that keeps the
+ * first of equals, a NaN never a candidate, the lane count n for no lane. */
+static void winner_want(const void* in, int32_t* want, int n, uint8_t code,
+    uint8_t bits, eg_scan_op op, int exclusive)
+{
+    int best = -1;
+    for (int i = 0; i < n; ++i) {
+        if (exclusive)
+            want[i] = best < 0 ? n : best;
+        const double v = winner_value(in, i, code, bits);
+        if (!isnan(v)
+            && (best < 0
+                || (op == EG_SCAN_MIN
+                        ? v < winner_value(in, best, code, bits)
+                        : v > winner_value(in, best, code, bits))))
+            best = i;
+        if (!exclusive)
+            want[i] = best < 0 ? n : best;
+    }
+}
+
+/* One scan with a winner over n lanes of one type, ties everywhere and, on a
+ * real type, NaN lanes (a leading run included): the index equals the loop, the
+ * values equal the scan without an index, byte for byte at 1, 4 and the default
+ * threads. */
+static int scan_winner_case(eg_ctx* ctx, uint8_t code, uint8_t bits, int n,
+    eg_scan_op op, int exclusive)
+{
+    static unsigned char in[SCAN_MAX_N * 8], plain[SCAN_MAX_N * 8],
+        out[SCAN_MAX_N * 8];
+    static int32_t lanes[SCAN_MAX_N], first[SCAN_MAX_N], want[SCAN_MAX_N];
+    for (int i = 0; i < n; ++i) {
+        const int nan = code == kDLFloat && (i < 3 || i % 13 == 5);
+        if (nan) {
+            if (bits == 32)
+                ((float*)in)[i] = NAN;
+            else
+                ((double*)in)[i] = NAN;
+        } else {
+            scan_store(
+                in, i, (long long)((i * 2654435761u) % 7) - 3, code, bits);
+        }
+    }
+    winner_want(in, want, n, code, bits, op, exclusive);
+    struct tensor ti, tp, to, tl;
+    eg_plane* pi               = wrap(ctx, &ti, in, n, code, bits);
+    eg_plane* pp               = wrap(ctx, &tp, plain, n, code, bits);
+    eg_plane* po               = wrap(ctx, &to, out, n, code, bits);
+    eg_plane* pl               = wrap(ctx, &tl, lanes, n, kDLInt, 32);
+    int ok                     = pi && pp && po && pl;
+    static const int threads[] = { 1, 4, 0 };
+    for (size_t t = 0; ok && t < 3; ++t) {
+        eg_host_threads(ctx, threads[t]);
+        memset(out, 0x55, (size_t)n * (bits / 8));
+        memset(lanes, 0x55, (size_t)n * sizeof(int32_t));
+        ok = scan_do(ctx, pi, pp, op, exclusive ? EG_SCAN_EXCLUSIVE : 0)
+                == EG_OK
+            && scan_winner_do(
+                   ctx, pi, po, pl, op, exclusive ? EG_SCAN_EXCLUSIVE : 0)
+                == EG_OK
+            && memcmp(lanes, want, (size_t)n * sizeof(int32_t)) == 0
+            && memcmp(out, plain, (size_t)n * (bits / 8)) == 0;
+        if (t == 0)
+            memcpy(first, lanes, (size_t)n * sizeof(int32_t));
+        else
+            ok = ok && memcmp(first, lanes, (size_t)n * sizeof(int32_t)) == 0;
+    }
+    eg_host_threads(ctx, 0);
+    eg_plane_free(ctx, pi);
+    eg_plane_free(ctx, pp);
+    eg_plane_free(ctx, po);
+    eg_plane_free(ctx, pl);
+    return ok;
+}
+
+static void check_scan_winner(eg_ctx* ctx)
+{
+    static const int sizes[] = { 0, 1, 255, 256, 257, 1025, SCAN_MAX_N };
+    static const struct {
+        uint8_t code, bits;
+        const char* name;
+    } types[] = { { kDLInt, 32, "int32" }, { kDLInt, 64, "int64" },
+        { kDLFloat, 32, "float32" }, { kDLFloat, 64, "float64" } };
+    for (size_t t = 0; t < sizeof(types) / sizeof(types[0]); ++t) {
+        int ok = 1;
+        for (size_t s = 0; ok && s < sizeof(sizes) / sizeof(sizes[0]); ++s)
+            for (int op = EG_SCAN_MIN; ok && op <= EG_SCAN_MAX; ++op)
+                for (int ex = 0; ok && ex < 2; ++ex)
+                    ok = scan_winner_case(ctx, types[t].code, types[t].bits,
+                        sizes[s], (eg_scan_op)op, ex);
+        char what[320];
+        snprintf(what, sizeof(what),
+            "eg_scan %s with a winner: min and max, inclusive and exclusive, "
+            "over 0, 1, 255, 256, 257, 1025 and 100000 lanes with ties and NaN "
+            "lanes, "
+            "the index equals the loop (lowest lane among equals, the lane "
+            "count for none), the values equal the scan without one, same "
+            "bytes at 1, 4 and the default threads",
+            types[t].name);
+        check(ok, what);
+    }
+
+    static double x[16], y[16], z[16];
+    static int32_t lanes[16];
+    struct tensor tx, ty, tz, tl;
+    eg_plane* px = wrap(ctx, &tx, x, 16, kDLFloat, 64);
+    eg_plane* py = wrap(ctx, &ty, y, 16, kDLFloat, 64);
+    eg_plane* pz = wrap(ctx, &tz, z, 16, kDLFloat, 64);
+    eg_plane* pl = wrap(ctx, &tl, lanes, 16, kDLInt, 32);
+    int ok       = px && py && pz && pl;
+    ok = ok && scan_winner_do(ctx, px, py, pl, EG_SCAN_SUM, 0) == EG_BAD_REQUEST
+        && reason_has(ctx, "takes op MIN or MAX only");
+    check(ok, "eg_scan with a winner and the op sum: BAD_REQUEST by name");
+    struct tensor tw, tb;
+    static int64_t wide[16];
+    static double bigger[20];
+    eg_plane* pw = wrap(ctx, &tw, wide, 16, kDLInt, 64);
+    eg_plane* pb = wrap(ctx, &tb, bigger, 20, kDLFloat, 64);
+    ok           = pw && pb
+        && scan_winner_do(ctx, px, py, pw, EG_SCAN_MIN, 0) == EG_BAD_REQUEST
+        && reason_has(ctx, "index must be an int32 plane")
+        && scan_winner_do(ctx, px, py, pb, EG_SCAN_MIN, 0) == EG_BAD_REQUEST
+        && scan_winner_do(ctx, px, py, px, EG_SCAN_MIN, 0) == EG_BAD_REQUEST
+        && scan_winner_do(ctx, px, py, py, EG_SCAN_MIN, 0) == EG_BAD_REQUEST
+        && reason_has(ctx, "index");
+    check(ok,
+        "eg_scan with an index that is not an int32 plane of the extent, or "
+        "that is another plane of the call: BAD_REQUEST");
+
+    for (int i = 0; i < 16; ++i)
+        x[i] = (double)(5 - i % 3);
+    memset(lanes, 0x55, sizeof(lanes));
+    struct eg_scan_desc old;
+    memset(&old, 0, sizeof(old));
+    old.struct_size = (uint32_t)offsetof(struct eg_scan_desc, index);
+    old.in          = px;
+    old.out         = py;
+    old.op          = EG_SCAN_MIN;
+    old.index       = pl; /* beyond the struct_size: never read */
+    int32_t untouched[16];
+    memset(untouched, 0x55, sizeof(untouched));
+    ok = eg_scan(ctx, &old) == EG_OK
+        && memcmp(lanes, untouched, sizeof(lanes)) == 0 && y[15] == 3.0;
+    check(ok,
+        "eg_scan with a struct_size that stops before index: accepted, no "
+        "winner written");
+
+    /* recorded: the node reads in and writes out and index; a replay writes the
+     * winners of the plane as it is then */
+    eg_graph* g = NULL;
+    struct eg_graph_description d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    ok            = eg_record_begin(ctx) == EG_OK
+        && scan_winner_do(ctx, px, py, pl, EG_SCAN_MAX, EG_SCAN_EXCLUSIVE)
+            == EG_OK
+        && eg_record_end(ctx, NULL, &g) == EG_OK
+        && eg_graph_describe(ctx, g, &d) == EG_OK && d.n_nodes == 1
+        && d.nodes[0].kind == EG_GNODE_SCAN && d.nodes[0].n_planes == 3
+        && d.nodes[0].planes[0] == px && d.nodes[0].access[0] == 1
+        && d.nodes[0].planes[1] == py && d.nodes[0].access[1] == 2
+        && d.nodes[0].planes[2] == pl && d.nodes[0].access[2] == 2;
+    memset(lanes, 0x55, sizeof(lanes));
+    x[0] = 1.0;
+    x[1] = 9.0;
+    x[2] = 9.0;
+    x[3] = 2.0;
+    ok   = ok && eg_graph_launch(ctx, g) == EG_OK && lanes[0] == 16
+        && lanes[1] == 0 && lanes[2] == 1 && lanes[3] == 1 && lanes[4] == 1;
+    x[0] = 10.0;
+    ok   = ok && eg_graph_launch(ctx, g) == EG_OK && lanes[1] == 0
+        && lanes[2] == 0 && lanes[4] == 0;
+    check(ok,
+        "eg_scan with a winner recorded: one EG_GNODE_SCAN reading in and "
+        "writing out and index; a replay writes the winners of the plane as it "
+        "is then");
+    if (g)
+        eg_graph_free(ctx, g);
+    (void)pz;
+    eg_plane_free(ctx, px);
+    eg_plane_free(ctx, py);
+    eg_plane_free(ctx, pz);
+    eg_plane_free(ctx, pl);
+    eg_plane_free(ctx, pw);
+    eg_plane_free(ctx, pb);
 }
 
 /* ---- eg_compact --------------------------------------------------------------- */
@@ -6286,12 +6548,13 @@ typedef struct {
     eg_plane *x, *y;
     eg_scan_op op;
     uint32_t flags;
+    eg_plane* index; /* the winner plane the scan writes, or NULL */
 } scan_record;
 
 static int record_scan(eg_ctx* ctx, void* arg)
 {
     const scan_record* r = arg;
-    return scan_do(ctx, r->x, r->y, r->op, r->flags) == EG_OK;
+    return scan_winner_do(ctx, r->x, r->y, r->index, r->op, r->flags) == EG_OK;
 }
 
 /* The loop the transpose of a scan is checked against: a sum gives in[i] the
@@ -6323,16 +6586,16 @@ static void scan_want(const void* x, const void* dy, void* want, size_t n,
                 real_at(want, (size_t)win, bits) + real_at(dy, i, bits));
         const double v    = real_at(x, i, bits);
         const double best = win >= 0 ? real_at(x, (size_t)win, bits) : 0.0;
-        if (win < 0 || (op == EG_SCAN_MIN ? v < best : v > best))
+        if (!isnan(v) && (win < 0 || (op == EG_SCAN_MIN ? v < best : v > best)))
             win = (long)i;
-        if (!exclusive)
+        if (!exclusive && win >= 0)
             real_put(want, (size_t)win, bits,
                 real_at(want, (size_t)win, bits) + real_at(dy, i, bits));
     }
 }
 
 static int scan_reverse_case(eg_ctx* ctx, uint8_t bits, int n, eg_scan_op op,
-    int exclusive, uint64_t seed)
+    int exclusive, uint64_t seed, int with_winners, int with_nan)
 {
     const size_t es = bits / 8;
     void* x         = malloc((size_t)n * es + 1);
@@ -6340,17 +6603,25 @@ static int scan_reverse_case(eg_ctx* ctx, uint8_t bits, int n, eg_scan_op op,
     void* dy        = malloc((size_t)n * es + 1);
     void* grad      = malloc((size_t)n * es + 1);
     void* want      = malloc((size_t)n * es + 1);
-    struct tensor tx, ty, td, tg;
+    int32_t* lanes  = malloc((size_t)n * sizeof(int32_t) + 1);
+    struct tensor tx, ty, td, tg, tl;
     fill_small(x, (size_t)n, bits, op == EG_SCAN_SUM ? 64 : 8, seed);
     fill_small(dy, (size_t)n, bits, 64, seed + 7);
+    /* NaN lanes, a leading run included: a prefix of nothing but NaN has no
+     * winner */
+    for (int i = 0; with_nan && i < n; ++i)
+        if (i < 3 || i % 13 == 5)
+            real_put(x, (size_t)i, bits, NAN);
     scan_want(x, dy, want, (size_t)n, bits, op, exclusive);
     eg_plane* px    = wrap(ctx, &tx, x, n, kDLFloat, bits);
     eg_plane* py    = wrap(ctx, &ty, y, n, kDLFloat, bits);
     eg_plane* pd    = wrap(ctx, &td, dy, n, kDLFloat, bits);
     eg_plane* pg    = wrap(ctx, &tg, grad, n, kDLFloat, bits);
-    scan_record rec = { px, py, op, exclusive ? EG_SCAN_EXCLUSIVE : 0 };
-    eg_graph* g
-        = px && py && pd && pg ? diff_graph(ctx, record_scan, &rec) : NULL;
+    eg_plane* pl = with_winners ? wrap(ctx, &tl, lanes, n, kDLInt, 32) : NULL;
+    scan_record rec = { px, py, op, exclusive ? EG_SCAN_EXCLUSIVE : 0, pl };
+    eg_graph* g     = px && py && pd && pg && (pl || !with_winners)
+        ? diff_graph(ctx, record_scan, &rec)
+        : NULL;
     int ok                     = g != NULL;
     static const int threads[] = { 1, 4, 0 };
     for (size_t t = 0; ok && t < 3; ++t) {
@@ -6366,11 +6637,13 @@ static int scan_reverse_case(eg_ctx* ctx, uint8_t bits, int n, eg_scan_op op,
     eg_plane_free(ctx, py);
     eg_plane_free(ctx, pd);
     eg_plane_free(ctx, pg);
+    eg_plane_free(ctx, pl);
     free(x);
     free(y);
     free(dy);
     free(grad);
     free(want);
+    free(lanes);
     return ok;
 }
 
@@ -6381,8 +6654,8 @@ static void check_reverse_scan(eg_ctx* ctx)
     for (size_t s = 0; ok && s < 4; ++s)
         for (int bits = 32; ok && bits <= 64; bits += 32)
             for (int ex = 0; ok && ex < 2; ++ex)
-                ok = scan_reverse_case(
-                    ctx, (uint8_t)bits, sizes[s], EG_SCAN_SUM, ex, 21 + s);
+                ok = scan_reverse_case(ctx, (uint8_t)bits, sizes[s],
+                    EG_SCAN_SUM, ex, 21 + s, 0, 0);
     check(ok,
         "eg_scan sum reverse: the suffix scan of the adjoint of out "
         "(cumsum(dy[::-1])[::-1] inclusive, the same shifted by one lane "
@@ -6394,13 +6667,39 @@ static void check_reverse_scan(eg_ctx* ctx)
             for (int ex = 0; ok && ex < 2; ++ex)
                 for (int op = EG_SCAN_MIN; ok && op <= EG_SCAN_MAX; ++op)
                     ok = scan_reverse_case(ctx, (uint8_t)bits, sizes[s],
-                        (eg_scan_op)op, ex, 41 + s);
+                        (eg_scan_op)op, ex, 41 + s, 0, 0);
     check(ok,
         "eg_scan min and max reverse: the adjoint of each output goes to its "
         "running winner (the lowest lane among equals), each winner "
         "receiving one run summed in lane order, inclusive and exclusive, "
         "float32 and float64, over 0, 1, 257 and 100000 lanes, "
         "byte-identical at 1, 4 and the default threads");
+    ok = 1;
+    for (size_t s = 0; ok && s < 4; ++s)
+        for (int bits = 32; ok && bits <= 64; bits += 32)
+            for (int ex = 0; ok && ex < 2; ++ex)
+                for (int op = EG_SCAN_MIN; ok && op <= EG_SCAN_MAX; ++op)
+                    ok = scan_reverse_case(ctx, (uint8_t)bits, sizes[s],
+                        (eg_scan_op)op, ex, 41 + s, 1, 0);
+    check(ok,
+        "eg_scan min and max with a recorded winner plane: the reverse gives "
+        "the bytes of the loop, the same as the reverse that finds the "
+        "winners again, over 0, 1, 257 and 100000 lanes at 1, 4 and the "
+        "default threads");
+    ok = 1;
+    for (size_t s = 0; ok && s < 4; ++s)
+        for (int bits = 32; ok && bits <= 64; bits += 32)
+            for (int ex = 0; ok && ex < 2; ++ex)
+                for (int op = EG_SCAN_MIN; ok && op <= EG_SCAN_MAX; ++op)
+                    for (int winners = 0; ok && winners < 2; ++winners)
+                        ok = scan_reverse_case(ctx, (uint8_t)bits, sizes[s],
+                            (eg_scan_op)op, ex, 61 + s, winners, 1);
+    check(ok,
+        "eg_scan min and max reverse over lanes with NaN, with and without a "
+        "recorded winner plane: the cotangent of a prefix with no winner goes "
+        "nowhere and that of the others to their winner, equal to a loop, "
+        "float32 and float64, over 0, 1, 257 and 100000 lanes at 1, 4 and the "
+        "default threads");
 }
 
 /* ---- eg_reduce with a position, and ANY ---------------------------------------- */
@@ -8290,6 +8589,7 @@ int main(int argc, char** argv) {
     check_host_streams(ctx);
     check_host_events(ctx);
     check_scan(ctx);
+    check_scan_winner(ctx);
     check_compact(ctx);
     check_order(ctx);
     check_reorder(ctx);

@@ -299,7 +299,10 @@ struct eg_ctx_settings {
     uint32_t struct_size;
     uint32_t flags;        /**< EG_CTX_* */
     uint32_t abi_major;    /**< EG_DOOR_VERSION_MAJOR the caller was built for */
-    int32_t device;        /**< with EG_CTX_DEVICE: the device ordinal, >= 0; else must be 0 */
+    int32_t device; /**< the DEFAULT MEMBER: where a plane made without a device
+                       goes. With EG_CTX_DEVICE: the device ordinal, >= 0; else
+                       must be 0 (a host-only context has one member, refused by
+                       name otherwise) */
 };
 
 /** OUTPUT of ``eg_ctx_info``. */
@@ -571,13 +574,25 @@ typedef int32_t eg_scan_op;
 /** Scan flags. */
 #define EG_SCAN_EXCLUSIVE (1u << 0) /**< ``out[i]`` folds ``in[0..i-1]``; ``out[0]`` is the identity of ``op`` */
 
-/** INPUT to ``eg_scan``: ``in`` and ``out`` are two distinct planes of one run-time axis, one scalar type and one extent. */
+/** INPUT to ``eg_scan``: ``in`` and ``out`` are two distinct planes of one
+ * run-time axis, one scalar type and one extent.
+ *  ``index`` (write; int32 of the same extent; NULL: no winner) receives the
+ * running winner of a minimum or maximum scan:
+ *  ``index[i]`` is the lowest lane among the winners of ``in[0..i]`` (of
+ * ``in[0..i-1]`` when exclusive), the pairs (value, lane) folded as
+ * ``eg_reduce_desc.index`` folds them, a NaN never a candidate. A prefix with
+ * no candidate (the first lane of an exclusive scan, or a prefix of nothing but
+ * NaN) has the lane count ``n``, the value a reduce gives for no lane. It is
+ * legal for EG_SCAN_MIN and EG_SCAN_MAX only, and does not depend on the thread
+ * count. ``index`` is the last member: a caller whose
+ *  ``struct_size`` ends before it passes none. */
 struct eg_scan_desc {
     uint32_t struct_size;
     uint32_t flags;          /**< EG_SCAN_EXCLUSIVE */
     eg_plane* in;
     eg_plane* out;
     eg_scan_op op;
+    eg_plane* index; /**< the running winner's lane (int32), or NULL */
 };
 
 /** INPUT to ``eg_compact``: ``keep`` is a bool plane of n bytes, ``kept`` n 32-bit indices (int32 or uint32), ``count`` a
@@ -792,6 +807,9 @@ eg_status eg_unit_free(eg_ctx* ctx, eg_unit* unit);
  * Replaces: ``interop.py`` array-interface reads, ``arrays.py``,
  * ``marshal.py`` address packing, ``_plan_planes`` shape checks.
  * Calls today: ``plugin/dlpack_bridge.h`` (``fromDLPack``-style checks).
+ * The tensor's DLPack device states the member the plane sits on; a host-only
+ * context has one member, so a tensor on another (``device_id`` != 0, or a
+ * device type) is refused by name ("host-only context: it has one member").
  * Status: OK; BAD_REQUEST (null data with nonzero size, device of another
  * context); NOT_WRITTEN (a dtype or device type eagle does not run).
  */
@@ -809,9 +827,17 @@ typedef int32_t eg_mem;
 /** ``eg_plane_desc.flags``. */
 #define EG_PLANE_ZERO (1u << 0) /**< the bytes start at zero; without it they are unspecified */
 
+/** ``eg_plane_desc.device``: the context's default member
+ * (``eg_ctx_settings.device``). A descriptor whose ``struct_size`` stops before
+ * ``device`` states this. */
+#define EG_DEVICE_DEFAULT (-1)
+
 /** INPUT to ``eg_plane_new``. The dtype is the DLPack code and bit width a
  *  plane may carry (as ``eg_plane_wrap`` accepts): float 64/32, int 64/32/8,
- *  uint 32, bool 8, one lane. */
+ *  uint 32, bool 8, one lane. A node runs on the device of its planes: a plane
+ *  states its member by ``device`` when made and by its DLPack device (type and
+ *  id) when wrapped, and a node whose planes sit on two members is refused by
+ *  name with ``eg_copy`` as the way. */
 struct eg_plane_desc {
     uint32_t struct_size;
     uint32_t flags;          /**< EG_PLANE_* */
@@ -820,6 +846,10 @@ struct eg_plane_desc {
     uint32_t dtype_code;     /**< DLDataTypeCode: kDLInt 0, kDLUInt 1, kDLFloat 2, kDLBool 6 */
     uint32_t dtype_bits;
     const int64_t* shape;    /**< ndim extents, each >= 0 (ndim 0: one element) */
+    int32_t
+        device; /**< the member the plane sits on: EG_DEVICE_DEFAULT or a device
+                   ordinal >= 0 (0 is the host's only member). A host-only
+                   context has one member, 0; another is refused by name */
 };
 
 /**
@@ -833,8 +863,11 @@ struct eg_plane_desc {
  * Calls today: ``eagle_backend_mem_alloc`` / ``_release`` (eagle_cuda.cu).
  * Status: OK; BAD_REQUEST (unknown ``kind`` or flag bit, ``ndim`` < 0 or
  * ``shape`` NULL with ``ndim`` > 0, a negative extent, a size that overflows,
- * a call inside a device recording); NOT_WRITTEN (a dtype eagle does not run,
- * PINNED or DEVICE on a host-only context); FAULT (the allocation failed).
+ * a call inside a device recording, ``device`` another member than the
+ * context's
+ * ("host-only context: it has one member")); NOT_WRITTEN (a
+ * dtype eagle does not run, PINNED or DEVICE on a host-only context); FAULT
+ * (the allocation failed).
  */
 eg_status eg_plane_new(eg_ctx* ctx, const struct eg_plane_desc* desc, eg_plane** out);
 
@@ -1125,19 +1158,29 @@ eg_status eg_reverse(eg_ctx* ctx, eg_runner* runner, const struct eg_bind_desc* 
 eg_status eg_reduce(eg_ctx* ctx, const struct eg_reduce_desc* desc);
 
 /**
- * Prefix scan of ``in`` into ``out`` along the one run-time axis. Recordable (node kind EG_GNODE_SCAN, reading ``in`` and
- * writing ``out``). Inclusive: ``out[i]`` folds ``in[0..i]`` with ``op``. Exclusive (EG_SCAN_EXCLUSIVE): ``out[i]`` folds
- * ``in[0..i-1]`` and ``out[0]`` is the identity of ``op``: 0 for a sum, the largest value of the type for a minimum and the
- * smallest for a maximum (+infinity and -infinity for a real type). The types are int32, int64, uint32, uint64, float32 and
- * float64; an integer sum is modular, a minimum and a maximum are exact (a NaN is ignored while a number has been seen, as
- * ``fmin`` and ``fmax`` do). A real sum is repeatable, the same bits on every run and at any thread count, because its
- * blocks and the order of their totals depend on the extent alone; it is not the bits of a left-to-right loop, and
- * ``|out[i] - exact| <= i * u * sum(|in[0..i]|)`` with ``u`` the unit roundoff of the type. ``in`` and ``out`` are 1-D, of one
- * extent and one type, and must not overlap. An extent of 0 writes nothing; above 2^31 - 1 elements it is refused.
- * Status: OK; BAD_REQUEST (a NULL or foreign plane, unknown flag bits or op, a plane with more than one run-time axis (the
- * text names a group over that axis as the way), ``out`` overlapping ``in`` or of another type or extent, an extent above
- * 2^31 - 1, a plane that is not contiguous, a read-only ``out``); NOT_WRITTEN (a value of rank above zero, a type outside the
- * six, a device context).
+ * Prefix scan of ``in`` into ``out`` along the one run-time axis. Recordable
+ * (node kind EG_GNODE_SCAN, reading ``in`` and writing ``out``). Inclusive:
+ * ``out[i]`` folds ``in[0..i]`` with ``op``. Exclusive (EG_SCAN_EXCLUSIVE):
+ * ``out[i]`` folds
+ * ``in[0..i-1]`` and ``out[0]`` is the identity of ``op``: 0 for a sum, the
+ * largest value of the type for a minimum and the smallest for a maximum
+ * (+infinity and -infinity for a real type). The types are int32, int64,
+ * uint32, uint64, float32 and float64; an integer sum is modular, a minimum and
+ * a maximum are exact (a NaN is ignored while a number has been seen, as
+ * ``fmin`` and ``fmax`` do). A real sum is repeatable, the same bits on every
+ * run and at any thread count, because its blocks and the order of their totals
+ * depend on the extent alone; it is not the bits of a left-to-right loop, and
+ * ``|out[i] - exact| <= i * u * sum(|in[0..i]|)`` with ``u`` the unit roundoff
+ * of the type. ``in`` and ``out`` are 1-D, of one extent and one type, and must
+ * not overlap; ``index`` (see ``eg_scan_desc``) is a recorded plane of the node
+ * like ``out``. An extent of 0 writes nothing; above 2^31 - 1 elements it is
+ * refused. Status: OK; BAD_REQUEST (``index`` with a sum or not an int32 plane
+ * of the extent, or overlapping another plane; a NULL or foreign plane, unknown
+ * flag bits or op, a plane with more than one run-time axis (the text names a
+ * group over that axis as the way), ``out`` overlapping ``in`` or of another
+ * type or extent, an extent above 2^31 - 1, a plane that is not contiguous, a
+ * read-only ``out``); NOT_WRITTEN (a value of rank above zero, a type outside
+ * the six, a device context, and on a device context ``index``).
  */
 eg_status eg_scan(eg_ctx* ctx, const struct eg_scan_desc* desc);
 

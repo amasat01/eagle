@@ -1369,6 +1369,10 @@ void* scan_state_for(eg_ctx& ctx, std::uint64_t stream, std::size_t state_bytes,
  *  graph-owned stream-ordered allocation nodes, so a replay owns its own; eagerly it is the context's. */
 void device_scan(eg_ctx& ctx, const eg_scan_desc& d) {
     const host::ScanOp s = host::scan_check(ctx, d);
+    if (s.index != nullptr)
+        refuse(EG_NOT_WRITTEN,
+            "eg_scan: index (the running winner) is not written for a device "
+            "context");
     const DLDataType& type = s.in->tensor->dl_tensor.dtype;
     const auto at = [](const eg_plane_s* p) -> void* {
         return static_cast<char*>(p->tensor->dl_tensor.data) + p->tensor->dl_tensor.byte_offset;

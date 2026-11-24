@@ -147,7 +147,8 @@ EG_EXPORT eg_status eg_reduce(eg_ctx* ctx, const struct eg_reduce_desc* desc) {
 EG_EXPORT eg_status eg_scan(eg_ctx* ctx, const struct eg_scan_desc* desc) {
     return door::call(ctx, [&](eg_ctx& c) {
         const eg_scan_desc d = door::read_input(desc, "eg_scan_desc");
-        if (door::device_planes(c, "eg_scan", { d.in, d.out })) door::device_scan(c, d);
+        if (door::device_planes(c, "eg_scan", { d.in, d.out, d.index }))
+            door::device_scan(c, d);
         else door::scan(c, desc);
     });
 }
@@ -194,7 +195,7 @@ EG_EXPORT eg_status eg_copy(eg_ctx* ctx, eg_plane* src, eg_plane* dst) {
     return door::call(ctx, [&](eg_ctx& c) {
         if (door::planes_cross_sides(c, src, dst)) {
             door::device_copy(c, src, dst);
-        } else if (door::device_planes(c, "eg_copy", { src, dst })) {
+        } else if (door::device_planes(c, "eg_copy", { src, dst }, true)) {
             door::device_copy(c, src, dst);
         } else {
             door::copy(c, src, dst);

@@ -65,6 +65,11 @@ void plane_wrap(eg_ctx& ctx, DLManagedTensorVersioned* tensor, eg_plane** out) {
     } else if (t.device.device_type != kDLCPU) {
         refuse(EG_NOT_WRITTEN, "eg_plane_wrap: device type " + std::to_string(t.device.device_type) +
                (ctx.dev.ordinal >= 0 ? " (planes are kDLCPU or kDLCUDA)" : " on a host-only context (host planes are kDLCPU)"));
+    } else if (t.device.device_id != 0) {
+        refuse(EG_BAD_REQUEST,
+            "eg_plane_wrap: a kDLCPU plane of device "
+                + std::to_string(t.device.device_id)
+                + ": host memory has one member, 0");
     }
     if (!known_dtype(t.dtype))
         refuse(EG_NOT_WRITTEN, "eg_plane_wrap: dtype (code " + std::to_string(t.dtype.code) +
@@ -157,6 +162,19 @@ void plane_new(eg_ctx& ctx, const eg_plane_desc* desc, eg_plane** out) {
         refuse(EG_BAD_REQUEST, "eg_plane_new: unknown flag bits " + std::to_string(d.flags & ~EG_PLANE_ZERO));
     if (d.kind != EG_MEM_HOST && d.kind != EG_MEM_PINNED && d.kind != EG_MEM_DEVICE)
         refuse(EG_BAD_REQUEST, "eg_plane_new: unknown kind " + std::to_string(d.kind));
+    // A struct that stops before ``device`` states the default member; the
+    // zero-fill would read it as member 0.
+    const bool states_member = desc->struct_size
+        >= offsetof(eg_plane_desc, device) + sizeof(d.device);
+    const std::int32_t asked  = states_member ? d.device : EG_DEVICE_DEFAULT;
+    const std::int32_t member = ctx.dev.ordinal < 0 ? 0 : ctx.dev.ordinal;
+    if (asked != EG_DEVICE_DEFAULT && asked != member)
+        refuse(EG_BAD_REQUEST,
+            "eg_plane_desc.device " + std::to_string(asked)
+                + (ctx.dev.ordinal < 0
+                        ? ": host-only context: it has one member, device 0"
+                        : ": this context's only member is device "
+                            + std::to_string(member)));
     if (d.kind != EG_MEM_HOST && ctx.dev.ordinal < 0)
         refuse(EG_NOT_WRITTEN, std::string("eg_plane_new: ") + (d.kind == EG_MEM_PINNED ? "PINNED" : "DEVICE") +
                " memory on a host-only context (make the context with EG_CTX_DEVICE)");
@@ -235,13 +253,35 @@ void plane_dlpack(eg_ctx& ctx, eg_plane_s* plane, DLManagedTensorVersioned** out
     *out = &e.release()->managed;
 }
 
-/** @brief Whether @p op runs on device planes: the planes of @p ctx among @p planes are all device planes (true) or
- *  all host planes (false). A mix, or a device plane on a host-only context, is refused (handles not of @p ctx are
- *  left to @p op's own checks). */
-bool device_planes(const eg_ctx& ctx, const char* op, std::initializer_list<const eg_plane_s*> planes) {
+/** @brief Whether @p op runs on device planes: the planes of @p ctx among @p
+ * planes are all device planes (true) or all host planes (false). A mix, or a
+ * device plane on a host-only context, is refused, and so are device planes of
+ * two members unless @p across_members (a transfer is the one node that takes
+ * two) (handles not of @p ctx are left to @p op's own checks). */
+bool device_planes(const eg_ctx& ctx, const char* op,
+    std::initializer_list<const eg_plane_s*> planes, bool across_members)
+{
     int device = 0, host = 0;
-    for (const eg_plane_s* p : planes)
-        if (ctx.planes.count(const_cast<eg_plane_s*>(p)) != 0) (p->tensor->dl_tensor.device.device_type == kDLCPU ? host : device) += 1;
+    const DLDevice* member
+        = nullptr; // the first device plane's member: another one among the
+                   // rest is a node over two devices
+    for (const eg_plane_s* p : planes) {
+        if (ctx.planes.count(const_cast<eg_plane_s*>(p)) == 0)
+            continue;
+        const DLDevice& where = p->tensor->dl_tensor.device;
+        (where.device_type == kDLCPU ? host : device) += 1;
+        if (where.device_type == kDLCPU)
+            continue;
+        if (member == nullptr)
+            member = &where;
+        else if (!across_members && where.device_id != member->device_id)
+            refuse(EG_BAD_REQUEST,
+                std::string(op) + ": the planes are on devices "
+                    + std::to_string(member->device_id) + " and "
+                    + std::to_string(where.device_id)
+                    + "; a node runs on the device of its planes, copy one "
+                      "with eg_copy");
+    }
     if (device > 0 && host > 0) refuse(EG_BAD_REQUEST, std::string(op) + ": the planes are on both sides; one operation runs on one side");
     if (device > 0 && ctx.dev.ordinal < 0)
         refuse(EG_NOT_WRITTEN, std::string(op) + " of a device plane on a host-only context is not written in this build of the door");

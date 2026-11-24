@@ -457,19 +457,112 @@ struct Samples {
 /** The scan's block: the blocks, and so the grouping of a real sum, are a function of the extent alone. */
 constexpr unsigned kScanBlock = 1024;
 
+/** @brief The scan over @p n elements read by @p in and written through @p out,
+ * of any element @p E and fold @p OP. */
+template<class E, class OP, class InT, class OutT>
+void scan_blocks(const InT& in, OutT&& out, idx_t n, const E& identity,
+    bool exclusive, int threads)
+{
+    std::vector<E> totals(static_cast<std::size_t>(
+        filtering::detail::ScanCore::countBlocks<kScanBlock>(
+            n, std::min<idx_t>(kScanBlock, n))));
+    const Samples<E> sums{ totals.data(), static_cast<idx_t>(totals.size()) };
+    if (exclusive)
+        cpu::Scan::exclusive<E, OP, kScanBlock>(
+            in, out, sums, identity, threads);
+    else
+        cpu::Scan::inclusive<E, OP, kScanBlock>(
+            in, out, sums, identity, threads);
+}
+
 template<class T, class OP>
 void scan_form(
     const T* from, T* to, idx_t n, eg_scan_op op, bool exclusive, int threads)
 {
-    const Samples<const T> in{ from, n };
-    const Samples<T> out{ to, n };
-    std::vector<T> totals(static_cast<std::size_t>(filtering::detail::ScanCore::countBlocks<kScanBlock>(in.n, std::min<idx_t>(kScanBlock, in.n))));
-    const Samples<T> sums{ totals.data(), static_cast<idx_t>(totals.size()) };
-    const T identity = scan_identity<T>(op);
-    if (exclusive)
-        cpu::Scan::exclusive<T, OP, kScanBlock>(
-            in, out, sums, identity, threads);
-    else cpu::Scan::inclusive<T, OP, kScanBlock>(in, out, sums, identity, threads);
+    scan_blocks<T, OP>(Samples<const T>{ from, n }, Samples<T>{ to, n }, n,
+        scan_identity<T>(op), exclusive, threads);
+}
+
+/** A value with the lane that holds it: what a minimum or maximum scan folds to
+ * name its winner, as the positioned reduce folds pairs. */
+template<class T>
+struct Candidate {
+    T value;
+    std::int32_t lane;
+};
+
+/** The fold of candidates, the one definition of "winner" (the scan's, and the
+ * reverse's through it): the smaller (@p Low) or larger value, the lower lane
+ * among equal values, a NaN never. */
+template<class T, bool Low>
+struct ScanWinner {
+    Candidate<T> operator()(Candidate<T> a, Candidate<T> b) const
+    {
+        if (std::isnan(b.value))
+            return a;
+        if (Low ? b.value < a.value : b.value > a.value)
+            return b;
+        if (Low ? a.value < b.value : a.value > b.value)
+            return a;
+        return b.lane < a.lane ? b : a;
+    }
+};
+
+/** The input of a winner scan: each element with its own lane. */
+template<class T>
+struct CandidatesOf {
+    const T* p;
+    idx_t n;
+    idx_t samples() const { return n; }
+    Candidate<T> operator()(idx_t i) const
+    {
+        return { p[i], static_cast<std::int32_t>(i) };
+    }
+};
+
+/** The output of a winner scan: a value plane and a lane plane, read and
+ * written as one candidate per element. */
+template<class T>
+struct CandidatesTo {
+    T* values;
+    std::int32_t* lanes;
+    idx_t n;
+    struct Slot {
+        T* value;
+        std::int32_t* lane;
+        operator Candidate<T>() const { return { *value, *lane }; }
+        Slot& operator=(const Candidate<T>& c)
+        {
+            *value = c.value;
+            *lane  = c.lane;
+            return *this;
+        }
+    };
+    idx_t samples() const { return n; }
+    Slot operator()(idx_t i) const { return { values + i, lanes + i }; }
+};
+
+template<class T, bool Low>
+void scan_winner_form(const T* from, T* to, std::int32_t* lanes, idx_t n,
+    bool exclusive, int threads)
+{
+    const Candidate<T> identity{ scan_identity<T>(
+                                     Low ? EG_SCAN_MIN : EG_SCAN_MAX),
+        static_cast<std::int32_t>(n) };
+    scan_blocks<Candidate<T>, ScanWinner<T, Low>>(CandidatesOf<T>{ from, n },
+        CandidatesTo<T>{ to, lanes, n }, n, identity, exclusive, threads);
+}
+
+/** @brief The values and running winners of a minimum (@p op MIN) or maximum
+ * scan of @p from. */
+template<class T>
+void scan_winner_by_op(const T* from, T* to, std::int32_t* lanes, idx_t n,
+    eg_scan_op op, bool exclusive, int threads)
+{
+    if (op == EG_SCAN_MIN)
+        scan_winner_form<T, true>(from, to, lanes, n, exclusive, threads);
+    else
+        scan_winner_form<T, false>(from, to, lanes, n, exclusive, threads);
 }
 
 template <class T>
@@ -477,7 +570,10 @@ void scan_by_op(const ScanOp& s, int threads) {
     const T* from = data_of<T>(*s.in);
     T* to         = mut_data_of<T>(*s.out);
     const idx_t n = static_cast<idx_t>(s.n);
-    if (s.op == EG_SCAN_SUM)
+    if (s.index != nullptr)
+        scan_winner_by_op<T>(from, to, mut_data_of<std::int32_t>(*s.index), n,
+            s.op, s.exclusive, threads);
+    else if (s.op == EG_SCAN_SUM)
         scan_form<T, ScanSum<T>>(from, to, n, s.op, s.exclusive, threads);
     else if (s.op == EG_SCAN_MIN)
         scan_form<T, ScanMin<T>>(from, to, n, s.op, s.exclusive, threads);
@@ -529,9 +625,27 @@ ScanOp scan_check(const eg_ctx& ctx, const eg_scan_desc& desc) {
     check_access(*desc.in, false, "eg_scan in");
     check_access(*desc.out, true, "eg_scan out");
     if (overlaps(in, out)) refuse(EG_BAD_REQUEST, "eg_scan: out overlaps in; a scan writes a plane distinct from the one it reads");
+    if (desc.index != nullptr) {
+        if (desc.op == EG_SCAN_SUM)
+            refuse(EG_BAD_REQUEST,
+                "eg_scan: index (a winner) takes op MIN or MAX only; a sum has "
+                "no single lane");
+        check_handle(ctx.planes, desc.index, "eg_scan_desc.index");
+        const DLTensor& x = desc.index->tensor->dl_tensor;
+        if (x.dtype.code != kDLInt || x.dtype.bits != 32 || x.dtype.lanes != 1)
+            refuse(EG_BAD_REQUEST, "eg_scan: index must be an int32 plane");
+        if (x.ndim != 1 || x.shape[0] != in.shape[0])
+            refuse(EG_BAD_REQUEST,
+                "eg_scan: index must have the extent of in, "
+                    + std::to_string(in.shape[0]));
+        check_access(*desc.index, true, "eg_scan index");
+        if (overlaps(x, in) || overlaps(x, out))
+            refuse(EG_BAD_REQUEST, "eg_scan: index overlaps another plane");
+    }
     ScanOp s;
     s.in = desc.in;
     s.out = desc.out;
+    s.index     = desc.index;
     s.op = desc.op;
     s.exclusive = (desc.flags & EG_SCAN_EXCLUSIVE) != 0;
     s.code = code;
@@ -559,31 +673,38 @@ namespace {
  * in[0..k] (in[0..k-1] exclusive), the lowest lane among equals, and the
  * adjoint of out[k] goes to it. Winners never decrease, so each receives one
  * contiguous run of dy, added in lane order by this one pass: the same bits at
- * any thread count. A NaN never wins, as in the forward's fmin and fmax; a lane
- * with no winner (the exclusive scan's first output, or a prefix of nothing but
- * NaN) passes nothing. */
+ * any thread count. The winners are @p winners, the plane the forward wrote, or
+ * when it wrote none the forward's own winner scan over @p in. A lane with no
+ * winner (the lane count: the exclusive scan's first output, or a prefix of
+ * nothing but NaN) passes nothing. */
 template<class T>
-void scan_extremum_pullback(const ScanOp& s, const T* in, const T* dy, T* bar)
+void scan_extremum_pullback(const ScanOp& s, const T* in, const T* dy, T* bar,
+    const std::int32_t* winners, int threads)
 {
-    const bool low = s.op == EG_SCAN_MIN;
+    std::vector<std::int32_t> found;
+    if (winners == nullptr) {
+        std::vector<T> values(static_cast<std::size_t>(s.n));
+        found.resize(static_cast<std::size_t>(s.n));
+        scan_winner_by_op<T>(in, values.data(), found.data(),
+            static_cast<idx_t>(s.n), s.op, s.exclusive, threads);
+        winners = found.data();
+    }
     std::fill(bar, bar + s.n, T(0));
-    std::int64_t winner = -1;
     for (std::int64_t k = 0; k < s.n; ++k) {
-        if (s.exclusive && winner >= 0)
-            bar[winner] += dy[k];
-        const T v = in[k];
-        if (!std::isnan(v)
-            && (winner < 0 || (low ? v < in[winner] : v > in[winner])))
-            winner = k;
-        if (!s.exclusive && winner >= 0)
-            bar[winner] += dy[k];
+        if (winners[k] < 0 || winners[k] > s.n)
+            refuse(EG_BAD_REQUEST,
+                "eg_graph_reverse: a winner of eg_scan is outside [0, "
+                    + std::to_string(s.n)
+                    + "]: the winner plane changed after the scan");
+        if (winners[k] < s.n)
+            bar[winners[k]] += dy[k];
     }
 }
 
 } // namespace
 
-void scan_pullback(
-    const ScanOp& s, const char* in, const char* dy, char* bar, int threads)
+void scan_pullback(const ScanOp& s, const char* in, const char* dy, char* bar,
+    int threads, const std::int32_t* winners)
 {
     if (s.n == 0)
         return;
@@ -597,11 +718,12 @@ void scan_pullback(
                 reinterpret_cast<double*>(bar), threads);
     } else if (real32) {
         scan_extremum_pullback(s, reinterpret_cast<const float*>(in),
-            reinterpret_cast<const float*>(dy), reinterpret_cast<float*>(bar));
+            reinterpret_cast<const float*>(dy), reinterpret_cast<float*>(bar),
+            winners, threads);
     } else {
         scan_extremum_pullback(s, reinterpret_cast<const double*>(in),
-            reinterpret_cast<const double*>(dy),
-            reinterpret_cast<double*>(bar));
+            reinterpret_cast<const double*>(dy), reinterpret_cast<double*>(bar),
+            winners, threads);
     }
 }
 

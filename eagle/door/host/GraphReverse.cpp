@@ -292,9 +292,10 @@ void other_leaf(eg_ctx& ctx, const Node& n, DiffNode& dn, std::size_t ordinal, c
         case Node::Scan:
             if (!floats(n.scan.in)) { // no adjoint; a kept plane it overwrites
                                       // is copied before it
-                if (kept.count(n.scan.out) != 0)
-                    dn.overwrites.push_back(
-                        track(n.scan.out, true, at + " out", at + " out"));
+                for (eg_plane_s* p : { n.scan.out, n.scan.index })
+                    if (kept.count(p) != 0)
+                        dn.overwrites.push_back(
+                            track(p, true, at + " result", at + " result"));
                 return;
             }
             dn.scan = n.scan;
@@ -303,6 +304,12 @@ void other_leaf(eg_ctx& ctx, const Node& n, DiffNode& dn, std::size_t ordinal, c
             if (n.scan.op != EG_SCAN_SUM)
                 dn.valued = dn.reads; // a minimum or maximum pulls back through
                                       // the winners of the values it read
+            if (n.scan.index != nullptr) { // or through the winners it wrote
+                dn.kept_reads.push_back(
+                    track(n.scan.index, false, at + " index", at + " index"));
+                dn.valued.insert(dn.valued.end(), dn.kept_reads.begin(),
+                    dn.kept_reads.end());
+            }
             return;
         case Node::Reorder: {
             // A plane moves in place: its adjoint is read as the adjoint of
@@ -426,6 +433,8 @@ std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<eg_plan_s*>&
                                      // through is kept like a vjp's int planes
             if (o->kind == Node::Reorder)
                 kept.insert(o->reorder.order);
+            else if (o->kind == Node::Scan && o->scan.index != nullptr)
+                kept.insert(o->scan.index);
         for (std::size_t i = 0; i < launches.size(); ++i) {
             const eg_plan_s& plan = *launches[i];
             const std::string at = "eg_record_end: launch " + std::to_string(i);
@@ -931,9 +940,14 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
                         "eg_graph_reverse: the transpose of eg_scan is not "
                         "written for a device recording");
                 Bytes bar(byte_count(plane_of(in)));
+                const std::int32_t* winners
+                    = nullptr; // the forward's own, when it wrote them
+                if (!node.kept_reads.empty())
+                    winners = reinterpret_cast<const std::int32_t*>(
+                        value_of(node.kept_reads.front(), i));
                 host::scan_pullback(node.scan,
                     node.valued.empty() ? nullptr : value_of(in, i), dy.data(),
-                    bar.data(), threads);
+                    bar.data(), threads, winners);
                 give(in, std::move(bar));
                 break;
             }

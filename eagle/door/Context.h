@@ -1059,7 +1059,9 @@ void run_step(const eg_runner_s& runner, GraphFn run_graph, PlanFn run_plan) {
 }
 void graph_describe(eg_ctx& ctx, const eg_graph_s* graph, eg_graph_description* out);
 void record_drop_all(eg_ctx& ctx);
-bool device_planes(const eg_ctx& ctx, const char* op, std::initializer_list<const eg_plane_s*> planes);
+bool device_planes(const eg_ctx& ctx, const char* op,
+    std::initializer_list<const eg_plane_s*> planes,
+    bool across_members = false);
 /** @brief Whether @p src and @p dst of @p ctx are one host plane and one device plane (eg_copy's only mixed case). */
 bool planes_cross_sides(const eg_ctx& ctx, const eg_plane_s* src, const eg_plane_s* dst);
 bool device_plans(const eg_ctx& ctx, const eg_runner_desc* desc);
