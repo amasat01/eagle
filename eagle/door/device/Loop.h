@@ -152,6 +152,15 @@ std::size_t order_temp_bytes(std::int64_t n, std::int64_t bound);
 void order_step(std::uint64_t stream, unsigned bits, bool is_signed, const void* keys, std::int64_t n, std::int64_t bound, void* order, void* starts,
                 void* temp);
 
+/** @brief The bytes of temporary memory (any state) ``permute_step`` needs for @p n lanes of planes whose widest element is @p widest bytes:
+ *  a 32-bit count of out-of-range entries, then the staging of one plane. */
+std::size_t permute_temp_bytes(std::int64_t n, unsigned widest);
+
+/** @brief Queue on @p stream the reorder of the lanes of @p planes (rows already split, each ``n`` lanes) by the 32-bit @p order: afterwards
+ *  ``p[j]`` holds what ``p[order[j]]`` held. The entries of @p order outside [0, n) are counted into the 32-bit word at @p temp, and while it is
+ *  not 0 no plane changes. @p temp is ``permute_temp_bytes``. Nothing waits. */
+void permute_step(std::uint64_t stream, const std::vector<DevicePlane>& planes, const void* order, std::int64_t n, void* temp);
+
 /** @brief Queue on @p stream the compaction of the @p n (above 0) mask bytes of @p keep: ``kept[j]`` (32-bit) is the index of the
  *  j-th lane whose byte is non-zero, for j below ``*count`` (32-bit), which receives their number; the rest of @p kept is not
  *  written. @p state is ``compact_state_bytes`` of zeroed working memory, left zero. Nothing waits. */

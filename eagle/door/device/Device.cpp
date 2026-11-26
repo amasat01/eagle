@@ -852,7 +852,17 @@ namespace {
 
 /** @brief The description kind of the copy, reduce, transform or product kind @p k of a leaf. */
 eg_gnode_kind gnode_kind_of(Node::Kind k) {
-    return k == Node::Copy ? EG_GNODE_COPY : k == Node::Reduce ? EG_GNODE_REDUCE : k == Node::Fft ? EG_GNODE_FFT : k == Node::Host ? EG_GNODE_HOST : EG_GNODE_GEMM;
+    switch (k) {
+        case Node::Copy: return EG_GNODE_COPY;
+        case Node::Reduce: return EG_GNODE_REDUCE;
+        case Node::Scan: return EG_GNODE_SCAN;
+        case Node::Compact: return EG_GNODE_COMPACT;
+        case Node::Order: return EG_GNODE_ORDER;
+        case Node::Reorder: return EG_GNODE_REORDER;
+        case Node::Fft: return EG_GNODE_FFT;
+        case Node::Host: return EG_GNODE_HOST;
+        default: return EG_GNODE_GEMM;
+    }
 }
 
 /** @brief How a unit slot's role touches its plane (graph::PlaneRef access: 0 read, 1 write, 2 in place); -1: not a plane. */
@@ -1468,11 +1478,44 @@ void device_compact(eg_ctx& ctx, const eg_compact_desc& d) {
     }
 }
 
-/** @brief What a recorded sort's host step reads after the replay's copy: the 32-bit count of keys outside the bound, in page-locked memory. */
+/** @brief What a recorded sort's or reorder's host step reads after the replay's copy: the 32-bit count of out-of-range entries, in
+ *  page-locked memory, and how to word the refusal. */
 struct OutsideKeys {
     std::uint32_t* count;
+    std::string (*refusal)(std::uint32_t outside, std::int64_t bound);
     std::int64_t bound;
 };
+
+std::string key_refusal(std::uint32_t outside, std::int64_t bound) {
+    return "sort: " + std::to_string(outside) + " keys are outside [0, " + std::to_string(bound) + ")";
+}
+
+std::string order_refusal(std::uint32_t outside, std::int64_t bound) {
+    return "reorder: " + std::to_string(outside) + " entries of order are outside [0, " + std::to_string(bound) + ")";
+}
+
+/** @brief Keep @p found in the recording on @p ctx as a host step run after each replay: it fails the replay when the count is not 0, and frees
+ *  the count when the recording goes. Frees @p found itself if the step cannot be recorded. */
+void record_outside_step(eg_ctx& ctx, OutsideKeys* found) {
+    try {
+        device_record_host_step(
+            ctx,
+            [](void* user, StepFailure& failure) noexcept {
+                const auto* keys = static_cast<const OutsideKeys*>(user);
+                if (*keys->count != 0) failure.set(keys->refusal(*keys->count, keys->bound));
+            },
+            found,
+            [](eg_ctx&, void* user) {
+                auto* keys = static_cast<OutsideKeys*>(user);
+                host_pinned_free(keys->count);
+                delete keys;
+            });
+    } catch (...) {
+        host_pinned_free(found->count);
+        delete found;
+        throw;
+    }
+}
 
 /** @brief eg_order_by_key over device planes: the checks and the node are the host's; the sort is stable radix passes over the bits the
  *  bound needs (eagle/cuda/KeyedSort.cuh) on the stream in scope of the calling thread. Keys outside [0, bound) fail the call when
@@ -1496,15 +1539,12 @@ void device_order_by_key(eg_ctx& ctx, const eg_order_desc& d) {
     const DLDataType& type = o.keys->tensor->dl_tensor.dtype;
     const bool is_signed = type.code == kDLInt;
     const std::size_t temp_bytes = order_temp_bytes(o.n, o.bound);
-    const auto refusal = [&](std::uint32_t outside) {
-        return "sort: " + std::to_string(outside) + " keys are outside [0, " + std::to_string(o.bound) + ")";
-    };
     if (ctx.dev_rec == nullptr) {
         void* temp = scan_state_for(ctx, stream, 0, temp_bytes);
         order_step(stream, type.bits, is_signed, at(o.keys), o.n, o.bound, at(o.order), at(o.starts), temp);
         std::uint32_t outside = 0;
         read_bytes(stream, &outside, temp, sizeof(outside));
-        if (outside != 0) refuse(EG_BAD_REQUEST, refusal(outside));
+        if (outside != 0) refuse(EG_BAD_REQUEST, key_refusal(outside, o.bound));
         return;
     }
     void* temp = nullptr;
@@ -1513,7 +1553,7 @@ void device_order_by_key(eg_ctx& ctx, const eg_order_desc& d) {
     try {
         temp = alloc_async(stream, temp_bytes, false);
         where = "the page-locked count";
-        found = new OutsideKeys{ static_cast<std::uint32_t*>(host_pinned_new(sizeof(std::uint32_t))), o.bound };
+        found = new OutsideKeys{ static_cast<std::uint32_t*>(host_pinned_new(sizeof(std::uint32_t))), key_refusal, o.bound };
         where = "the sort";
         order_step(stream, type.bits, is_signed, at(o.keys), o.n, o.bound, at(o.order), at(o.starts), temp);
         where = "the copy of the count";
@@ -1522,33 +1562,62 @@ void device_order_by_key(eg_ctx& ctx, const eg_order_desc& d) {
         refuse(EG_FAULT, std::string("eg_order_by_key while recording: ") + where + ": " + why.what());
     }
     free_async(stream, stream, temp);
-    try {
-        device_record_host_step(
-            ctx,
-            [](void* user, StepFailure& failure) noexcept {
-                const auto* keys = static_cast<const OutsideKeys*>(user);
-                if (*keys->count != 0)
-                    failure.set("sort: " + std::to_string(*keys->count) + " keys are outside [0, " + std::to_string(keys->bound) + ")");
-            },
-            found,
-            [](eg_ctx&, void* user) {
-                auto* keys = static_cast<OutsideKeys*>(user);
-                host_pinned_free(keys->count);
-                delete keys;
-            });
-    } catch (...) {
-        host_pinned_free(found->count);
-        delete found;
-        throw;
-    }
+    record_outside_step(ctx, found);
 }
 
-/** @brief eg_reorder over device planes: not written on a device. */
-void device_reorder(eg_ctx&, const eg_reorder_desc&)
-{
-    refuse(EG_NOT_WRITTEN,
-        "eg_reorder: the reorder by an order is not written for a device "
-        "context");
+/** @brief eg_reorder over device planes: the checks and the node are the host's; each plane (each row of a vector plane) is staged and
+ *  gathered back through ``order`` on the stream in scope of the calling thread. Entries of ``order`` outside [0, n) are counted before
+ *  anything moves and fail the call when it runs eagerly (it waits for the count) and the next ``eg_graph_launch`` or ``eg_sync`` after a
+ *  replay; the planes are then untouched. */
+void device_reorder(eg_ctx& ctx, const eg_reorder_desc& d) {
+    const host::ReorderOp r = host::reorder_check(ctx, d);
+    const auto at = [](const eg_plane_s* p) -> void* {
+        return static_cast<char*>(p->tensor->dl_tensor.data) + p->tensor->dl_tensor.byte_offset;
+    };
+    std::vector<PlaneUse> uses{ { r.order, 0, -1, "order" } };
+    for (eg_plane_s* p : r.planes) uses.push_back({ p, 2, -1, "plane" });
+    Node leaf;
+    leaf.kind = Node::Reorder;
+    leaf.reorder = r;
+    note_leaf(ctx, "eg_reorder", std::move(uses), std::move(leaf));
+    const std::uint64_t stream = ctx.dev.stream;
+    Current current(ctx.dev);
+    if (r.n == 0) return;
+    std::vector<DevicePlane> rows;    // a plane of a vector value is (rows..., n): each row moves by the same order
+    unsigned widest = 1;
+    for (const eg_plane_s* p : r.planes) {
+        const DLTensor& t = p->tensor->dl_tensor;
+        const unsigned bytes = t.dtype.bits / 8;
+        std::int64_t count = 1;
+        for (int axis = 0; axis < t.ndim; ++axis) count *= t.shape[axis];
+        for (std::int64_t row = 0; row < count / r.n; ++row) rows.push_back({ static_cast<char*>(at(p)) + row * r.n * bytes, bytes });
+        widest = std::max(widest, bytes);
+    }
+    const std::size_t temp_bytes = permute_temp_bytes(r.n, widest);
+    if (ctx.dev_rec == nullptr) {
+        void* temp = scan_state_for(ctx, stream, 0, temp_bytes);
+        permute_step(stream, rows, at(r.order), r.n, temp);
+        std::uint32_t outside = 0;
+        read_bytes(stream, &outside, temp, sizeof(outside));
+        if (outside != 0) refuse(EG_BAD_REQUEST, order_refusal(outside, r.n));
+        return;
+    }
+    void* temp = nullptr;
+    OutsideKeys* found = nullptr;
+    const char* where = "the working memory";
+    try {
+        temp = alloc_async(stream, temp_bytes, false);
+        where = "the page-locked count";
+        found = new OutsideKeys{ static_cast<std::uint32_t*>(host_pinned_new(sizeof(std::uint32_t))), order_refusal, r.n };
+        where = "the reorder";
+        permute_step(stream, rows, at(r.order), r.n, temp);
+        where = "the copy of the count";
+        queue_read_bytes(stream, found->count, temp, sizeof(std::uint32_t));
+    } catch (const std::exception& why) {
+        refuse(EG_FAULT, std::string("eg_reorder while recording: ") + where + ": " + why.what());
+    }
+    free_async(stream, stream, temp);
+    record_outside_step(ctx, found);
 }
 
 /** @brief The checked reduce @p r on the context's stream, kept in the recording if there is one. */

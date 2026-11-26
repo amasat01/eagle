@@ -1209,14 +1209,18 @@ struct dcount {
 };
 
 /* A plane of @p n elements of @p code / @p bits over device memory @p data. */
-static eg_plane* wrap_device_typed(eg_ctx* ctx, struct tensor* t, void* data, int64_t n, uint8_t code, uint8_t bits) {
-    eg_plane* p = wrap(ctx, t, data, 1, n, 0, 1, 0);
+static eg_plane* wrap_device_rows(eg_ctx* ctx, struct tensor* t, void* data, int64_t rows, int64_t n, uint8_t code, uint8_t bits) {
+    eg_plane* p = wrap(ctx, t, data, rows > 1 ? 2 : 1, rows > 1 ? rows : n, rows > 1 ? n : 0, 1, 0);
     if (p == NULL) return NULL;
     eg_plane_free(ctx, p);
     t->managed.dl_tensor.dtype.code = code;
     t->managed.dl_tensor.dtype.bits = bits;
     p = NULL;
     return eg_plane_wrap(ctx, &t->managed, &p) == EG_OK ? p : NULL;
+}
+
+static eg_plane* wrap_device_typed(eg_ctx* ctx, struct tensor* t, void* data, int64_t n, uint8_t code, uint8_t bits) {
+    return wrap_device_rows(ctx, t, data, 1, n, code, bits);
 }
 
 /* limit_i in 1..50; every 97th sample starts finished. */
@@ -3842,6 +3846,115 @@ static void device_narrow_types(eg_ctx* ctx) {
     cudaFree(d);
 }
 
+/* eg_reorder on a device context: planes of 1, 2, 4 and 8 byte elements and a plane of three rows move by a random order of every size
+ * where a tile ends (the oracle is the host's rule, p[j] = old p[order[j]]); entries outside [0, n) are counted by the call and nothing
+ * moves; a recorded reorder follows the order it finds at each replay. */
+static uint64_t reorder_value(int plane, int64_t i) { return (uint64_t)(i + 1) * 0x9E3779B97F4A7C15ull + (uint64_t)plane * 0x1234567ull; }
+
+static void device_reorders(eg_ctx* ctx) {
+    enum { PLANES = 5, MAXN = 100003 };
+    static const struct { uint8_t code, bits; int rows; } kinds[PLANES] = {
+        { kDLUInt, 8, 1 }, { kDLUInt, 16, 1 }, { kDLUInt, 32, 1 }, { kDLUInt, 64, 1 }, { kDLUInt, 16, 3 } };
+    const int64_t sizes[] = { 1, 255, 256, 257, 4096, MAXN };
+    static uint64_t host[PLANES][3 * MAXN];
+    static uint32_t order[MAXN];
+    int ok = 1;
+    for (size_t s = 0; ok && s < sizeof(sizes) / sizeof(sizes[0]); ++s) {
+        const int64_t n = sizes[s];
+        void* dev[PLANES] = { NULL };
+        uint32_t* dorder = NULL;
+        struct tensor tensors[PLANES], to;
+        eg_plane* planes[PLANES] = { NULL };
+        for (int p = 0; p < PLANES; ++p) {
+            const size_t bytes = (size_t)kinds[p].rows * (size_t)n * (kinds[p].bits / 8);
+            ok = ok && cudaMalloc(&dev[p], bytes) == cudaSuccess;
+            planes[p] = ok ? wrap_device_rows(ctx, &tensors[p], dev[p], kinds[p].rows, n, kinds[p].code, kinds[p].bits) : NULL;
+            ok = ok && planes[p] != NULL;
+            for (int64_t i = 0; i < kinds[p].rows * n; ++i) host[p][i] = reorder_value(p, i);
+            uint8_t* raw = (uint8_t*)malloc(bytes);
+            for (int64_t i = 0; raw && i < kinds[p].rows * n; ++i) memcpy(raw + i * (kinds[p].bits / 8), &host[p][i], kinds[p].bits / 8);
+            ok = ok && raw && cudaMemcpy(dev[p], raw, bytes, cudaMemcpyHostToDevice) == cudaSuccess;
+            free(raw);
+        }
+        ok = ok && cudaMalloc((void**)&dorder, (size_t)n * 4) == cudaSuccess;
+        eg_plane* po = ok ? wrap_device_typed(ctx, &to, dorder, n, kDLUInt, 32) : NULL;
+        for (int64_t i = 0; i < n; ++i) order[i] = (uint32_t)i;
+        uint64_t seed = 12345 + (uint64_t)n;
+        for (int64_t i = n - 1; i > 0; --i) {
+            seed = seed * 6364136223846793005ull + 1442695040888963407ull;
+            const int64_t j = (int64_t)((seed >> 33) % (uint64_t)(i + 1));
+            const uint32_t swap = order[i];
+            order[i] = order[j], order[j] = swap;
+        }
+        ok = ok && po && cudaMemcpy(dorder, order, (size_t)n * 4, cudaMemcpyHostToDevice) == cudaSuccess;
+        struct eg_reorder_desc d = { sizeof(struct eg_reorder_desc), 0, PLANES, planes, po };
+        ok = ok && eg_reorder(ctx, &d) == EG_OK && eg_sync(ctx) == EG_OK;
+        for (int p = 0; ok && p < PLANES; ++p) {
+            const size_t width = kinds[p].bits / 8;
+            uint8_t* raw = (uint8_t*)malloc((size_t)kinds[p].rows * (size_t)n * width);
+            ok = raw && cudaMemcpy(raw, dev[p], (size_t)kinds[p].rows * (size_t)n * width, cudaMemcpyDeviceToHost) == cudaSuccess;
+            for (int r = 0; ok && r < kinds[p].rows; ++r)
+                for (int64_t j = 0; ok && j < n; ++j) {
+                    uint64_t got = 0, want = host[p][r * n + order[j]];
+                    memcpy(&got, raw + ((size_t)r * (size_t)n + (size_t)j) * width, width);
+                    if (width < 8) want &= (1ull << (8 * width)) - 1;
+                    ok = got == want;
+                }
+            free(raw);
+        }
+        char what[160];
+        snprintf(what, sizeof(what), "eg_reorder on the device: five planes (1, 2, 4, 8 byte elements and three rows) over %lld lanes hold what the order gathers", (long long)n);
+        check(ok, what);
+        for (int p = 0; p < PLANES; ++p) eg_plane_free(ctx, planes[p]), cudaFree(dev[p]);
+        eg_plane_free(ctx, po);
+        cudaFree(dorder);
+    }
+    {   /* entries outside [0, n): counted, the planes untouched; a recorded reorder reads the order at each replay */
+        enum { LANES = 4099 };
+        static uint32_t keep[LANES], host_order[LANES], got[LANES];
+        uint32_t *dplane = NULL, *dorder = NULL;
+        struct tensor tp, to;
+        int good = cudaMalloc((void**)&dplane, LANES * 4) == cudaSuccess && cudaMalloc((void**)&dorder, LANES * 4) == cudaSuccess;
+        eg_plane* pp = good ? wrap_device_typed(ctx, &tp, dplane, LANES, kDLUInt, 32) : NULL;
+        eg_plane* po = good ? wrap_device_typed(ctx, &to, dorder, LANES, kDLInt, 32) : NULL;
+        eg_plane* one[1] = { pp };
+        struct eg_reorder_desc d = { sizeof(struct eg_reorder_desc), 0, 1, one, po };
+        for (int i = 0; i < LANES; ++i) keep[i] = (uint32_t)(i * 7 + 1), host_order[i] = (uint32_t)(LANES - 1 - i);
+        good = good && pp && po && cudaMemcpy(dplane, keep, sizeof(keep), cudaMemcpyHostToDevice) == cudaSuccess;
+        host_order[3] = LANES, host_order[LANES - 1] = (uint32_t)-1;
+        good = good && cudaMemcpy(dorder, host_order, sizeof(host_order), cudaMemcpyHostToDevice) == cudaSuccess;
+        cudaDeviceSynchronize();
+        good = good && refused(eg_reorder(ctx, &d), EG_BAD_REQUEST, ctx, "reorder: 2 entries of order are outside [0, 4099)");
+        good = good && cudaMemcpy(got, dplane, sizeof(got), cudaMemcpyDeviceToHost) == cudaSuccess && memcmp(got, keep, sizeof(got)) == 0;
+        check(good, "eg_reorder on the device with two entries outside [0, n): BAD_REQUEST by the call with the host's text, the plane untouched");
+        eg_graph* g = NULL;
+        good = good && eg_record_begin(ctx) == EG_OK && eg_reorder(ctx, &d) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK;
+        for (int run = 0; good && run < 2; ++run) {
+            for (int i = 0; i < LANES; ++i) host_order[i] = (uint32_t)((i + 1 + run) % LANES);
+            if (run == 1) host_order[9] = LANES + 5;
+            cudaMemcpy(dplane, keep, sizeof(keep), cudaMemcpyHostToDevice);
+            cudaMemcpy(dorder, host_order, sizeof(host_order), cudaMemcpyHostToDevice);
+            cudaDeviceSynchronize();
+            const eg_status launched = eg_graph_launch(ctx, g);
+            const eg_status synced = eg_sync(ctx);
+            cudaMemcpy(got, dplane, sizeof(got), cudaMemcpyDeviceToHost);
+            if (run == 0) {
+                int same = launched == EG_OK && synced == EG_OK;
+                for (int i = 0; same && i < LANES; ++i) same = got[i] == keep[(i + 1) % LANES];
+                check(same, "eg_reorder recorded in a device graph and replayed holds what the order gathers");
+            } else {
+                check((launched != EG_OK || synced != EG_OK) && reason_has(ctx, "reorder: 1 entries of order are outside [0, 4099)") && memcmp(got, keep, sizeof(got)) == 0,
+                      "the replay of a recorded device reorder over one entry outside [0, n) fails at the launch or the sync with the host's text and moves nothing");
+            }
+        }
+        if (g) eg_graph_free(ctx, g);
+        eg_plane_free(ctx, pp);
+        eg_plane_free(ctx, po);
+        cudaFree(dplane);
+        cudaFree(dorder);
+    }
+}
+
 /* eg_order_by_key on a device context: key widths and bounds, uniform and half-in-key-0 keys, and the sizes where a tile ends. */
 static void device_orders(eg_ctx* ctx) {
     const int64_t tile = 4096;
@@ -4134,6 +4247,7 @@ int main(int argc, char** argv) {
     device_scans(ctx);
     device_compactions(ctx);
     device_orders(ctx);
+    device_reorders(ctx);
     device_narrow_types(ctx);
     struct eg_reduce_desc rd;
     memset(&rd, 0, sizeof(rd));

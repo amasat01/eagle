@@ -344,6 +344,14 @@ void order_step(std::uint64_t stream, unsigned bits, bool is_signed, const void*
     EAGLE_CHECK_ALWAYS(cudaGetLastError());
 }
 
+std::size_t permute_temp_bytes(std::int64_t n, unsigned widest) { return 16 + filtering::permuteStageBytes(n, widest); }
+
+void permute_step(std::uint64_t stream, const std::vector<DevicePlane>& planes, const void* order, std::int64_t n, void* temp) {
+    const auto t = table(planes);
+    filtering::permuteDevice(t.data(), static_cast<std::uint32_t>(t.size()), static_cast<const std::uint32_t*>(order),
+                             static_cast<std::uint32_t*>(temp), static_cast<char*>(temp) + 16, n, reinterpret_cast<cudaStream_t>(stream));
+}
+
 void compact_step(std::uint64_t stream, const void* keep, void* kept, void* count, std::int64_t n, void* state) {
     cuda::scan::compact_queue(reinterpret_cast<cudaStream_t>(stream), static_cast<const std::uint8_t*>(keep), static_cast<std::uint32_t*>(kept),
                         static_cast<std::uint32_t*>(count), n, state);

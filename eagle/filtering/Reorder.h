@@ -495,6 +495,33 @@ inline void restorePlaneDevice(void* data, void* stage, const std::int32_t* perm
     EAGLE_CHECK_ALWAYS(cudaGetLastError());
 }
 
+/** @brief ``*outside`` += the entries of ``order`` that lie outside ``[0, n)`` (read as unsigned, so a negative one is above ``n``). */
+template<typename WordT>
+AETHER_KERNEL()
+__launch_bounds__(256, 4) void permuteOutside(const WordT* order, WordT* outside, std::int64_t n)
+{
+    WordT mine = 0;
+    for (std::int64_t j = reorderThread(); j < n; j += reorderStride())
+        mine += std::int64_t(order[j]) >= n;
+    for (int offset = 16; offset > 0; offset >>= 1)
+        mine += __shfl_down_sync(0xffffffffu, mine, offset);
+    if ((threadIdx.x & 31) == 0 && mine != 0)
+        atomicAdd(outside, mine);
+}
+
+/** @brief ``plane[j] = stage[order[j]]`` over ``[0, n)``, and nothing at all while ``*outside`` is not 0. */
+template<typename T>
+AETHER_KERNEL()
+__launch_bounds__(256, 4) void permuteGather(const T* stage, T* plane, const std::uint32_t* order,
+    const std::uint32_t* outside, std::int64_t n)
+{
+    if (*outside != 0u)
+        return;
+    const std::int64_t j = reorderThread();
+    if (j < n)
+        plane[j] = stage[order[j]];
+}
+
 #endif // EAGLE_CPU_ONLY
 
 /** @brief Call ``f.template operator()<T>()`` with the element type of @p bytes. */
@@ -626,6 +653,38 @@ inline void restoreDevice(const ReorderPlane* planes, std::uint32_t nPlanes,
     }
     detail::restoreIdentity<std::int32_t><<<nb, 256, 0, stream>>>(perm, inv, n);
     EAGLE_CHECK_ALWAYS(cudaGetLastError());
+}
+
+/**
+ * @brief Permute @p planes in place by @p order on @p stream (device memory):
+ *        afterwards ``p[j]`` holds what ``p[order[j]]`` held, as ``permuteHost``.
+ *
+ * Kernels only, legal while ``stream`` is being captured. The entries of @p order
+ * outside ``[0, n)`` are counted first into the word @p outside (set to 0 here);
+ * while it is not 0 no plane changes, so the caller reads it after the stream
+ * has run. @p stage holds ``permuteStageBytes(n, widest element)`` bytes.
+ */
+inline void permuteDevice(const ReorderPlane* planes, std::uint32_t nPlanes, const std::uint32_t* order,
+    std::uint32_t* outside, void* stage, std::int64_t n, cudaStream_t stream)
+{
+    detail::checkCompact(n);
+    err::detail::clearStaleLastError();  // check only our own launches below
+    EAGLE_CHECK_ALWAYS(cudaMemsetAsync(outside, 0, sizeof(std::uint32_t), stream));
+    if (n == 0)
+        return;
+    const unsigned nb = unsigned((n + 255) / 256);
+    detail::permuteOutside<std::uint32_t><<<nb < 1024u ? nb : 1024u, 256, 0, stream>>>(order, outside, n);
+    EAGLE_CHECK_ALWAYS(cudaGetLastError());
+    for (std::uint32_t p = 0; p < nPlanes; ++p) {
+        detail::withElem(planes[p].elemBytes, [&]<typename T>() {
+            T* plane = static_cast<T*>(planes[p].data);
+            T* staged = static_cast<T*>(stage);
+            detail::reorderStage<T><<<nb, 256, 0, stream>>>(plane, staged, nullptr, nullptr, n);
+            EAGLE_CHECK_ALWAYS(cudaGetLastError());
+            detail::permuteGather<T><<<nb, 256, 0, stream>>>(staged, plane, order, outside, n);
+            EAGLE_CHECK_ALWAYS(cudaGetLastError());
+        });
+    }
 }
 
 /**

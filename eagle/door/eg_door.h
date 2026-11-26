@@ -1259,8 +1259,9 @@ eg_status eg_order_by_key(eg_ctx* ctx, const struct eg_order_desc* desc);
  * lane axis, planes whose last axis is not the extent of ``order``, an
  * ``order`` that is not an int32 or uint32 plane of one axis, planes that
  * overlap, an extent above 2^31 - 1, a plane that is not contiguous, a
- * read-only plane, an entry of ``order`` outside [0, n)); NOT_WRITTEN (a device
- * context).
+ * read-only plane, an entry of ``order`` outside [0, n)). On a device context the planes are staged and
+ * gathered back on the context's stream; the entries outside [0, n) are counted on the device before anything
+ * moves, the eager call waits for the count, and a replay fails at the next ``eg_graph_launch`` or ``eg_sync``.
  */
 eg_status eg_reorder(eg_ctx* ctx, const struct eg_reorder_desc* desc);
 
