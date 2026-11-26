@@ -207,8 +207,8 @@ struct GroupScratchFacts {
     std::int64_t elements = 0, bytes = 0; ///< per group
 };
 
-/** @brief A unit's group record (eg_unit_meta.group), checked at eg_unit_load;
- * no launch reads it yet (eg_plan_new refuses a unit that has one). */
+/** @brief A unit's group record (eg_unit_meta.group), checked at eg_unit_load; the device launch reads it
+ * (a block per group, its scratch in dynamic shared memory); the host launch reads it for the groups of a range. */
 struct GroupFacts {
     bool present            = false;
     std::int32_t membership = 0; ///< EG_GROUP_*
@@ -668,7 +668,7 @@ struct DeviceState {
         std::size_t clean = 0;    ///< the first ``clean`` bytes are zero (what a scan, a compaction or a sort asks of its working memory)
     };
     std::unordered_map<std::uint64_t, ScanState> scan_state;         ///< stream -> the working memory of its eager scans, grown on demand (device/Device.cpp)
-    int sms = 0, regs_per_sm = 0, smem_per_sm = 0, threads_per_sm = 0, cc_major = 0, cc_minor = 0;
+    int sms = 0, regs_per_sm = 0, smem_per_sm = 0, smem_per_block = 0, threads_per_sm = 0, cc_major = 0, cc_minor = 0;
     int clock_khz = 0, memory_clock_khz = 0, bus_bits = 0, l2_bytes = 0;   ///< the device's clocks, memory bus and L2: what its peak rates are derived from
     int fp64_ratio = 1;                       ///< FP32:FP64 throughput ratio (1 when not reported)
     std::unordered_map<void*, std::uint64_t> alloc_stream;   ///< each live device_alloc block -> the stream it was allocated on

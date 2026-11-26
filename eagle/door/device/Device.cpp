@@ -236,10 +236,49 @@ unsigned launch_block(const DeviceState& d, const eg_unit_s& u, std::int64_t n) 
     return u.block > 0 ? static_cast<unsigned>(u.block) : resolved_block(d, u, n);
 }
 
+/** @brief The threads of the block that serves one group of @p u: the group's size bound rounded up to whole warps, at most 256 and what
+ *  the kernel can launch with; 256 when the bound is not stated. A group larger than the block is strided over its threads. */
+unsigned group_threads(const eg_unit_s& u) {
+    constexpr std::int64_t warp = 32, widest = 256;
+    const std::int64_t bound = u.group_record.max_size;
+    const std::int64_t wanted = bound > 0 ? std::min(widest, (bound + warp - 1) / warp * warp) : widest;
+    return static_cast<unsigned>(std::max(warp, std::min(wanted, static_cast<std::int64_t>(u.max_threads) / warp * warp)));
+}
+
+/** @brief The dynamic shared memory one group of @p u asks for: each scratch plane's bytes rounded up to eight, the carve the unit's text makes.
+ *  Refuses by name a group whose scratch does not fit the card's shared memory per block. */
+unsigned group_shared_bytes(const DeviceState& d, const eg_unit_s& u) {
+    std::int64_t bytes = 0;
+    for (const GroupScratchFacts& plane : u.group_record.scratch) bytes += (plane.bytes + 7) / 8 * 8;
+    if (bytes > d.smem_per_block)
+        refuse(EG_NOT_WRITTEN, "unit '" + u.name + "' on DEVICE: a group's scratch is " + std::to_string(bytes) +
+               " bytes and the card's shared memory per block is " + std::to_string(d.smem_per_block) + "; scratch in a device plane is not written yet");
+    return static_cast<unsigned>(bytes);
+}
+
+/** @brief Launch @p u over the groups of @p p, a block per group: the partition's base is its first group, its count the groups. */
+void launch_groups(const DeviceState& d, const eg_unit_s& u, const std::vector<void*>& args, const exec::Partition& p, CUstream stream) {
+    if (p.count <= 0) return;
+    EG_DRIVER(cuLaunchKernel);
+    std::int64_t base = p.base, count = p.count, n = p.nSamples;
+    std::vector<void*> params = args;
+    params.push_back(&base);
+    params.push_back(&count);
+    params.push_back(&n);
+    check(cuLaunchKernel_(reinterpret_cast<CUfunction>(u.function), static_cast<unsigned>(p.count), 1, 1, group_threads(u), 1, 1,
+                          group_shared_bytes(d, u), stream, params.data(), nullptr),
+          "unit '" + u.name + "': the group launch");
+}
+
 /** @brief Keep the geometry of the launch @p plan's first partition gets, the figures eg_runner_figures reads. */
 void note_launch(const DeviceState& d, const eg_plan_s& plan, DeviceRun& r) {
     if (plan.unit->function == 0 || plan.parts.empty()) return;    // a split unit launches per stage
     const std::int64_t count = plan.parts[0].count;
+    if (plan.unit->group_record.present) {
+        r.block = group_threads(*plan.unit);
+        r.grid = static_cast<unsigned>(count);
+        return;
+    }
     r.block = launch_block(d, *plan.unit, count);
     r.grid = exec::DeviceKernel::grid(count, r.block);
 }
@@ -599,6 +638,7 @@ void device_open(eg_ctx& ctx, std::int32_t device) {
     d.sms = attribute(dev, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, "SMs");
     d.regs_per_sm = attribute(dev, CU_DEVICE_ATTRIBUTE_MAX_REGISTERS_PER_MULTIPROCESSOR, "registers per SM");
     d.smem_per_sm = attribute(dev, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR, "shared memory per SM");
+    d.smem_per_block = attribute(dev, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK, "shared memory per block");
     d.threads_per_sm = attribute(dev, CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR, "threads per SM");
     d.fp64_ratio = std::max(1, attribute(dev, CU_DEVICE_ATTRIBUTE_SINGLE_TO_DOUBLE_PRECISION_PERF_RATIO, "FP64 ratio"));
     d.cc_major = attribute(dev, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, "compute capability");
@@ -759,8 +799,10 @@ void launch_on(const eg_plan_s& plan, std::uint64_t stream, bool products = true
         if (plan.bindings[static_cast<std::size_t>(f.mix)].plane == nullptr)
             zero_bytes(stream, static_cast<char*>(mix->tensor->dl_tensor.data) + mix->tensor->dl_tensor.byte_offset, static_cast<std::size_t>(f.k) * sizeof(std::uint32_t));
     }
-    for (const exec::Partition& p : plan.parts)
-        exec::DeviceKernel::run(reinterpret_cast<CUfunction>(u.function), plan.params, p, s, launch_block(d, u, p.count));
+    for (const exec::Partition& p : plan.parts) {
+        if (u.group_record.present) launch_groups(d, u, plan.params, p, s);
+        else exec::DeviceKernel::run(reinterpret_cast<CUfunction>(u.function), plan.params, p, s, launch_block(d, u, p.count));
+    }
     for (const CompanionFacts& c : u.companions) {
         const std::int64_t size = elements(plan.bindings[c.target].plane->tensor->dl_tensor);
         exec::DeviceKernel::run(reinterpret_cast<CUfunction>(c.device_fold), plan.params, exec::Partition{ 0, size, size }, s);
@@ -1294,6 +1336,8 @@ void device_columns(eg_ctx& ctx, int op, void* dst, std::int64_t dst_ld, const v
  *  one resolved at @p of samples (the old path's ``_resolved_block`` of the plan's width). */
 void device_launch_prefix(eg_plan_s& plan, std::int64_t count, std::int64_t of) {
     if (count <= 0) return;
+    if (plan.unit->group_record.present)
+        refuse(EG_NOT_WRITTEN, "unit '" + plan.unit->name + "': a launch over a prefix of the lanes is not written for a unit with a group");
     const DeviceState& d = plan.ctx->dev;
     const eg_unit_s& u = *plan.unit;
     Current current(d);

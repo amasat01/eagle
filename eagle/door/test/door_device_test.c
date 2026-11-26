@@ -3427,7 +3427,7 @@ static void device_scans(eg_ctx* ctx) {
         cudaMemset(d, 0x5A, 64);
         eg_plane* pi = wrap_device_typed(ctx, &ti, d, 0, kDLFloat, 64);
         eg_plane* po = wrap_device_typed(ctx, &to, d + 4, 0, kDLFloat, 64);
-        struct eg_scan_desc desc = { sizeof(struct eg_scan_desc), 0, pi, po, EG_SCAN_SUM };
+        struct eg_scan_desc desc = { sizeof(struct eg_scan_desc), 0, pi, po, EG_SCAN_SUM, NULL };
         unsigned char got[32];
         const int ok = pi && po && eg_scan(ctx, &desc) == EG_OK && eg_sync(ctx) == EG_OK &&
                        cudaMemcpy(got, d + 4, sizeof(got), cudaMemcpyDeviceToHost) == cudaSuccess && got[0] == 0x5A && got[31] == 0x5A;
@@ -3444,7 +3444,7 @@ static void device_scans(eg_ctx* ctx) {
         struct tensor ti, to;
         eg_plane* pi = ok ? wrap_device_typed(ctx, &ti, din, n, kDLInt, 32) : NULL;
         eg_plane* po = ok ? wrap_device_typed(ctx, &to, dout, n, kDLInt, 32) : NULL;
-        struct eg_scan_desc desc = { sizeof(struct eg_scan_desc), 0, pi, po, EG_SCAN_SUM };
+        struct eg_scan_desc desc = { sizeof(struct eg_scan_desc), 0, pi, po, EG_SCAN_SUM, NULL };
         eg_graph* g = NULL;
         ok = ok && pi && po && eg_record_begin(ctx) == EG_OK && eg_scan(ctx, &desc) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK;
         for (int run = 0; ok && run < 2; ++run) {
@@ -3477,7 +3477,7 @@ static void device_scans(eg_ctx* ctx) {
         struct tensor ti, to;
         eg_plane* pi = ok ? wrap_device_typed(ctx, &ti, din + 1, n, kDLFloat, 64) : NULL;
         eg_plane* po = ok ? wrap_device_typed(ctx, &to, dout + 1, n, kDLFloat, 64) : NULL;
-        struct eg_scan_desc desc = { sizeof(struct eg_scan_desc), 0, pi, po, EG_SCAN_SUM };
+        struct eg_scan_desc desc = { sizeof(struct eg_scan_desc), 0, pi, po, EG_SCAN_SUM, NULL };
         cudaDeviceSynchronize();
         ok = ok && pi && po && eg_scan(ctx, &desc) == EG_OK && eg_sync(ctx) == EG_OK &&
              cudaMemcpy(host_out, dout + 1, (size_t)n * 8, cudaMemcpyDeviceToHost) == cudaSuccess;
@@ -3502,7 +3502,7 @@ static void device_scans(eg_ctx* ctx) {
         struct tensor ti, to;
         eg_plane* pi = ok ? wrap_device_typed(ctx, &ti, din, n, kDLFloat, 32) : NULL;
         eg_plane* po = ok ? wrap_device_typed(ctx, &to, dout, n, kDLFloat, 32) : NULL;
-        struct eg_scan_desc desc = { sizeof(struct eg_scan_desc), 0, pi, po, EG_SCAN_SUM };
+        struct eg_scan_desc desc = { sizeof(struct eg_scan_desc), 0, pi, po, EG_SCAN_SUM, NULL };
         int same = 1;
         for (int run = 0; ok && pi && po && run < 25; ++run) {
             cudaMemset(dout, 0x5A, (size_t)n * 4);
