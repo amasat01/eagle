@@ -69,13 +69,13 @@ struct ClassTrigger {
 
 #ifndef EAGLE_CPU_ONLY
 namespace detail {
-/** @brief The device sort's own memory in a class sort: the 32-bit keys, the order and the starts, then its zeroed working memory and its temporaries. */
+/** @brief The device sort's own memory in a class sort: the 32-bit keys, the order and the starts, then its temporaries. */
 inline std::size_t classSortArea(std::int64_t n, std::uint32_t classes)
 {
     const std::int64_t m = n > 0 ? n : 1;
     const std::int64_t k = std::int64_t(classes) + 1;    // the classes, the dead and the slots past the live span are one more key each
     return (std::size_t(m) * 4u + 15u) / 16u * 16u * 2u + (std::size_t(k) + 1u) * 4u + 48u
-        + cuda::order::state_bytes(cuda::order::shape_of(m, k + 1)) + cuda::order::layout_of(cuda::order::shape_of(m, k + 1)).bytes;
+        + cuda::order::layout_of(cuda::order::shape_of(m, k + 1)).bytes;
 }
 } // namespace detail
 #endif
@@ -318,12 +318,10 @@ inline void reorderClassesDevice(const ReorderPlane* planes, std::uint32_t nPlan
     std::uint32_t* keys       = reinterpret_cast<std::uint32_t*>(area);
     std::uint32_t* order      = keys + (std::size_t(n) * 4u + 15u) / 16u * 4u;
     std::uint32_t* starts     = order + (std::size_t(n) * 4u + 15u) / 16u * 4u;
-    void* state               = reinterpret_cast<char*>(starts) + (std::size_t(nKeys + 2u) * 4u + 15u) / 16u * 16u;
-    void* temp                = static_cast<char*>(state) + cuda::order::state_bytes(shape);
+    void* temp                = reinterpret_cast<char*>(starts) + (std::size_t(nKeys + 2u) * 4u + 15u) / 16u * 16u;
     detail::classKeys<<<nb, 256, 0, stream>>>(mask, classPlane, keys, lim, classes, drop, within, n);
     EAGLE_CHECK_ALWAYS(cudaGetLastError());
-    EAGLE_CHECK_ALWAYS(cudaMemsetAsync(state, 0, cuda::order::state_bytes(shape), stream));
-    cuda::order::queue<std::uint32_t>(stream, keys, shape, order, starts, state, temp);
+    cuda::order::queue<std::uint32_t>(stream, keys, shape, order, starts, temp);
     EAGLE_CHECK_ALWAYS(cudaGetLastError());
     detail::classPlaces<<<nb, 256, 0, stream>>>(order, dst, n);
     EAGLE_CHECK_ALWAYS(cudaGetLastError());

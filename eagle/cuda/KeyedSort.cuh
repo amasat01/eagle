@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // The device stable sort by integer key behind ``eg_order_by_key`` (nvcc only; included by the door's device/Loop.cu). The
-// lanes are ordered by least-significant-digit radix passes over the bits a key bound needs: each pass counts the digits of every
-// tile of lanes, scans the counts (digit-major, with the single-pass scan of ``cuda/ScanKernels.cuh``) and scatters the lanes to
-// their places, ranking the lanes of a tile that share a digit in lane order, so every pass is stable and the result is one value
-// on every run. The first place of each key then comes from the runs of equal keys in the sorted order: a compaction finds the
-// run starts, the run lengths are the counts and an exclusive scan of the counts is ``starts``. Keys outside [0, bound) are
-// counted by the first pass.
+// lanes are ordered by least-significant-digit radix passes over the bits a key bound needs. One read of the keys counts the
+// digits of every pass (and the keys outside [0, bound)); each pass then scatters the lanes of a tile to their places, ranking the
+// lanes of a tile that share a digit in lane order and finding the lanes of the tiles before it by a look-back over their counts,
+// so every pass is stable and the result is one value on every run. The first place of each key (``starts``) is the digit's first
+// place for a single pass, and a binary search of the sorted keys over the most significant digit's lanes for more.
 #pragma once
 
 #include <cstddef>
@@ -24,6 +23,10 @@ constexpr int kWarps = kBlock / scan::kWarp;
 constexpr int kItems = 16;                                   ///< lanes per thread
 constexpr long long kTile = static_cast<long long>(kBlock) * kItems;
 constexpr unsigned kMaxWidth = 8;                            ///< bits of a digit: at most 256 bins
+constexpr unsigned kMaxPasses = 4;                           ///< passes over a 32-bit key
+constexpr int kHistogramBlocks = 64;                          ///< blocks that count the digits, each over several tiles
+constexpr long long kFewKeys = 16;                             ///< a bound this many times below the lanes gets ``first_places``
+constexpr long long kShortStretch = 8;                       ///< keys a lane writes alone in ``fill_starts``
 
 /** @brief What a sort of ``n`` lanes with the key bound ``bound`` does: the bits its keys need, the passes over them and the tiles. */
 struct Shape {
@@ -48,21 +51,10 @@ inline Shape shape_of(long long n, long long bound) {
 /** @brief Round ``bytes`` up to a multiple of 16. */
 constexpr std::size_t up16(std::size_t bytes) { return (bytes + 15) / 16 * 16; }
 
-/** @brief The bytes of zeroed working memory (``scan::state_bytes``-style, left zero) the largest scan or compaction of a sort needs. */
-inline std::size_t state_bytes(const Shape& s) {
-    std::size_t most = scan::compact_state_bytes(s.n);
-    const std::size_t counts = scan::state_bytes<std::uint32_t>(static_cast<long long>(s.bins) * s.tiles);
-    const std::size_t starts = scan::state_bytes<std::uint32_t>(s.bound + 1);
-    if (counts > most) most = counts;
-    if (starts > most) most = starts;
-    return up16(most);
-}
-
 /** @brief Where the temporary arrays of a sort lie in its scratch (not zeroed). */
 struct Layout {
     std::size_t bad = 0;              ///< a 32-bit count of keys outside the bound
-    std::size_t runs = 16;            ///< a 32-bit count of runs of equal keys
-    std::size_t key_a, idx_a, key_b, idx_b, counts, mask, boundaries, bytes;
+    std::size_t key_a, idx_a, key_b, idx_b, digits, ticket, status, bytes;
 };
 
 inline Layout layout_of(const Shape& s) {
@@ -72,10 +64,10 @@ inline Layout layout_of(const Shape& s) {
     l.idx_a = l.key_a + lanes;
     l.key_b = l.idx_a + lanes;
     l.idx_b = l.key_b + lanes;
-    l.counts = l.idx_b + lanes;
-    l.mask = l.counts + up16(static_cast<std::size_t>(s.bins) * static_cast<std::size_t>(s.tiles) * 4);
-    l.boundaries = l.mask + up16(static_cast<std::size_t>(s.n));
-    l.bytes = l.boundaries + lanes;
+    l.digits = l.idx_b + lanes;                                                            // kMaxPasses * 256 words
+    l.ticket = l.digits + kMaxPasses * (1u << kMaxWidth) * 4;                              // 16 bytes, then the status
+    l.status = l.ticket + 16;
+    l.bytes = l.status + up16(static_cast<std::size_t>(s.bins) * static_cast<std::size_t>(s.tiles) * 8);
     return l;
 }
 
@@ -96,63 +88,97 @@ __device__ __forceinline__ bool outside(Key v, unsigned long long bound) {
     else return static_cast<unsigned long long>(v) >= bound;
 }
 
-/** @brief The digit counts of every tile: ``counts[digit * tiles + tile]``. The first pass reads the typed keys and counts the keys
- *  outside the bound into ``bad``; later passes read the 32-bit keys of the pass before. */
-template <class Key, bool First>
-__global__ void __launch_bounds__(kBlock) upsweep(const Key* typed, const std::uint32_t* keys, long long n, int tiles, unsigned shift,
-                                                  unsigned width, unsigned long long bound, std::uint32_t* counts, std::uint32_t* bad) {
-    __shared__ unsigned histogram[1u << kMaxWidth];
-    for (unsigned d = threadIdx.x; d < (1u << width); d += kBlock) histogram[d] = 0;
-    __syncthreads();
-    const int warp = threadIdx.x / scan::kWarp, lane = threadIdx.x % scan::kWarp;
-    const long long base = static_cast<long long>(blockIdx.x) * kTile + static_cast<long long>(warp) * kItems * scan::kWarp;
-    const unsigned mask = (1u << width) - 1u;
-    unsigned lanes_below = (1u << lane) - 1u;
-    (void)lanes_below;
-    for (int j = 0; j < kItems; ++j) {
-        const long long at = base + static_cast<long long>(j) * scan::kWarp + lane;
-        const bool valid = at < n;
-        std::uint32_t key = 0;
-        bool bad_key = false;
-        if constexpr (First) {
-            if (valid) {
-                const Key v = typed[at];
-                bad_key = outside<Key>(v, bound);
-                key = static_cast<std::uint32_t>(v);
-            }
-        } else {
-            if (valid) key = keys[at];
-        }
-        const unsigned digit = (key >> shift) & mask;
-        const unsigned active = __ballot_sync(0xffffffffu, valid);
-        const unsigned same = match_digit(digit, width, active);
-        if (valid && (same & ((1u << lane) - 1u)) == 0) atomicAdd(&histogram[digit], static_cast<unsigned>(__popc(same)));
-        if constexpr (First) {
-            const unsigned bad_lanes = __ballot_sync(0xffffffffu, bad_key);
-            if (lane == 0 && bad_lanes != 0) atomicAdd(bad, static_cast<unsigned>(__popc(bad_lanes)));
-        }
-    }
-    __syncthreads();
-    for (unsigned d = threadIdx.x; d < (1u << width); d += kBlock) counts[static_cast<long long>(d) * tiles + blockIdx.x] = histogram[d];
+/** @brief The bits of the digit of pass ``pass``: every pass takes ``shape.width`` bits but the last, which takes what is left. */
+__host__ __device__ constexpr unsigned digit_bits(unsigned pass, unsigned passes, unsigned width, unsigned bits) {
+    return pass + 1 == passes ? bits - pass * width : width;
 }
 
-/** @brief Place every lane of a tile at its sorted place for this digit: ``offsets[digit * tiles + tile]`` (the scan of the counts) plus
- *  the number of lanes of the tile that come before it with the same digit. The first pass reads the typed keys and numbers the
- *  lanes itself; later passes read the 32-bit keys and lane numbers of the pass before. */
+/** @brief ``digits[pass * 256 + d]`` counts the lanes whose digit of that pass is ``d``, for every pass in one read of the typed keys,
+ *  and ``bad`` counts the keys outside [0, bound). The blocks take the tiles in turn, so that few of them add their counts to the
+ *  global ones. */
+template <class Key>
+__global__ void __launch_bounds__(kBlock) histogram(const Key* typed, long long n, long long tiles, unsigned passes, unsigned width, unsigned bits,
+                                                    unsigned long long bound, std::uint32_t* digits, std::uint32_t* bad) {
+    __shared__ unsigned local[kMaxPasses][1u << kMaxWidth];
+    for (unsigned e = threadIdx.x; e < kMaxPasses * (1u << kMaxWidth); e += kBlock) (&local[0][0])[e] = 0;
+    __syncthreads();
+    unsigned outside_count = 0;
+    for (long long tile = blockIdx.x; tile < tiles; tile += gridDim.x) {
+        const long long base = tile * kTile;
+        Key held[kItems];  // all the loads are issued before the first count waits for one
+#pragma unroll
+        for (int j = 0; j < kItems; ++j) {
+            const long long at = base + static_cast<long long>(j) * kBlock + threadIdx.x;
+            if (at < n) held[j] = typed[at];
+        }
+#pragma unroll
+        for (int j = 0; j < kItems; ++j) {
+            if (base + static_cast<long long>(j) * kBlock + threadIdx.x >= n) continue;
+            outside_count += outside<Key>(held[j], bound);
+            const std::uint32_t key = static_cast<std::uint32_t>(held[j]);
+            for (unsigned p = 0; p < passes; ++p) atomicAdd(&local[p][(key >> (p * width)) & ((1u << digit_bits(p, passes, width, bits)) - 1u)], 1u);
+        }
+    }
+    if (outside_count != 0) atomicAdd(bad, outside_count);
+    __syncthreads();
+    for (unsigned p = 0; p < passes; ++p)
+        for (unsigned d = threadIdx.x; d < (1u << digit_bits(p, passes, width, bits)); d += kBlock)
+            if (local[p][d] != 0) atomicAdd(&digits[p * (1u << kMaxWidth) + d], local[p][d]);
+}
+
+/** @brief One block per pass: ``digits`` of the pass becomes its exclusive scan, the first place of every digit in the lanes sorted by
+ *  that pass. A single pass is also the sort's ``starts`` (``bound + 1`` words), as the keys are the digits. */
+__global__ void __launch_bounds__(kBlock) digit_bases(std::uint32_t* digits, unsigned passes, unsigned width, unsigned bits, long long n,
+                                                      long long bound, std::uint32_t* starts) {
+    __shared__ unsigned base[1u << kMaxWidth];
+    __shared__ unsigned warp_total[kWarps];
+    const unsigned pass = blockIdx.x;
+    std::uint32_t* mine = digits + pass * (1u << kMaxWidth);
+    const unsigned bins = 1u << digit_bits(pass, passes, width, bits);
+    const unsigned count = threadIdx.x < bins ? mine[threadIdx.x] : 0;
+    const int lane = threadIdx.x % scan::kWarp, warp = threadIdx.x / scan::kWarp;
+    unsigned inclusive = count;
+    for (int offset = 1; offset < scan::kWarp; offset <<= 1) {
+        const unsigned below = __shfl_up_sync(0xffffffffu, inclusive, offset);
+        if (lane >= offset) inclusive += below;
+    }
+    if (lane == scan::kWarp - 1) warp_total[warp] = inclusive;
+    __syncthreads();
+    unsigned before = 0;
+    for (int w = 0; w < warp; ++w) before += warp_total[w];
+    base[threadIdx.x] = before + inclusive - count;
+    __syncthreads();
+    if (threadIdx.x < bins) mine[threadIdx.x] = base[threadIdx.x];
+    if (passes == 1)
+        for (long long k = threadIdx.x; k <= bound; k += kBlock) starts[k] = k < bins ? base[k] : static_cast<std::uint32_t>(n);
+}
+
+/** @brief Status of a tile's count of one digit in ``scatter``: ``kAggregate`` is the tile's own count, ``kInclusive`` the count of all
+ *  the tiles up to and including it; both ride in the high word of one 64-bit store, so a reader sees a flag with its value. */
+constexpr unsigned long long kAggregate = 1ull << 32;
+constexpr unsigned long long kInclusive = 2ull << 32;
+
+/** @brief Place every lane of a tile at its sorted place for this digit: the digit's first place (``bases``) plus the lanes of the
+ *  tiles before it with the same digit (found by a look-back over their counts, ``status``) plus the lanes of the tile before it with
+ *  the same digit. Tiles are taken in order from ``ticket``, so the tiles looked back at have all begun. The first pass reads the typed
+ *  keys and numbers the lanes itself; later passes read the 32-bit keys and lane numbers of the pass before. */
 template <class Key, bool First>
-__global__ void __launch_bounds__(kBlock) downsweep(const Key* typed, const std::uint32_t* keys, const std::uint32_t* lanes, long long n, int tiles,
-                                                    unsigned shift, unsigned width, const std::uint32_t* offsets, std::uint32_t* out_keys,
-                                                    std::uint32_t* out_lanes) {
+__global__ void __launch_bounds__(kBlock) scatter(const Key* typed, const std::uint32_t* keys, const std::uint32_t* lanes, long long n, unsigned shift,
+                                                  unsigned width, unsigned bins, const std::uint32_t* bases, unsigned long long* status,
+                                                  std::uint32_t* ticket, std::uint32_t* out_keys, std::uint32_t* out_lanes) {
     __shared__ unsigned warp_count[kWarps][1u << kMaxWidth];
     __shared__ unsigned tile_offset[1u << kMaxWidth];
-    const unsigned bins = 1u << width;
-    for (unsigned d = threadIdx.x; d < bins; d += kBlock) {
+    __shared__ unsigned digit_start[1u << kMaxWidth];
+    __shared__ unsigned warp_total[kWarps];
+    __shared__ std::uint32_t stage_key[kTile], stage_lane[kTile];
+    __shared__ unsigned taken;
+    if (threadIdx.x == 0) taken = atomicAdd(ticket, 1u);
+    for (unsigned d = threadIdx.x; d < bins; d += kBlock)
         for (int w = 0; w < kWarps; ++w) warp_count[w][d] = 0;
-        tile_offset[d] = offsets[static_cast<long long>(d) * tiles + blockIdx.x];
-    }
     __syncthreads();
+    const long long tile = taken;
     const int warp = threadIdx.x / scan::kWarp, lane = threadIdx.x % scan::kWarp;
-    const long long base = static_cast<long long>(blockIdx.x) * kTile + static_cast<long long>(warp) * kItems * scan::kWarp;
+    const long long base = tile * kTile + static_cast<long long>(warp) * kItems * scan::kWarp;
     const unsigned mask = (1u << width) - 1u;
     std::uint32_t key[kItems], number[kItems];
     unsigned digit[kItems], same[kItems], rank[kItems];
@@ -185,40 +211,107 @@ __global__ void __launch_bounds__(kBlock) downsweep(const Key* typed, const std:
         __syncwarp();
     }
     __syncthreads();
-    for (unsigned d = threadIdx.x; d < bins; d += kBlock) {
+    // Each digit's count over the whole tile, and each warp's start inside its digit (exclusive over the warps).
+    unsigned total = 0;
+    if (threadIdx.x < bins) {
         unsigned running = 0;
         for (int w = 0; w < kWarps; ++w) {
-            const unsigned c = warp_count[w][d];
-            warp_count[w][d] = running;
+            const unsigned c = warp_count[w][threadIdx.x];
+            warp_count[w][threadIdx.x] = running;
             running += c;
         }
+        total = running;
+        // The tile's own count is published before the look-back, so that no tile waits for one that waits for it.
+        status[tile * bins + threadIdx.x] = (tile == 0 ? kInclusive : kAggregate) | total;
+    }
+    // Where each digit starts inside the tile once it is sorted: the exclusive scan of the digit totals over the threads.
+    unsigned inclusive = total;
+    for (int offset = 1; offset < scan::kWarp; offset <<= 1) {
+        const unsigned below = __shfl_up_sync(0xffffffffu, inclusive, offset);
+        if (lane >= offset) inclusive += below;
+    }
+    if (lane == scan::kWarp - 1) warp_total[warp] = inclusive;
+    __syncthreads();
+    unsigned before = 0;
+    for (int w = 0; w < warp; ++w) before += warp_total[w];
+    if (threadIdx.x < bins) {
+        digit_start[threadIdx.x] = before + inclusive - total;
+        // The lanes of the tiles before this one with this digit: the counts of the tiles back to one that knows its inclusive count.
+        unsigned running = 0;
+        for (long long t = tile - 1; t >= 0; --t) {
+            unsigned long long word;
+            do word = *reinterpret_cast<volatile unsigned long long*>(&status[t * bins + threadIdx.x]);
+            while (word == 0);
+            running += static_cast<unsigned>(word);
+            if (word >= kInclusive) break;
+        }
+        if (tile != 0) status[tile * bins + threadIdx.x] = kInclusive | (running + total);
+        tile_offset[threadIdx.x] = bases[threadIdx.x] + running;
     }
     __syncthreads();
+    // The tile is held sorted by digit in shared memory, so that the writes below are runs of consecutive places.
     for (int j = 0; j < kItems; ++j) {
         const long long at = base + static_cast<long long>(j) * scan::kWarp + lane;
         if (at < n) {
-            const unsigned place = tile_offset[digit[j]] + warp_count[warp][digit[j]] + rank[j];
-            out_keys[place] = key[j];
-            out_lanes[place] = number[j];
+            const unsigned local = digit_start[digit[j]] + warp_count[warp][digit[j]] + rank[j];
+            stage_key[local] = key[j];
+            stage_lane[local] = number[j];
         }
+    }
+    __syncthreads();
+    const long long left = n - tile * kTile;
+    const int held = left < kTile ? static_cast<int>(left) : static_cast<int>(kTile);
+    for (int at = threadIdx.x; at < held; at += kBlock) {
+        const std::uint32_t sorted_key = stage_key[at];
+        const unsigned d = (sorted_key >> shift) & mask;
+        const unsigned place = tile_offset[d] + static_cast<unsigned>(at) - digit_start[d];
+        out_keys[place] = sorted_key;
+        out_lanes[place] = stage_lane[at];
     }
 }
 
-/** @brief ``flags[j]`` is 1 where a run of equal keys starts in the sorted 32-bit keys. */
-__global__ void run_starts(const std::uint32_t* sorted, long long n, std::uint8_t* flags) {
-    for (long long j = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x; j < n; j += static_cast<long long>(gridDim.x) * blockDim.x)
-        flags[j] = j == 0 || sorted[j] != sorted[j - 1];
+/** @brief ``starts[key]`` is the first place of ``key`` in the sorted keys, for ``key`` in [0, bound]: a binary search of the sorted
+ *  keys, over the lanes of the key's most significant digit, whose first places are ``top_bases``. It serves the bounds that are few
+ *  beside the lanes, where one thread a key is cheaper than one thread a lane. */
+__global__ void first_places(const std::uint32_t* sorted, long long n, long long bound, unsigned top_shift, unsigned top_bins,
+                             const std::uint32_t* top_bases, std::uint32_t* starts) {
+    for (long long k = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x; k <= bound; k += static_cast<long long>(gridDim.x) * blockDim.x) {
+        if (k == bound) {
+            starts[k] = static_cast<std::uint32_t>(n);
+            continue;
+        }
+        const unsigned top = static_cast<unsigned>(k >> top_shift);
+        unsigned low = top_bases[top], high = top + 1 < top_bins ? top_bases[top + 1] : static_cast<unsigned>(n);
+        while (low < high) {
+            const unsigned middle = low + (high - low) / 2;
+            if (sorted[middle] < k) low = middle + 1;
+            else high = middle;
+        }
+        starts[k] = low;
+    }
 }
 
-/** @brief ``counts[key]`` is the length of the run of ``key``, for the runs ``0 .. *runs - 1`` that start at ``starts_at``. */
-__global__ void run_lengths(const std::uint32_t* starts_at, const std::uint32_t* runs, const std::uint32_t* sorted, long long n, unsigned long long bound,
-                            std::uint32_t* counts) {
-    const long long total = *runs;
-    for (long long r = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x; r < total; r += static_cast<long long>(gridDim.x) * blockDim.x) {
-        const long long first = starts_at[r];
-        const long long end = r + 1 < total ? starts_at[r + 1] : n;
-        const unsigned long long key = sorted[first];
-        if (key < bound) counts[key] = static_cast<std::uint32_t>(end - first);
+/** @brief ``starts[key]`` is the first place of ``key`` in the sorted keys, for ``key`` in [0, bound]: every place that starts a run of
+ *  equal keys gives its place to the keys from the run before it, as far as its own key, and the keys past the last run start at ``n``.
+ *  A warp writes the long stretches together, one lane's stretch at a time. */
+__global__ void fill_starts(const std::uint32_t* sorted, long long n, long long bound, std::uint32_t* starts) {
+    for (long long i = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x; i - threadIdx.x % scan::kWarp <= n;
+         i += static_cast<long long>(gridDim.x) * blockDim.x) {
+        const long long key = i < n ? static_cast<long long>(sorted[i]) : bound;
+        const long long before = i == 0 || i > n ? -1 : static_cast<long long>(sorted[i - 1]);
+        const long long last = key < bound ? key : bound;
+        const bool starts_run = i <= n && key > before && before < bound;
+        const long long first = before + 1;
+        const long long length = starts_run ? last - first + 1 : 0;
+        for (long long k = first; k < first + length && length <= kShortStretch; ++k) starts[k] = static_cast<std::uint32_t>(i);
+        unsigned long_lanes = __ballot_sync(0xffffffffu, length > kShortStretch);
+        while (long_lanes != 0) {
+            const int owner = __ffs(long_lanes) - 1;
+            long_lanes &= long_lanes - 1;
+            const long long from = __shfl_sync(0xffffffffu, first, owner), count = __shfl_sync(0xffffffffu, length, owner);
+            const long long place = __shfl_sync(0xffffffffu, i, owner);
+            for (long long k = threadIdx.x % scan::kWarp; k < count; k += scan::kWarp) starts[from + k] = static_cast<std::uint32_t>(place);
+        }
     }
 }
 
@@ -247,10 +340,10 @@ __global__ void single_starts(long long n, std::uint32_t* starts) {
 inline unsigned grid_of(long long n) { return static_cast<unsigned>(n / 256 + 1 < 65535ll * 4 ? n / 256 + 1 : 65535ll * 4); }
 
 /** @brief Queue the sort of the ``n`` (above 0) lanes whose keys are ``typed`` into ``order`` and ``starts`` on ``stream``.
- *  ``state`` is ``state_bytes`` of zeroed working memory (left zero), ``temp`` is ``layout_of(shape).bytes`` of memory in any state.
+ *  ``temp`` is ``layout_of(shape).bytes`` of memory in any state.
  *  The number of keys outside [0, bound) is left in the 32-bit word at ``temp`` (a count that is 0 when every key is in range). */
 template <class Key>
-inline void queue(cudaStream_t stream, const Key* typed, const Shape& s, std::uint32_t* order, std::uint32_t* starts, void* state, void* temp) {
+inline void queue(cudaStream_t stream, const Key* typed, const Shape& s, std::uint32_t* order, std::uint32_t* starts, void* temp) {
     const Layout at = layout_of(s);
     char* t = static_cast<char*>(temp);
     auto* bad = reinterpret_cast<std::uint32_t*>(t + at.bad);
@@ -262,32 +355,33 @@ inline void queue(cudaStream_t stream, const Key* typed, const Shape& s, std::ui
     }
     std::uint32_t* keys[2] = { reinterpret_cast<std::uint32_t*>(t + at.key_a), reinterpret_cast<std::uint32_t*>(t + at.key_b) };
     std::uint32_t* lanes[2] = { reinterpret_cast<std::uint32_t*>(t + at.idx_a), reinterpret_cast<std::uint32_t*>(t + at.idx_b) };
-    auto* counts = reinterpret_cast<std::uint32_t*>(t + at.counts);
-    const long long cells = static_cast<long long>(s.bins) * s.tiles;
+    auto* digits = reinterpret_cast<std::uint32_t*>(t + at.digits);
+    auto* ticket = reinterpret_cast<std::uint32_t*>(t + at.ticket);
+    auto* status = reinterpret_cast<unsigned long long*>(t + at.status);
+    const std::size_t status_bytes = static_cast<std::size_t>(s.bins) * static_cast<std::size_t>(s.tiles) * 8;
+    cudaMemsetAsync(digits, 0, kMaxPasses * (1u << kMaxWidth) * 4, stream);
+    histogram<Key><<<s.tiles < kHistogramBlocks ? s.tiles : kHistogramBlocks, kBlock, 0, stream>>>(typed, s.n, s.tiles, s.passes, s.width, s.bits, static_cast<unsigned long long>(s.bound), digits, bad);
+    digit_bases<<<s.passes, kBlock, 0, stream>>>(digits, s.passes, s.width, s.bits, s.n, s.bound, starts);
     unsigned shift = 0;
     for (unsigned p = 0; p < s.passes; ++p, shift += s.width) {
-        const unsigned width = p + 1 == s.passes ? s.bits - shift : s.width;
-        const unsigned long long bound = static_cast<unsigned long long>(s.bound);
+        const unsigned width = digit_bits(p, s.passes, s.width, s.bits);
         const std::uint32_t* in_keys = keys[(p + 1) & 1];
         const std::uint32_t* in_lanes = lanes[(p + 1) & 1];
         std::uint32_t* out_keys = keys[p & 1];
         std::uint32_t* out_lanes = p + 1 == s.passes ? order : lanes[p & 1];
-        if (p == 0) upsweep<Key, true><<<s.tiles, kBlock, 0, stream>>>(typed, nullptr, s.n, s.tiles, shift, width, bound, counts, bad);
-        else upsweep<Key, false><<<s.tiles, kBlock, 0, stream>>>(nullptr, in_keys, s.n, s.tiles, shift, width, bound, counts, bad);
-        scan::scan_queue<std::uint32_t, scan::kSum>(stream, counts, counts, static_cast<long long>(1u << width) * s.tiles, true, state);
-        if (p == 0) downsweep<Key, true><<<s.tiles, kBlock, 0, stream>>>(typed, nullptr, nullptr, s.n, s.tiles, shift, width, counts, out_keys, out_lanes);
-        else downsweep<Key, false><<<s.tiles, kBlock, 0, stream>>>(nullptr, in_keys, in_lanes, s.n, s.tiles, shift, width, counts, out_keys, out_lanes);
-        (void)cells;
+        cudaMemsetAsync(ticket, 0, 16 + status_bytes, stream);  // the ticket and the status that follows it
+        const std::uint32_t* bases = digits + p * (1u << kMaxWidth);
+        if (p == 0) scatter<Key, true><<<s.tiles, kBlock, 0, stream>>>(typed, nullptr, nullptr, s.n, shift, width, 1u << width, bases, status, ticket, out_keys, out_lanes);
+        else scatter<Key, false><<<s.tiles, kBlock, 0, stream>>>(nullptr, in_keys, in_lanes, s.n, shift, width, 1u << width, bases, status, ticket, out_keys, out_lanes);
     }
-    const std::uint32_t* sorted = keys[(s.passes - 1) & 1];
-    auto* flags = reinterpret_cast<std::uint8_t*>(t + at.mask);
-    auto* run_at = reinterpret_cast<std::uint32_t*>(t + at.boundaries);
-    auto* runs = reinterpret_cast<std::uint32_t*>(t + at.runs);
-    run_starts<<<grid_of(s.n), 256, 0, stream>>>(sorted, s.n, flags);
-    scan::compact_queue(stream, flags, run_at, runs, s.n, state);
-    cudaMemsetAsync(starts, 0, static_cast<std::size_t>(s.bound + 1) * 4, stream);
-    run_lengths<<<grid_of(s.n), 256, 0, stream>>>(run_at, runs, sorted, s.n, static_cast<unsigned long long>(s.bound), starts);
-    scan::scan_queue<std::uint32_t, scan::kSum>(stream, starts, starts, s.bound + 1, true, state);
+    if (s.passes > 1) {
+        const unsigned top = s.passes - 1;
+        const std::uint32_t* sorted = keys[top & 1];
+        if (s.bound * kFewKeys <= s.n)
+            first_places<<<grid_of(s.bound + 1), 256, 0, stream>>>(sorted, s.n, s.bound, top * s.width, 1u << digit_bits(top, s.passes, s.width, s.bits),
+                                                                  digits + top * (1u << kMaxWidth), starts);
+        else fill_starts<<<grid_of(s.n + 1), 256, 0, stream>>>(sorted, s.n, s.bound, starts);
+    }
 }
 
 }  // namespace order

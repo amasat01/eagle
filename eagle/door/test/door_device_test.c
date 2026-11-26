@@ -3787,14 +3787,70 @@ static int64_t order_rows(eg_ctx* ctx, int bits, int is_signed, int pattern, int
     return bad;
 }
 
+/* The element types of a scan and a reduce on a device context: a type a call does not run is refused by name with the host's text, never run
+ * as a wider one; a uint64 scan is run (a modular sum). */
+static void device_narrow_types(eg_ctx* ctx) {
+    static const struct { uint8_t code, bits; const char* name; } narrow[4] = {
+        { kDLInt, 8, "int8" }, { kDLInt, 16, "int16" }, { kDLUInt, 8, "uint8" }, { kDLUInt, 16, "uint16" } };
+    void* d = NULL;
+    check(cudaMalloc(&d, 256) == cudaSuccess && cudaMemset(d, 0, 256) == cudaSuccess, "narrow types: a device block");
+    for (int k = 0; k < 4; ++k) {
+        struct tensor ti, to, to_one;
+        eg_plane* pi = wrap_device_typed(ctx, &ti, d, 8, narrow[k].code, narrow[k].bits);
+        eg_plane* po = wrap_device_typed(ctx, &to, (char*)d + 128, 8, narrow[k].code, narrow[k].bits);
+        eg_plane* one = wrap_device_typed(ctx, &to_one, (char*)d + 192, 1, narrow[k].code, narrow[k].bits);
+        struct eg_scan_desc sd = { sizeof(struct eg_scan_desc), 0, pi, po, EG_SCAN_SUM, NULL };
+        char what[160];
+        snprintf(what, sizeof(what), "eg_scan on the device of %s elements is refused NOT_WRITTEN by name", narrow[k].name);
+        check(pi && po && refused(eg_scan(ctx, &sd), EG_NOT_WRITTEN, ctx, "is not one of int32, int64, uint32, uint64, float32, float64"), what);
+        struct eg_reduce_desc rd;
+        memset(&rd, 0, sizeof(rd));
+        rd.struct_size = sizeof(rd);
+        rd.in = pi;
+        rd.out = one;
+        rd.op = EG_REDUCE_SUM;
+        snprintf(what, sizeof(what), "eg_reduce on the device of %s elements is refused NOT_WRITTEN by name", narrow[k].name);
+        check(pi && one && refused(eg_reduce(ctx, &rd), EG_NOT_WRITTEN, ctx, "is not"), what);
+        eg_plane_free(ctx, pi);
+        eg_plane_free(ctx, po);
+        eg_plane_free(ctx, one);
+    }
+    {   /* uint64 scan: inclusive modular sum of 1..n, with values above 2^32 so a 32-bit run would differ */
+        enum { SUMS = 1000 };
+        static uint64_t host_in[SUMS], host_out[SUMS];
+        for (int i = 0; i < SUMS; ++i) host_in[i] = ((uint64_t)1 << 33) + (uint64_t)i;
+        uint64_t *din = NULL, *dout = NULL;
+        int ok = cudaMalloc((void**)&din, sizeof(host_in)) == cudaSuccess && cudaMalloc((void**)&dout, sizeof(host_out)) == cudaSuccess &&
+                 cudaMemcpy(din, host_in, sizeof(host_in), cudaMemcpyHostToDevice) == cudaSuccess;
+        struct tensor ti, to;
+        eg_plane* pi = ok ? wrap_device_typed(ctx, &ti, din, SUMS, kDLUInt, 64) : NULL;
+        eg_plane* po = ok ? wrap_device_typed(ctx, &to, dout, SUMS, kDLUInt, 64) : NULL;
+        struct eg_scan_desc sd = { sizeof(struct eg_scan_desc), 0, pi, po, EG_SCAN_SUM, NULL };
+        ok = ok && pi && po && eg_scan(ctx, &sd) == EG_OK && eg_sync(ctx) == EG_OK &&
+             cudaMemcpy(host_out, dout, sizeof(host_out), cudaMemcpyDeviceToHost) == cudaSuccess;
+        uint64_t run = 0;
+        for (int i = 0; ok && i < SUMS; ++i) {
+            run += host_in[i];
+            ok = host_out[i] == run;
+        }
+        check(ok, "eg_scan on the device of uint64 elements is the inclusive modular sum");
+        eg_plane_free(ctx, pi);
+        eg_plane_free(ctx, po);
+        cudaFree(din);
+        cudaFree(dout);
+    }
+    cudaFree(d);
+}
+
 /* eg_order_by_key on a device context: key widths and bounds, uniform and half-in-key-0 keys, and the sizes where a tile ends. */
 static void device_orders(eg_ctx* ctx) {
     const int64_t tile = 4096;
     const int64_t sizes[7] = { 0, 1, tile - 1, tile, tile + 1, 128 * tile + 5, 4000003 };
-    struct { int bits, is_signed; const char* name; int64_t bounds[4]; } types[4] = {
-        { 8, 1, "int8", { 16, 100, 127, 2 } }, { 32, 1, "int32", { 16, 4096, 1 << 20, 0 } }, { 32, 0, "uint32", { 16, 4096, 1 << 20, 0 } },
-        { 64, 1, "int64", { 16, 4096, 1 << 20, 0 } } };
-    for (int t = 0; t < 4; ++t)
+    struct { int bits, is_signed; const char* name; int64_t bounds[4]; } types[8] = {
+        { 8, 1, "int8", { 16, 100, 127, 2 } }, { 8, 0, "uint8", { 16, 100, 255, 2 } }, { 16, 1, "int16", { 16, 4096, 32767, 2 } },
+        { 16, 0, "uint16", { 16, 4096, 65535, 2 } }, { 32, 1, "int32", { 16, 4096, 1 << 20, 0 } }, { 32, 0, "uint32", { 16, 4096, 1 << 20, 0 } },
+        { 64, 1, "int64", { 16, 4096, 1 << 20, 0 } }, { 64, 0, "uint64", { 16, 4096, 1 << 20, 0 } } };
+    for (int t = 0; t < 8; ++t)
         for (int pattern = 0; pattern < 2; ++pattern)
             for (int b = 0; b < 4; ++b) {
                 int ok = 1;
@@ -4078,6 +4134,7 @@ int main(int argc, char** argv) {
     device_scans(ctx);
     device_compactions(ctx);
     device_orders(ctx);
+    device_narrow_types(ctx);
     struct eg_reduce_desc rd;
     memset(&rd, 0, sizeof(rd));
     rd.struct_size = sizeof(rd);

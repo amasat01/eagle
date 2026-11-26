@@ -320,28 +320,26 @@ void scan_state_free(void* state) noexcept {
 
 std::size_t compact_state_bytes(std::int64_t n) { return cuda::scan::compact_state_bytes(n); }
 
-std::size_t order_state_bytes(std::int64_t n, std::int64_t bound) { return cuda::order::state_bytes(cuda::order::shape_of(n, bound)); }
-
 std::size_t order_temp_bytes(std::int64_t n, std::int64_t bound) { return cuda::order::layout_of(cuda::order::shape_of(n, bound)).bytes; }
 
 namespace {
 
 template <class Key>
-void order_typed(cudaStream_t s, const void* keys, std::int64_t n, std::int64_t bound, void* order, void* starts, void* state, void* temp) {
+void order_typed(cudaStream_t s, const void* keys, std::int64_t n, std::int64_t bound, void* order, void* starts, void* temp) {
     cuda::order::queue<Key>(s, static_cast<const Key*>(keys), cuda::order::shape_of(n, bound), static_cast<std::uint32_t*>(order),
-                            static_cast<std::uint32_t*>(starts), state, temp);
+                            static_cast<std::uint32_t*>(starts), temp);
 }
 
 }  // namespace
 
 void order_step(std::uint64_t stream, unsigned bits, bool is_signed, const void* keys, std::int64_t n, std::int64_t bound, void* order, void* starts,
-                void* state, void* temp) {
+                void* temp) {
     const auto s = reinterpret_cast<cudaStream_t>(stream);
     switch (bits) {
-        case 8: is_signed ? order_typed<std::int8_t>(s, keys, n, bound, order, starts, state, temp) : order_typed<std::uint8_t>(s, keys, n, bound, order, starts, state, temp); break;
-        case 16: is_signed ? order_typed<std::int16_t>(s, keys, n, bound, order, starts, state, temp) : order_typed<std::uint16_t>(s, keys, n, bound, order, starts, state, temp); break;
-        case 32: is_signed ? order_typed<std::int32_t>(s, keys, n, bound, order, starts, state, temp) : order_typed<std::uint32_t>(s, keys, n, bound, order, starts, state, temp); break;
-        default: is_signed ? order_typed<std::int64_t>(s, keys, n, bound, order, starts, state, temp) : order_typed<std::uint64_t>(s, keys, n, bound, order, starts, state, temp);
+        case 8: is_signed ? order_typed<std::int8_t>(s, keys, n, bound, order, starts, temp) : order_typed<std::uint8_t>(s, keys, n, bound, order, starts, temp); break;
+        case 16: is_signed ? order_typed<std::int16_t>(s, keys, n, bound, order, starts, temp) : order_typed<std::uint16_t>(s, keys, n, bound, order, starts, temp); break;
+        case 32: is_signed ? order_typed<std::int32_t>(s, keys, n, bound, order, starts, temp) : order_typed<std::uint32_t>(s, keys, n, bound, order, starts, temp); break;
+        default: is_signed ? order_typed<std::int64_t>(s, keys, n, bound, order, starts, temp) : order_typed<std::uint64_t>(s, keys, n, bound, order, starts, temp);
     }
     EAGLE_CHECK_ALWAYS(cudaGetLastError());
 }

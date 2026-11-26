@@ -1378,7 +1378,7 @@ void device_reduce(eg_ctx& ctx, const eg_reduce_desc& d) {
     if (d.op == EG_REDUCE_ALL && d.out != nullptr && d.out->tensor->dl_tensor.dtype.code == kDLUInt)
         refuse(EG_NOT_WRITTEN, "eg_reduce: a uint32 result of op ALL is not written for a device context");
     if (d.in->tensor->dl_tensor.dtype.code == kDLUInt)
-        refuse(EG_NOT_WRITTEN, "eg_reduce: a uint32 plane is not written for a device context");
+        refuse(EG_NOT_WRITTEN, "eg_reduce: a uint" + std::to_string(d.in->tensor->dl_tensor.dtype.bits) + " plane is not written for a device context");
     device_reduce_leaf(ctx, host::reduce_check(ctx, d));
 }
 
@@ -1495,37 +1495,33 @@ void device_order_by_key(eg_ctx& ctx, const eg_order_desc& d) {
     }
     const DLDataType& type = o.keys->tensor->dl_tensor.dtype;
     const bool is_signed = type.code == kDLInt;
-    const std::size_t state_bytes = order_state_bytes(o.n, o.bound), temp_bytes = order_temp_bytes(o.n, o.bound);
+    const std::size_t temp_bytes = order_temp_bytes(o.n, o.bound);
     const auto refusal = [&](std::uint32_t outside) {
         return "sort: " + std::to_string(outside) + " keys are outside [0, " + std::to_string(o.bound) + ")";
     };
     if (ctx.dev_rec == nullptr) {
-        char* memory = static_cast<char*>(scan_state_for(ctx, stream, state_bytes, temp_bytes));
-        void* temp = memory + (state_bytes + 15) / 16 * 16;
-        order_step(stream, type.bits, is_signed, at(o.keys), o.n, o.bound, at(o.order), at(o.starts), memory, temp);
+        void* temp = scan_state_for(ctx, stream, 0, temp_bytes);
+        order_step(stream, type.bits, is_signed, at(o.keys), o.n, o.bound, at(o.order), at(o.starts), temp);
         std::uint32_t outside = 0;
         read_bytes(stream, &outside, temp, sizeof(outside));
         if (outside != 0) refuse(EG_BAD_REQUEST, refusal(outside));
         return;
     }
-    void* state = nullptr;
     void* temp = nullptr;
     OutsideKeys* found = nullptr;
     const char* where = "the working memory";
     try {
-        state = alloc_async(stream, state_bytes, true);
         temp = alloc_async(stream, temp_bytes, false);
         where = "the page-locked count";
         found = new OutsideKeys{ static_cast<std::uint32_t*>(host_pinned_new(sizeof(std::uint32_t))), o.bound };
         where = "the sort";
-        order_step(stream, type.bits, is_signed, at(o.keys), o.n, o.bound, at(o.order), at(o.starts), state, temp);
+        order_step(stream, type.bits, is_signed, at(o.keys), o.n, o.bound, at(o.order), at(o.starts), temp);
         where = "the copy of the count";
         queue_read_bytes(stream, found->count, temp, sizeof(std::uint32_t));    // a copy node of the capture, read by the host step after it
     } catch (const std::exception& why) {
         refuse(EG_FAULT, std::string("eg_order_by_key while recording: ") + where + ": " + why.what());
     }
     free_async(stream, stream, temp);
-    free_async(stream, stream, state);
     try {
         device_record_host_step(
             ctx,
