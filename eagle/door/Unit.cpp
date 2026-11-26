@@ -998,7 +998,16 @@ void read_group(const eg_unit_meta& m, eg_unit_s& unit)
                     + std::to_string(width) + " bytes");
         if (__builtin_add_overflow(total, s.bytes, &total))
             refuse(EG_BAD_REQUEST, bad + "scratch bytes do not fit 64 bits");
-        GroupScratchFacts plane{ s.name, s.dtype, s.elements, s.bytes, s.realisation, -1 };
+        if (s.kind != EG_SCRATCH_AUTHORED && s.kind != EG_SCRATCH_WORK)
+            refuse(EG_BAD_REQUEST,
+                named + "kind " + std::to_string(s.kind)
+                    + " is neither AUTHORED nor WORK");
+        if (s.kind == EG_SCRATCH_WORK && s.rank != 0)
+            refuse(EG_BAD_REQUEST,
+                named + "is a WORK array of rank " + std::to_string(s.rank)
+                    + " (one scalar per lane: rank 0)");
+        GroupScratchFacts plane{ s.name, s.dtype, s.elements, s.bytes,
+            s.realisation, s.kind, -1 };
         if (s.realisation == EG_SCRATCH_PLANE)
             plane.slot = made_scratch_slot(s, unit, named);
         else if (s.realisation != EG_SCRATCH_LOCAL)

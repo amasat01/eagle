@@ -433,10 +433,18 @@ typedef int32_t eg_scratch_realisation;
 #define EG_SCRATCH_LOCAL 0 /**< an array of the unit's own text, on the stack of the thread that runs the group */
 #define EG_SCRATCH_PLANE 1 /**< a plane eagle makes at ``eg_plan_new``: ``slot`` names the LOOKUP slot the entry reads it through */
 
-/** A scratch plane of a group: memory local to one group, which only the lanes
+/** Whose memory a group's scratch entry is (``eg_unit_group_scratch.kind``). */
+typedef int32_t eg_scratch_kind;
+#define EG_SCRATCH_AUTHORED 0 /**< a scratch plane the author declared */
+/** The array that holds the operands of one group-wide reduce or scan: one
+ *  scalar per lane of the group, ``rank`` 0. */
+#define EG_SCRATCH_WORK 1
+
+/** A scratch entry of a group: memory local to one group, which only the lanes
  * of that group read and write and the caller never sees. A group of
- * ``max_size`` lanes holds ``max_size`` values of ``shape`` in each scratch
- * plane. */
+ * ``max_size`` lanes holds ``max_size`` values of ``shape`` in each entry. The
+ * entries are the group's whole local memory: the authored scratch planes and
+ * the work arrays of its reduces and scans. */
 struct eg_unit_group_scratch {
     uint32_t struct_size;
     eg_wire_dtype dtype; /**< REAL, INT64, INT32 or BOOL: the type of one scalar
@@ -462,7 +470,11 @@ struct eg_unit_group_scratch {
                      and holds component ``k`` of the values from ``k *
                      max_size`` on (one array per component, as a LOCAL plane
                      is held) */
-    int32_t reserved1;
+    eg_scratch_kind
+        kind; /**< whose memory it is: AUTHORED (a declared scratch plane) or
+                 WORK (the operands of a reduce or scan, one scalar per lane,
+                 ``rank`` 0). A zero-filled member is AUTHORED. The entry's
+                 realisation is chosen alike for both kinds */
 };
 
 /** The group of a unit (``eg_unit_meta.group``, NULL: the unit has none): a
@@ -488,9 +500,9 @@ struct eg_unit_group {
                      for AXES the product of the extents of the spanned axes, -1
                      when one is a run-time extent; for KEY the stated bound,
                      -1: not stated. A scratch plane needs a bound */
-    int64_t
-        scratch_bytes;   /**< the bytes of all scratch planes of one group: the
-                            sum of the planes' ``bytes``, 0 without scratch */
+    int64_t scratch_bytes; /**< the bytes of all scratch entries of one group,
+                              local and held by the runtime alike: the sum of
+                              the entries' ``bytes``, 0 without scratch */
     const int32_t* axes; /**< AXES: ``n_axes`` distinct indices into the lane
                             axes, in the order they span the group, else NULL */
     const struct eg_unit_group_scratch* const*

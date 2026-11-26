@@ -126,6 +126,7 @@ EG_FIXTURE_EXPORT void grp_count_host(void* const* params, int64_t base, int64_t
 EG_FIXTURE_EXPORT void grp_cols_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void grp_rows_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void grp_planed_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void grp_work_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void widemul_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void gath_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void boxed_host(void* const* params, int64_t base, int64_t count, int64_t n);
@@ -202,6 +203,25 @@ void grp_planed_host(void* const* params, int64_t base, int64_t count, int64_t n
         const int64_t first = g * 8, size = n - first < 8 ? n - first : 8;
         for (int64_t r = 0; r < size; ++r) scr[g * 8 + r] = 100.0 * (double)g + (double)r;
         for (int64_t r = 0; r < size; ++r) y[first + r] = scr[g * 8 + r] + 0.001 * (double)plane->samples;
+    }
+}
+
+/* Groups of 8 consecutive lanes with a scratch plane (the LOOKUP slot 4) and the work array of a reduce (the LOOKUP slot 5), both made by the
+ * runtime: each lane stores 100 * g + its rank in the first and 1000 * g + 2 * its rank in the second, and reads both back into y with 0.001
+ * times the work plane's length added. */
+void grp_work_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    double* y = grp_out(params);
+    const struct fixture_handle* plane = (const struct fixture_handle*)params[4];
+    const struct fixture_handle* work = (const struct fixture_handle*)params[5];
+    double* scr = (double*)plane->data;
+    double* wrk = (double*)work->data;
+    for (int64_t g = base; g < base + count; ++g) {
+        const int64_t first = g * 8, size = n - first < 8 ? n - first : 8;
+        for (int64_t r = 0; r < size; ++r) {
+            scr[first + r] = 100.0 * (double)g + (double)r;
+            wrk[first + r] = 1000.0 * (double)g + 2.0 * (double)r;
+        }
+        for (int64_t r = 0; r < size; ++r) y[first + r] = scr[first + r] + wrk[first + r] + 0.001 * (double)work->samples;
     }
 }
 
@@ -1516,6 +1536,18 @@ GRP_SCRATCH_PLANE(grp_t8_plane, EG_DTYPE_REAL, 64, 4);
 GRP_SCRATCH_PLANE(grp_t8_plane_out, EG_DTYPE_REAL, 64, 9);
 GRP_SCRATCH_PLANE(grp_t8_plane_x, EG_DTYPE_REAL, 64, 0);
 GRP_SCRATCH_PLANE(grp_t8_plane_int, EG_DTYPE_INT32, 32, 4);
+/* the work array of a reduce over 8 lanes: held by the runtime at the slot given, local, of rank 1 (refused), and of a kind the header does not name (refused) */
+#define GRP_SCRATCH_WORK(var, rank_, shape_, elements_, bytes_, realisation_, slot_, kind_)                                                       \
+    static const struct eg_unit_group_scratch var = { .struct_size = sizeof(struct eg_unit_group_scratch), .dtype = EG_DTYPE_REAL, .rank = rank_, \
+        .realisation = realisation_, .shape = shape_, .elements = elements_, .bytes = bytes_, .name = "hawk_work_7", .slot = slot_, .kind = kind_ }
+GRP_SCRATCH_WORK(grp_w8_plane, 0, NULL, 8, 64, EG_SCRATCH_PLANE, 5, EG_SCRATCH_WORK);
+GRP_SCRATCH_WORK(grp_w8_local, 0, NULL, 8, 64, EG_SCRATCH_LOCAL, -1, EG_SCRATCH_WORK);
+GRP_SCRATCH_WORK(grp_w8_rank1, 1, grp_shape3, 24, 192, EG_SCRATCH_LOCAL, -1, EG_SCRATCH_WORK);
+GRP_SCRATCH_WORK(grp_w8_kind, 0, NULL, 8, 64, EG_SCRATCH_LOCAL, -1, 9);
+static const struct eg_unit_group_scratch* const grp_list_work[] = { &grp_t8_plane, &grp_w8_plane };
+static const struct eg_unit_group_scratch* const grp_list_work_local[] = { &grp_w8_local };
+static const struct eg_unit_group_scratch* const grp_list_work_rank1[] = { &grp_w8_rank1 };
+static const struct eg_unit_group_scratch* const grp_list_work_kind[] = { &grp_w8_kind };
 static const struct eg_unit_group_scratch* const grp_list_plane[] = { &grp_t8_plane };
 static const struct eg_unit_group_scratch* const grp_list_plane_out[] = { &grp_t8_plane_out };
 static const struct eg_unit_group_scratch* const grp_list_plane_x[] = { &grp_t8_plane_x };
@@ -1575,6 +1607,10 @@ GRP_RECORD(grp_rec_planed, EG_GROUP_COUNT, 2, 0, NULL, -1, 8, 8, 64, 1, grp_list
 GRP_RECORD(grp_rec_planed_out, EG_GROUP_COUNT, 2, 0, NULL, -1, 8, 8, 64, 1, grp_list_plane_out);
 GRP_RECORD(grp_rec_planed_x, EG_GROUP_COUNT, 2, 0, NULL, -1, 8, 8, 64, 1, grp_list_plane_x);
 GRP_RECORD(grp_rec_planed_int, EG_GROUP_COUNT, 2, 0, NULL, -1, 8, 8, 32, 1, grp_list_plane_int);
+GRP_RECORD(grp_rec_work, EG_GROUP_COUNT, 2, 0, NULL, -1, 8, 8, 128, 2, grp_list_work);
+GRP_RECORD(grp_rec_work_local, EG_GROUP_COUNT, 2, 0, NULL, -1, 8, 8, 64, 1, grp_list_work_local);
+GRP_RECORD(grp_rec_work_rank1, EG_GROUP_COUNT, 2, 0, NULL, -1, 8, 8, 192, 1, grp_list_work_rank1);
+GRP_RECORD(grp_rec_work_kind, EG_GROUP_COUNT, 2, 0, NULL, -1, 8, 8, 64, 1, grp_list_work_kind);
 /* the slots of a unit with a planed scratch: x, key, y, u, and the plane eagle makes */
 SLOT(slot_grp_scr, EG_ROLE_LOOKUP, "scr");
 static const struct eg_unit_slot* const grp_planed_slots[] = { &slot_grp_x, &slot_grp_key, &slot_grp_y, &slot_grp_u, &slot_grp_scr };
@@ -1587,6 +1623,18 @@ GRP_PLANED_UNIT(unit_grp_planed, "grp_planed", 0x5b, grp_rec_planed);
 GRP_PLANED_UNIT(unit_grp_planed_out, "grp_planed_out", 0x5c, grp_rec_planed_out);
 GRP_PLANED_UNIT(unit_grp_planed_x, "grp_planed_x", 0x5d, grp_rec_planed_x);
 GRP_PLANED_UNIT(unit_grp_planed_int, "grp_planed_int", 0x5e, grp_rec_planed_int);
+/* the slots of a unit with a planed scratch and a planed work array: the planed unit's, and the work plane eagle makes */
+SLOT(slot_grp_wrk, EG_ROLE_LOOKUP, "wrk");
+static const struct eg_unit_slot* const grp_work_slots[] = { &slot_grp_x, &slot_grp_key, &slot_grp_y, &slot_grp_u, &slot_grp_scr, &slot_grp_wrk };
+static const struct eg_unit_body grp_work_body = { .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = 6, .slots = grp_work_slots };
+#define GRP_WORK_UNIT(var, name_, byte, group_)                                                                                                   \
+    static const struct eg_unit_meta var = { .struct_size = sizeof(struct eg_unit_meta), .name = name_, .digest = DIGEST(byte),                  \
+        .pattern = EG_PATTERN_PURE, .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "grp_work_host", .device_image_format = EG_IMAGE_NONE,        \
+        .body = &grp_work_body, .launch = &grp_launch_flat, .group = &group_ }
+GRP_WORK_UNIT(unit_grp_work, "grp_work", 0x5f, grp_rec_work);
+GRP_WORK_UNIT(unit_grp_work_local, "grp_work_local", 0x60, grp_rec_work_local);
+GRP_WORK_UNIT(unit_grp_work_rank1, "grp_work_rank1", 0x6b, grp_rec_work_rank1);
+GRP_WORK_UNIT(unit_grp_work_kind, "grp_work_kind", 0x6c, grp_rec_work_kind);
 #define GRP_UNIT_RUN(var, name_, byte, entry_, launch_, group_)                                                                                   \
     static const struct eg_unit_meta var = { .struct_size = sizeof(struct eg_unit_meta), .name = name_, .digest = DIGEST(byte),                  \
         .pattern = EG_PATTERN_PURE, .scalar_type = EG_SCALAR_FLOAT64, .host_entry = entry_, .device_image_format = EG_IMAGE_NONE,                \
@@ -1636,7 +1684,8 @@ static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &uni
                                                     &unit_grp_key_real, &unit_grp_bytes, &unit_grp_total, &unit_grp_larger, &unit_grp_phases0, &unit_grp_alien,
                                                     &unit_grp_unbounded, &unit_grp_twice, &unit_grp_bad_dtype, &unit_grp_bound, &unit_grp_boxed, &unit_grp_distinct, &unit_grp_distinct_reads,
                                                     &unit_grp_distinct_uniform, &unit_grp_distinct_unordered, &unit_grp_planed, &unit_grp_planed_out,
-                                                    &unit_grp_planed_x, &unit_grp_planed_int };
+                                                    &unit_grp_planed_x, &unit_grp_planed_int, &unit_grp_work, &unit_grp_work_local, &unit_grp_work_rank1,
+                                                    &unit_grp_work_kind };
 
 static const struct eg_library_meta library = {
     .struct_size = sizeof(struct eg_library_meta),

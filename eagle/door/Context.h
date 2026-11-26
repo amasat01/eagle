@@ -199,13 +199,14 @@ struct GemmFacts {
     std::vector<GemmCall> calls;
 };
 
-/** @brief A scratch plane of a unit's group (eg_unit_group_scratch), copied at
+/** @brief A scratch entry of a unit's group (eg_unit_group_scratch), copied at
  * eg_unit_load. */
 struct GroupScratchFacts {
     std::string name;
     std::int32_t dtype    = 0;
     std::int64_t elements = 0, bytes = 0; ///< per group
     std::int32_t realisation = 0; ///< EG_SCRATCH_LOCAL or EG_SCRATCH_PLANE
+    std::int32_t kind        = 0; ///< EG_SCRATCH_AUTHORED or EG_SCRATCH_WORK
     std::int32_t slot
         = -1; ///< PLANE: the slot eagle makes and binds the plane to, else -1
 };
@@ -221,7 +222,7 @@ struct GroupFacts {
     std::int64_t max_size
         = -1; ///< the size bound of a group in lanes, -1: not stated
     std::int64_t scratch_bytes
-        = 0; ///< the bytes of all scratch planes of one group
+        = 0; ///< the bytes of all scratch entries of one group
     std::vector<std::int32_t> axes; ///< AXES: the lane axes that span a group
     std::vector<GroupScratchFacts> scratch;
     std::vector<std::int32_t>

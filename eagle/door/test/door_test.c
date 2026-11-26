@@ -8976,6 +8976,8 @@ static void check_group_refusals(eg_ctx* ctx) {
         { "grp_planed_out", 0x5c, EG_BAD_REQUEST, "is a PLANE whose slot 9 names no slot (the unit has 5)", "a planed scratch whose slot the unit does not have" },
         { "grp_planed_x", 0x5d, EG_BAD_REQUEST, "is a PLANE whose slot 'x' is not a LOOKUP of the plane's element type", "a planed scratch whose slot is no lookup" },
         { "grp_planed_int", 0x5e, EG_BAD_REQUEST, "is a PLANE whose slot 'scr' is not a LOOKUP of the plane's element type", "a planed scratch whose slot has another element type" },
+        { "grp_work_rank1", 0x6b, EG_BAD_REQUEST, "is a WORK array of rank 1 (one scalar per lane: rank 0)", "a work array that is not a scalar per lane" },
+        { "grp_work_kind", 0x6c, EG_BAD_REQUEST, "kind 9 is neither AUTHORED nor WORK", "a scratch entry of a kind the header does not name" },
         { "grp_boxed", 0x56, EG_NOT_WRITTEN, "a group on a unit with a thread box is not written", "a group on a unit with a thread box" },
         { "grp_distinct_uniform", 0x59, EG_BAD_REQUEST, "distinct_slots[1] 3 is not a plane slot", "a distinct slot that is a UNIFORM" },
         { "grp_distinct_unordered", 0x5a, EG_BAD_REQUEST, "distinct_slots[1] 0 is not a plane slot above the one before it", "distinct slots out of order" },
@@ -9049,6 +9051,38 @@ static void check_group_scratch_plane(eg_ctx* ctx) {
     eg_plane_free(ctx, ps);
     eg_plan_free(ctx, p);
     check(eg_unit_free(ctx, unit) == EG_OK, "group scratch plane: the unit is freed once its plans are");
+}
+
+/* A group whose scratch plane and work array are both held by the runtime: eg_plan_new makes one plane for each, one slice of 8 doubles per group
+   of the launch, and the entry reads them through the unit's own slots. Oracle: the values the entry is documented to write (100 * group + rank,
+   1000 * group + 2 * rank, and 0.001 times the work plane's length, the groups of the launch times 8). A work array the unit's text holds loads
+   too, and the record's total counts both entries. */
+static void check_group_work_plane(eg_ctx* ctx) {
+    eg_unit *unit = NULL, *local = NULL;
+    check(load(ctx, "grp_work", 0x5f, &unit) == EG_OK && load(ctx, "grp_work_local", 0x60, &local) == EG_OK,
+          "group work array: eg_unit_load of a unit whose work array is a plane and of one whose work array is local");
+    eg_unit_free(ctx, local);
+    if (unit == NULL) return;
+    const eg_structure structures[2] = { EG_STRUCTURE_HOST_SERIAL, EG_STRUCTURE_HOST_TEAM };
+    const int64_t lanes[3] = { 24, 19, 5 };
+    for (int s = 0; s < 2; ++s)
+        for (int i = 0; i < 3; ++i) {
+            const int64_t n = lanes[i], groups = (n + 7) / 8;
+            double x[32] = { 0 }, y[32];
+            int32_t key[32] = { 0 };
+            for (int l = 0; l < 32; ++l) y[l] = -1.0;
+            int ok = group_run(ctx, unit, structures[s], n, 0, NULL, NULL, x, key, y) == EG_OK;
+            for (int64_t l = 0; ok && l < n; ++l) {
+                const double want = 100.0 * (double)(l / 8) + (double)(l % 8) + 1000.0 * (double)(l / 8) + 2.0 * (double)(l % 8)
+                    + 0.001 * (double)(groups * 8);
+                ok = y[l] == want;
+            }
+            char what[160];
+            snprintf(what, sizeof(what), "group work array: %lld lanes on structure %d: every lane reads its group's slices of the planes of %lld values",
+                     (long long)n, s, (long long)(groups * 8));
+            check(ok, what);
+        }
+    check(eg_unit_free(ctx, unit) == EG_OK, "group work array: the unit is freed once its plans are");
 }
 
 /* The slots the library makes, as the unit answers them: the list is exactly
@@ -9217,6 +9251,7 @@ int main(int argc, char** argv) {
     check_group_launch(ctx);
     check_group_distinct(ctx);
     check_group_scratch_plane(ctx);
+    check_group_work_plane(ctx);
     check_made_slots(ctx);
     check_group_refusals(ctx);
     check_gather_table(ctx);
