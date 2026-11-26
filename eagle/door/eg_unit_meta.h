@@ -428,6 +428,11 @@ struct eg_unit_team {
     int32_t of_stage;         /**< CHUNKS, TARGETS: index in the kernel's stages of the unit whose body holds ``of_slot``; -1: the source unit */
 };
 
+/** Where a group's scratch plane lives (``eg_unit_group_scratch.realisation``). */
+typedef int32_t eg_scratch_realisation;
+#define EG_SCRATCH_LOCAL 0 /**< an array of the unit's own text, on the stack of the thread that runs the group */
+#define EG_SCRATCH_PLANE 1 /**< a plane eagle makes at ``eg_plan_new``: ``slot`` names the LOOKUP slot the entry reads it through */
+
 /** A scratch plane of a group: memory local to one group, which only the lanes
  * of that group read and write and the caller never sees. A group of
  * ``max_size`` lanes holds ``max_size`` values of ``shape`` in each scratch
@@ -438,7 +443,10 @@ struct eg_unit_group_scratch {
                             of a value (a unit's scratch is never a BAND_PARTIAL
                             or UINT32 plane) */
     int32_t rank;        /**< the length of ``shape``: 0 for a scalar value */
-    int32_t reserved0;
+    eg_scratch_realisation
+        realisation; /**< where the plane lives: LOCAL (the unit's own text
+                        holds it) or PLANE (eagle makes it at ``eg_plan_new``).
+                        A zero-filled member is LOCAL */
     const int64_t* shape; /**< ``rank`` extents of one value, each >= 1, NULL
                              when rank is 0 */
     int64_t elements; /**< scalars per group: the group's size bound times the
@@ -447,6 +455,14 @@ struct eg_unit_group_scratch {
                          ``dtype`` (REAL is the unit's ``scalar_type``: 4 bytes for
                          FLOAT32, else 8; INT64 8; INT32 4; BOOL 1) */
     const char* name; /**< the declared name; reasons quote it */
+    int32_t slot; /**< PLANE: the unit's LOOKUP slot of this plane's element
+                     type that eagle makes, else -1. The plane holds one slice
+                     per group of the launch, ``elements`` scalars each; the
+                     slice of group ``g`` starts ``g * elements`` scalars in
+                     and holds component ``k`` of the values from ``k *
+                     max_size`` on (one array per component, as a LOCAL plane
+                     is held) */
+    int32_t reserved1;
 };
 
 /** The group of a unit (``eg_unit_meta.group``, NULL: the unit has none): a

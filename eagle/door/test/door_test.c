@@ -6702,6 +6702,236 @@ static void check_reverse_scan(eg_ctx* ctx)
         "default threads");
 }
 
+/* ---- the reverse of a scan and of a reorder inside a WHILE body -------------
+ * Three bodies over eight lanes, run three times: (0) a sum scan of x into y,
+ * then a min or max scan of y back into x; (1) x reordered in place; (2) a sum
+ * scan of x into y, y reordered, y copied into x. The reverse rebuilds each
+ * window by running the body again, so the cotangent of x at entry and the
+ * value x holds after the reverse (its state restored to the forward's last)
+ * are each checked against the loop written here, in whole numbers that are
+ * exact at either width. */
+
+enum { WHILE_N = 8, WHILE_ITERS = 3 };
+
+typedef struct {
+    int kind;
+    eg_scan_op op;
+    eg_plane *x, *y, *order, *counter, *limit;
+} while_record;
+
+static int record_while_body(eg_ctx* ctx, void* arg)
+{
+    const while_record* r = arg;
+    struct eg_cond_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.kind        = EG_COND_WHILE;
+    d.max_iters   = WHILE_ITERS;
+    d.counter     = r->counter;
+    d.limit       = r->limit;
+    int ok        = eg_record_cond_begin(ctx, &d) == EG_OK;
+    if (r->kind == 0)
+        ok = ok && scan_do(ctx, r->x, r->y, EG_SCAN_SUM, 0) == EG_OK
+            && scan_do(ctx, r->y, r->x, r->op, 0) == EG_OK;
+    else if (r->kind == 1)
+        ok = ok && reorder_do(ctx, &r->x, 1, r->order, 0) == EG_OK;
+    else
+        ok = ok && scan_do(ctx, r->x, r->y, EG_SCAN_SUM, 0) == EG_OK
+            && reorder_do(ctx, &r->y, 1, r->order, 0) == EG_OK
+            && eg_copy(ctx, r->y, r->x) == EG_OK;
+    return ok && eg_record_cond_end(ctx) == EG_OK;
+}
+
+/* One iteration of the body on whole numbers: out from x. */
+static void while_step(
+    int kind, eg_scan_op op, const int32_t* order, const double* x, double* out)
+{
+    double sum[WHILE_N], run = 0;
+    for (int j = 0; j < WHILE_N; ++j)
+        sum[j] = (run += x[j]);
+    for (int j = 0; j < WHILE_N; ++j) {
+        if (kind == 1)
+            out[j] = x[order[j]];
+        else if (kind == 2)
+            out[j] = sum[order[j]];
+        else
+            out[j] = j == 0
+                    || (op == EG_SCAN_MAX ? sum[j] > out[j - 1]
+                                          : sum[j] < out[j - 1])
+                ? sum[j]
+                : out[j - 1];
+    }
+}
+
+/* The adjoint of one iteration at the state x: bar becomes the cotangent of
+ * x. A min or max scan gives each prefix's cotangent to its winner, the lowest
+ * lane among equals. */
+static void while_back(
+    int kind, eg_scan_op op, const int32_t* order, const double* x, double* bar)
+{
+    double sum[WHILE_N], to_sum[WHILE_N] = { 0 }, run = 0;
+    for (int j = 0; j < WHILE_N; ++j)
+        sum[j] = (run += x[j]);
+    if (kind == 1) {
+        double moved[WHILE_N];
+        for (int j = 0; j < WHILE_N; ++j)
+            moved[order[j]] = bar[j];
+        memcpy(bar, moved, sizeof(moved));
+        return;
+    }
+    for (int j = 0, win = 0; j < WHILE_N; ++j) {
+        if (kind == 2) {
+            to_sum[order[j]] = bar[j];
+            continue;
+        }
+        if (op == EG_SCAN_MAX ? sum[j] > sum[win] : sum[j] < sum[win])
+            win = j;
+        to_sum[win] += bar[j];
+    }
+    run = 0;
+    for (int j = WHILE_N - 1; j >= 0; --j)
+        bar[j] = (run += to_sum[j]);
+}
+
+static int while_scan_reorder_case(
+    eg_ctx* ctx, uint8_t bits, int kind, eg_scan_op op)
+{
+    const size_t es = bits / 8;
+    int32_t order[WHILE_N];
+    uint32_t counter = 0, limit = WHILE_ITERS;
+    double x0[WHILE_N], state[WHILE_ITERS + 1][WHILE_N], bar[WHILE_N],
+        seed[WHILE_N];
+    char *x = malloc(WHILE_N * es), *y = malloc(WHILE_N * es),
+         *s = malloc(WHILE_N * es), *g = malloc(WHILE_N * es);
+    for (int j = 0; j < WHILE_N; ++j) {
+        order[j]    = (j * 3 + 1) % WHILE_N;
+        state[0][j] = x0[j] = ((j * 7 + 3) % 11) - 5;
+        bar[j] = seed[j] = (j % 3) + 1;
+        real_put(x, (size_t)j, bits, x0[j]);
+        real_put(s, (size_t)j, bits, seed[j]);
+    }
+    for (int k = 0; k < WHILE_ITERS; ++k)
+        while_step(kind, op, order, state[k], state[k + 1]);
+    for (int k = WHILE_ITERS - 1; k >= 0; --k)
+        while_back(kind, op, order, state[k], bar);
+    struct tensor tx, ty, to, tc, tl, ts, tg;
+    eg_plane* px     = wrap(ctx, &tx, x, WHILE_N, kDLFloat, bits);
+    eg_plane* py     = wrap(ctx, &ty, y, WHILE_N, kDLFloat, bits);
+    eg_plane* po     = wrap(ctx, &to, order, WHILE_N, kDLInt, 32);
+    eg_plane* pc     = wrap(ctx, &tc, &counter, 1, kDLUInt, 32);
+    eg_plane* pl     = wrap(ctx, &tl, &limit, 1, kDLUInt, 32);
+    eg_plane* ps     = wrap(ctx, &ts, s, WHILE_N, kDLFloat, bits);
+    eg_plane* pg     = wrap(ctx, &tg, g, WHILE_N, kDLFloat, bits);
+    while_record rec = { kind, op, px, py, po, pc, pl };
+    int ok           = px && py && po && pc && pl && ps && pg;
+    eg_graph* graph  = NULL;
+    struct eg_record_end_desc diff;
+    memset(&diff, 0, sizeof(diff));
+    diff.struct_size = sizeof(diff);
+    diff.flags       = EG_RECORD_DIFF;
+    ok = ok && eg_record_begin(ctx) == EG_OK && record_while_body(ctx, &rec)
+        && eg_record_end(ctx, &diff, &graph) == EG_OK
+        && eg_graph_launch(ctx, graph) == EG_OK;
+    static const int threads[] = { 1, 4, 0 };
+    for (size_t t = 0; ok && t < 3; ++t) {
+        eg_host_threads(ctx, threads[t]);
+        memset(g, 0x55, WHILE_N * es);
+        ok = reverse_do(ctx, graph, &px, &ps, 1, &px, &pg, 1) == EG_OK;
+        for (int j = 0; ok && j < WHILE_N; ++j)
+            ok = real_at(g, (size_t)j, bits) == bar[j]
+                && real_at(x, (size_t)j, bits) == state[WHILE_ITERS][j];
+    }
+    eg_host_threads(ctx, 0);
+    if (graph)
+        eg_graph_free(ctx, graph);
+    else
+        eg_record_abort(ctx); /* a refused end leaves the recording open */
+    eg_plane* all[] = { px, py, po, pc, pl, ps, pg };
+    for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); ++i)
+        eg_plane_free(ctx, all[i]);
+    free(x);
+    free(y);
+    free(s);
+    free(g);
+    return ok;
+}
+
+static void check_reverse_scan_reorder_in_while(eg_ctx* ctx)
+{
+    int ok = 1;
+    for (int bits = 32; ok && bits <= 64; bits += 32)
+        for (int op = EG_SCAN_MIN; ok && op <= EG_SCAN_MAX; ++op)
+            ok = while_scan_reorder_case(ctx, (uint8_t)bits, 0, (eg_scan_op)op);
+    check(ok,
+        "a sum scan then a min or max scan in a WHILE body, reversed: the "
+        "cotangent at entry and the state restored equal the loop written "
+        "here, float32 and float64, at 1, 4 and the default threads");
+    ok = 1;
+    for (int bits = 32; ok && bits <= 64; bits += 32)
+        ok = while_scan_reorder_case(ctx, (uint8_t)bits, 1, EG_SCAN_SUM)
+            && while_scan_reorder_case(ctx, (uint8_t)bits, 2, EG_SCAN_SUM);
+    check(ok,
+        "a reorder, and a sum scan with a reorder and a copy, in a WHILE body, "
+        "reversed: the cotangent at entry and the state restored equal the "
+        "loop written here, float32 and float64, at 1, 4 and the default "
+        "threads");
+    /* what stays refused: a scan with a winner plane, and a reorder that
+     * moves an integer plane, each by name at the end of the recording */
+    double x[WHILE_N] = { 0 }, y[WHILE_N] = { 0 };
+    int32_t order[WHILE_N] = { 0, 1, 2, 3, 4, 5, 6, 7 }, win[WHILE_N] = { 0 };
+    uint32_t counter = 0, limit = WHILE_ITERS;
+    struct tensor tx, ty, to, tw, tc, tl;
+    eg_plane* px = wrap(ctx, &tx, x, WHILE_N, kDLFloat, 64);
+    eg_plane* py = wrap(ctx, &ty, y, WHILE_N, kDLFloat, 64);
+    eg_plane* po = wrap(ctx, &to, order, WHILE_N, kDLInt, 32);
+    eg_plane* pw = wrap(ctx, &tw, win, WHILE_N, kDLInt, 32);
+    eg_plane* pc = wrap(ctx, &tc, &counter, 1, kDLUInt, 32);
+    eg_plane* pl = wrap(ctx, &tl, &limit, 1, kDLUInt, 32);
+    struct eg_record_end_desc diff;
+    struct eg_scan_desc sd;
+    struct eg_cond_desc cd;
+    memset(&diff, 0, sizeof(diff));
+    memset(&sd, 0, sizeof(sd));
+    memset(&cd, 0, sizeof(cd));
+    diff.struct_size = sizeof(diff);
+    diff.flags       = EG_RECORD_DIFF;
+    sd.struct_size   = sizeof(sd);
+    sd.in            = px;
+    sd.out           = py;
+    sd.index         = pw;
+    sd.op            = EG_SCAN_MAX;
+    cd.struct_size   = sizeof(cd);
+    cd.kind          = EG_COND_WHILE;
+    cd.max_iters     = WHILE_ITERS;
+    cd.counter       = pc;
+    cd.limit         = pl;
+    eg_graph* g      = NULL;
+    ok = px && py && po && pw && pc && pl && eg_record_begin(ctx) == EG_OK
+        && eg_record_cond_begin(ctx, &cd) == EG_OK && eg_scan(ctx, &sd) == EG_OK
+        && eg_record_cond_end(ctx) == EG_OK
+        && eg_record_end(ctx, &diff, &g) == EG_NOT_WRITTEN
+        && reason_has(ctx, "a scan that writes a winner plane inside a WHILE");
+    eg_record_abort(ctx);
+    check(ok,
+        "a scan with a winner plane in a WHILE body of a DIFF recording is "
+        "refused by name at the end of the recording");
+    eg_plane* both[] = { px, pw };
+    cd.max_iters     = WHILE_ITERS;
+    ok               = px && pw && eg_record_begin(ctx) == EG_OK
+        && eg_record_cond_begin(ctx, &cd) == EG_OK
+        && reorder_do(ctx, both, 2, po, 0) == EG_OK
+        && eg_record_cond_end(ctx) == EG_OK
+        && eg_record_end(ctx, &diff, &g) == EG_NOT_WRITTEN
+        && reason_has(ctx, "that moves an integer plane");
+    eg_record_abort(ctx);
+    check(ok,
+        "a reorder that moves an integer plane in a WHILE body of a DIFF "
+        "recording is refused by name at the end of the recording");
+    eg_plane* all[] = { px, py, po, pw, pc, pl };
+    for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); ++i)
+        eg_plane_free(ctx, all[i]);
+}
+
 /* ---- eg_reduce with a position, and ANY ---------------------------------------- */
 
 enum { RANK_MAX_N = 1000000 };
@@ -8743,6 +8973,9 @@ static void check_group_refusals(eg_ctx* ctx) {
         { "grp_bad_dtype", 0x54, EG_NOT_WRITTEN, "a scratch plane of wire dtype 3 is not written", "a scratch of a type a scratch never holds" },
         { "grp_phases0", 0x50, EG_BAD_REQUEST, "phases 0 (>= 1)", "a phase count below 1" },
         { "grp_alien", 0x51, EG_BAD_REQUEST, "key_slot 1, an operand of membership KEY", "an operand of another membership" },
+        { "grp_planed_out", 0x5c, EG_BAD_REQUEST, "is a PLANE whose slot 9 names no slot (the unit has 5)", "a planed scratch whose slot the unit does not have" },
+        { "grp_planed_x", 0x5d, EG_BAD_REQUEST, "is a PLANE whose slot 'x' is not a LOOKUP of the plane's element type", "a planed scratch whose slot is no lookup" },
+        { "grp_planed_int", 0x5e, EG_BAD_REQUEST, "is a PLANE whose slot 'scr' is not a LOOKUP of the plane's element type", "a planed scratch whose slot has another element type" },
         { "grp_boxed", 0x56, EG_NOT_WRITTEN, "a group on a unit with a thread box is not written", "a group on a unit with a thread box" },
         { "grp_distinct_uniform", 0x59, EG_BAD_REQUEST, "distinct_slots[1] 3 is not a plane slot", "a distinct slot that is a UNIFORM" },
         { "grp_distinct_unordered", 0x5a, EG_BAD_REQUEST, "distinct_slots[1] 0 is not a plane slot above the one before it", "distinct slots out of order" },
@@ -8754,6 +8987,178 @@ static void check_group_refusals(eg_ctx* ctx) {
         check(load(ctx, rows[i].name, rows[i].byte, &unit) == rows[i].status && unit == NULL && reason_has(ctx, rows[i].stem), name);
         eg_unit_free(ctx, unit);
     }
+}
+
+/* A group scratch the runtime holds: eg_plan_new makes the plane, one slice of 8 doubles per group of the launch (a partial last group takes
+   its slice too), and the entry reads it through the unit's own slot. Oracle: the values the entry is documented to write (100 * group + rank,
+   plus 0.001 times the plane's length: the groups of the launch times 8). A second plan of the unit makes a plane of its own and a plan over
+   other lanes one of its own size; a caller that binds the plane's slot is refused by name; every plan is freed with its planes (the leak check
+   of the whole run sees a plane left behind). */
+static void check_group_scratch_plane(eg_ctx* ctx) {
+    eg_unit* unit = NULL;
+    check(load(ctx, "grp_planed", 0x5b, &unit) == EG_OK, "group scratch plane: eg_unit_load of a unit whose scratch is a plane");
+    if (unit == NULL) return;
+    const eg_structure structures[2] = { EG_STRUCTURE_HOST_SERIAL, EG_STRUCTURE_HOST_TEAM };
+    const int64_t lanes[3] = { 24, 19, 5 };
+    for (int s = 0; s < 2; ++s)
+        for (int i = 0; i < 3; ++i) {
+            const int64_t n = lanes[i], groups = (n + 7) / 8;
+            double x[32] = { 0 }, y[32];
+            int32_t key[32] = { 0 };
+            for (int l = 0; l < 32; ++l) y[l] = -1.0;
+            int ok = group_run(ctx, unit, structures[s], n, 0, NULL, NULL, x, key, y) == EG_OK;
+            for (int64_t l = 0; ok && l < n; ++l) {
+                const double want = 100.0 * (double)(l / 8) + (double)(l % 8) + 0.001 * (double)(groups * 8);
+                ok = y[l] == want;
+            }
+            char what[160];
+            snprintf(what, sizeof(what), "group scratch plane: %lld lanes on structure %d: every lane reads its own group's slice of a plane of %lld values",
+                     (long long)n, s, (long long)(groups * 8));
+            check(ok, what);
+        }
+    struct tensor tx, tk, ty, ts;
+    double x[8] = { 0 }, y[8] = { 0 }, scr[8] = { 0 };
+    int32_t key[8] = { 0 };
+    eg_plane* px = wrap(ctx, &tx, x, 8, kDLFloat, 64);
+    eg_plane* pk = wrap(ctx, &tk, key, 8, kDLInt, 32);
+    eg_plane* py = wrap(ctx, &ty, y, 8, kDLFloat, 64);
+    eg_plane* ps = wrap(ctx, &ts, scr, 8, kDLFloat, 64);
+    eg_plan* p = NULL;
+    const double u = 0.0;
+    eg_status s = px && pk && py && ps ? plan(ctx, unit, EG_STRUCTURE_HOST_SERIAL, 8, 0, NULL, NULL, &p) : EG_FAULT;
+    if (s == EG_OK) {
+        const int32_t plane_slots[4] = { 0, 1, 2, 4 }, uniform_slots[1] = { 3 };
+        eg_plane* const planes[4] = { px, pk, py, ps };
+        const void* const values[1] = { &u };
+        struct eg_bind_desc d;
+        memset(&d, 0, sizeof(d));
+        d.struct_size = sizeof(d);
+        d.n_planes = 4;
+        d.n_uniforms = 1;
+        d.plane_slots = plane_slots;
+        d.planes = planes;
+        d.uniform_slots = uniform_slots;
+        d.uniform_values = values;
+        s = eg_bind(ctx, p, &d);
+    }
+    check(s == EG_BAD_REQUEST && reason_has(ctx, "slot 4 ('scr') is a companion or compensation plane: eagle makes it, do not pass it"),
+          "group scratch plane: a caller that binds the slot of the plane is refused BAD_REQUEST by name");
+    eg_plane_free(ctx, px);
+    eg_plane_free(ctx, pk);
+    eg_plane_free(ctx, py);
+    eg_plane_free(ctx, ps);
+    eg_plan_free(ctx, p);
+    check(eg_unit_free(ctx, unit) == EG_OK, "group scratch plane: the unit is freed once its plans are");
+}
+
+/* The slots the library makes, as the unit answers them: the list is exactly
+   the slots eg_bind refuses by name ("eagle makes it", "eagle passes it",
+   "eagle reads it") plus the optional ones it leaves to the caller (AUTO mix
+   counters). The oracle is eg_bind itself, run on every slot of the unit with a
+   plane the slot would otherwise take; one query, two calls (count, then fill).
+ */
+static int made_slot_listed(const int32_t* list, int32_t n, int32_t slot)
+{
+    for (int32_t i = 0; i < n; ++i)
+        if (list[i] == slot)
+            return 1;
+    return 0;
+}
+
+static void check_made_slots_of(eg_ctx* ctx, eg_unit* unit, const char* what,
+    int32_t want_n, const int32_t* want)
+{
+    int32_t n = -1, list[16] = { 0 };
+    int ok = eg_unit_made_slots(ctx, unit, 0, NULL, &n) == EG_OK && n == want_n
+        && n <= 16 && eg_unit_made_slots(ctx, unit, n, list, &n) == EG_OK;
+    for (int32_t i = 0; ok && i < want_n; ++i)
+        ok = list[i] == want[i];
+    char text[200];
+    snprintf(text, sizeof(text),
+        "unit made slots: %s lists %d slots, in slot order", what, (int)want_n);
+    check(ok, text);
+    struct tensor t;
+    double cell[8]  = { 0 };
+    eg_plane* plane = wrap(ctx, &t, cell, 8, kDLFloat, 64);
+    eg_plan* p      = NULL;
+    int agree       = plane != NULL
+        && plan(ctx, unit, EG_STRUCTURE_HOST_SERIAL, 8, 0, NULL, NULL, &p)
+            == EG_OK;
+    int32_t refused = 0;
+    for (int32_t slot = 0; agree && slot < 32; ++slot) {
+        struct eg_bind_desc d;
+        memset(&d, 0, sizeof(d));
+        d.struct_size      = sizeof(d);
+        d.n_planes         = 1;
+        d.plane_slots      = &slot;
+        d.planes           = &plane;
+        const eg_status st = eg_bind(ctx, p, &d);
+        if (st == EG_BAD_REQUEST && reason_has(ctx, "unknown slot"))
+            break;
+        const int by_library = st == EG_BAD_REQUEST
+            && (reason_has(ctx, "eagle makes it")
+                || reason_has(ctx, "eagle passes it")
+                || reason_has(ctx, "eagle reads it"));
+        refused += by_library;
+        agree = by_library == made_slot_listed(list, n, slot);
+    }
+    snprintf(text, sizeof(text),
+        "unit made slots: %s: eg_bind refuses exactly the listed slots (%d of "
+        "the %d)",
+        what, (int)refused, (int)n);
+    check(agree && refused == n, text);
+    eg_plan_free(ctx, p);
+    eg_plane_free(ctx, plane);
+}
+
+static void check_made_slots(eg_ctx* ctx)
+{
+    eg_unit *plain = NULL, *planed = NULL, *vw = NULL, *vr = NULL,
+            *split = NULL;
+    check(load(ctx, "axpb", 0xA1, &plain) == EG_OK
+            && load(ctx, "grp_planed", 0x5b, &planed) == EG_OK
+            && load(ctx, "vecw", 0xE1, &vw) == EG_OK
+            && load(ctx, "vecr", 0xE2, &vr) == EG_OK,
+        "unit made slots: the plain, group scratch and stage units load");
+    if (plain == NULL || planed == NULL || vw == NULL || vr == NULL)
+        return;
+    struct eg_unit_ref ref;
+    memset(&ref, 0, sizeof(ref));
+    ref.struct_size = sizeof(ref);
+    ref.name        = "vecsplit";
+    memset(ref.digest, 0xE3, EG_DIGEST_BYTES);
+    eg_unit* stages[2] = { vw, vr };
+    struct eg_unit_load_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.path        = library_path;
+    d.unit        = &ref;
+    d.deps        = stages;
+    d.n_deps      = 2;
+    check(eg_unit_load(ctx, &d, &split) == EG_OK,
+        "unit made slots: the split unit loads");
+    const int32_t scratch[1] = { 4 };
+    check_made_slots_of(ctx, plain, "a plain unit", 0, NULL);
+    check_made_slots_of(
+        ctx, planed, "a unit whose group scratch is a plane", 1, scratch);
+    if (split != NULL) {
+        const int32_t none[1] = { 0 };
+        check_made_slots_of(ctx, split,
+            "a split unit (its team plane is no slot of the source)", 0, none);
+    }
+    check(eg_unit_made_slots(ctx, plain, 0, NULL, NULL) == EG_BAD_REQUEST
+            && reason_has(ctx, "n is NULL"),
+        "unit made slots: a NULL count is refused");
+    int32_t n = 0, small[1];
+    check(eg_unit_made_slots(ctx, planed, 0, NULL, &n) == EG_OK
+            && eg_unit_made_slots(ctx, planed, -1, small, &n) == EG_BAD_REQUEST,
+        "unit made slots: a negative capacity is refused");
+    if (split != NULL)
+        eg_unit_free(ctx, split);
+    eg_unit_free(ctx, vw);
+    eg_unit_free(ctx, vr);
+    eg_unit_free(ctx, plain);
+    eg_unit_free(ctx, planed);
 }
 
 int main(int argc, char** argv) {
@@ -8811,6 +9216,8 @@ int main(int argc, char** argv) {
     check_group_accepted(ctx);
     check_group_launch(ctx);
     check_group_distinct(ctx);
+    check_group_scratch_plane(ctx);
+    check_made_slots(ctx);
     check_group_refusals(ctx);
     check_gather_table(ctx);
     check_shared(ctx);
@@ -8841,6 +9248,7 @@ int main(int argc, char** argv) {
     check_integer_plane_refusals(ctx);
     check_reverse_reorder(ctx);
     check_reverse_scan(ctx);
+    check_reverse_scan_reorder_in_while(ctx);
     check_reduce_position(ctx);
     check_reverse_reduce(ctx);
     check_reverse_chain(ctx);

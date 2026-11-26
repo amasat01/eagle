@@ -49,6 +49,13 @@ EG_EXPORT eg_status eg_unit_load(eg_ctx* ctx, const struct eg_unit_load_desc* de
     return door::call(ctx, [&](eg_ctx& c) { door::unit_load(c, desc, out); });
 }
 
+EG_EXPORT eg_status eg_unit_made_slots(
+    eg_ctx* ctx, const eg_unit* unit, int32_t cap, int32_t* slots, int32_t* n)
+{
+    return door::call(
+        ctx, [&](eg_ctx& c) { door::unit_made_slots(c, unit, cap, slots, n); });
+}
+
 EG_EXPORT eg_status eg_unit_free(eg_ctx* ctx, eg_unit* unit) {
     if (unit == nullptr) return EG_OK;
     return door::call(ctx, [unit](eg_ctx& c) {

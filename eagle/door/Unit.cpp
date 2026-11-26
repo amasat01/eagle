@@ -9,6 +9,7 @@
 #include "eagle/door/eg_unit_meta.h"
 #include "plugin/gref_abi.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstddef>
 #include <cstring>
@@ -785,6 +786,26 @@ std::int64_t scratch_width(std::int32_t dtype, std::int32_t scalar_type)
     }
 }
 
+/** @brief The slot eagle makes for the scratch plane @p s realised as a plane: a LOOKUP of the plane's element type that no other
+ * record of the unit owns. Marks it made, so a caller binding it is refused by name; returns its index. */
+std::int32_t made_scratch_slot(const eg_unit_group_scratch& s, eg_unit_s& unit, const std::string& named)
+{
+    const std::int32_t n_slots = static_cast<std::int32_t>(unit.slots.size());
+    if (s.slot < 0 || s.slot >= n_slots)
+        refuse(EG_BAD_REQUEST,
+            named + "is a PLANE whose slot " + std::to_string(s.slot) + " names no slot (the unit has "
+                + std::to_string(n_slots) + ")");
+    SlotFacts& slot = unit.slots[static_cast<std::size_t>(s.slot)];
+    if (slot.role != EG_ROLE_LOOKUP || slot.dtype != s.dtype || slot.gathered || slot.param_plane)
+        refuse(EG_BAD_REQUEST,
+            named + "is a PLANE whose slot '" + slot.name + "' is not a LOOKUP of the plane's element type");
+    if (slot.made || slot.like != -1)
+        refuse(EG_BAD_REQUEST,
+            named + "is a PLANE whose slot '" + slot.name + "' is a slot another record of the unit already owns");
+    slot.made = true;
+    return s.slot;
+}
+
 /** @brief The product of @p extents, 1 for none; refuses a product that does
  * not fit 64 bits. */
 std::int64_t extent_product(
@@ -977,7 +998,14 @@ void read_group(const eg_unit_meta& m, eg_unit_s& unit)
                     + std::to_string(width) + " bytes");
         if (__builtin_add_overflow(total, s.bytes, &total))
             refuse(EG_BAD_REQUEST, bad + "scratch bytes do not fit 64 bits");
-        f.scratch.push_back({ s.name, s.dtype, s.elements, s.bytes });
+        GroupScratchFacts plane{ s.name, s.dtype, s.elements, s.bytes, s.realisation, -1 };
+        if (s.realisation == EG_SCRATCH_PLANE)
+            plane.slot = made_scratch_slot(s, unit, named);
+        else if (s.realisation != EG_SCRATCH_LOCAL)
+            refuse(EG_BAD_REQUEST,
+                named + "realisation " + std::to_string(s.realisation)
+                    + " is neither LOCAL nor PLANE");
+        f.scratch.push_back(plane);
     }
     if (g.scratch_bytes != total)
         refuse(EG_BAD_REQUEST,
@@ -1601,6 +1629,57 @@ void unit_load(eg_ctx& ctx, const eg_unit_load_desc* desc, eg_unit** out) {
         close_library(library);
         throw;
     }
+}
+
+const char* made_reason(const eg_unit_s& unit, std::int32_t slot)
+{
+    const SlotFacts& s = unit.slots[static_cast<std::size_t>(slot)];
+    if (slot == unit.finish.counter_slot)
+        return "is the finished counter: eagle makes it, do not pass it";
+    if (slot == unit.fault_slot)
+        return "is the fault cell of a checked unit: eagle makes it, do not "
+               "pass it";
+    if (s.role == EG_ROLE_NSAMPLES)
+        return "is the sample count: eagle passes it, do not bind it";
+    if (s.role == EG_ROLE_EXTENT)
+        return "is the extent of a plane's runtime axis: eagle reads it from "
+               "that plane, do not bind it";
+    if (s.made)
+        return "is a companion or compensation plane: eagle makes it, do not "
+               "pass it";
+    return nullptr;
+}
+
+std::vector<std::int32_t> made_slots(const eg_unit_s& unit)
+{
+    std::vector<std::int32_t> made;
+    for (std::int32_t i = 0; i < static_cast<std::int32_t>(unit.slots.size());
+        ++i)
+        if (made_reason(unit, i) != nullptr
+            || unit.slots[static_cast<std::size_t>(i)].optional_made)
+            made.push_back(i);
+    return made;
+}
+
+/** @brief eg_unit_made_slots: the slots the library supplies, counted then
+ * filled. */
+void unit_made_slots(eg_ctx& ctx, const eg_unit_s* unit, std::int32_t cap,
+    std::int32_t* slots, std::int32_t* n)
+{
+    check_handle(ctx.units, unit, "unit");
+    if (n == nullptr)
+        refuse(EG_BAD_REQUEST, "eg_unit_made_slots: n is NULL");
+    const std::vector<std::int32_t> made = made_slots(*unit);
+    *n = static_cast<std::int32_t>(made.size());
+    if (cap > 0 && slots == nullptr)
+        refuse(
+            EG_BAD_REQUEST, "eg_unit_made_slots: slots is NULL with cap > 0");
+    if (cap < 0 || (cap > 0 && cap < *n))
+        refuse(EG_BAD_REQUEST,
+            "eg_unit_made_slots: cap " + std::to_string(cap) + " is below the "
+                + std::to_string(*n) + " slots the library makes");
+    if (cap > 0)
+        std::copy(made.begin(), made.end(), slots);
 }
 
 /** @brief Drop one reference to @p unit; the last one closes its library. */

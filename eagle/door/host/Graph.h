@@ -117,6 +117,7 @@ struct DiffNode {
     std::vector<VjpLink> links;
     host::ReduceOp reduce;                      ///< a reduce
     host::ScanOp scan;                          ///< a real scan
+    host::ReorderOp reorder;                    ///< a reorder
     eg_fft_s *fft = nullptr, *adjoint = nullptr;    ///< a transform (a reference is held) and the transform that is its adjoint (made here, freed with the tape)
     eg_gemm_s gemm, gemm_a, gemm_b;             ///< a product, and the products that give the gradients of its A and of its B
     eg_runner_s* runner = nullptr;              ///< a run (a recorded runner: the graph's node holds its reference)

@@ -205,6 +205,9 @@ struct GroupScratchFacts {
     std::string name;
     std::int32_t dtype    = 0;
     std::int64_t elements = 0, bytes = 0; ///< per group
+    std::int32_t realisation = 0; ///< EG_SCRATCH_LOCAL or EG_SCRATCH_PLANE
+    std::int32_t slot
+        = -1; ///< PLANE: the slot eagle makes and binds the plane to, else -1
 };
 
 /** @brief A unit's group record (eg_unit_meta.group), checked at eg_unit_load; the device launch reads it
@@ -494,6 +497,7 @@ struct eg_plan_s {
     std::vector<eg_plane_s*> comps;           ///< the compensation rows of each cell column (nullptr: none), parallel to ``rows``
     std::vector<eg_plane_s*> outs;            ///< a split unit: the cell plane eagle makes for each internal cell column (nullptr: the caller's)
     std::vector<eg_plane_s*> team;            ///< one eagle-made scratch plane per team plane of a split unit, one reference each
+    std::vector<eg_plane_s*> group_scratch;   ///< one eagle-made plane per group scratch plane realised as a plane (``unit->group_record.scratch``, in order, the others skipped), one reference each
     eg_plane_s* fault = nullptr;              ///< a checked unit: the two int64 cells (slot ordinal, index) of the generated checks, one reference
     std::vector<eg_plane_s*> work;            ///< DEVICE: the two reduction work buffers of each cell component, one reference each
     std::vector<std::vector<eg_plane_s*>> segteam;   ///< a SEGMENTED plan: the scratch planes of each member that is a split unit other than the planned unit (by member index)
@@ -903,6 +907,16 @@ bool ctx_close(eg_ctx& ctx);
 void ctx_info(eg_ctx& ctx, struct eg_ctx_info* out);
 void unit_load(eg_ctx& ctx, const eg_unit_load_desc* desc, eg_unit** out);
 void unit_release(eg_ctx& ctx, eg_unit_s* unit);
+/** @brief Why the caller may not bind slot @p slot of @p unit: the tail of the
+ * refusal ("is the finished counter: ..."), or NULL when the caller may bind
+ * it. The one place that decides it, read by eg_bind and by eg_unit_made_slots.
+ */
+const char* made_reason(const eg_unit_s& unit, std::int32_t slot);
+/** @brief The slots the library supplies: those the caller may not bind and
+ * those it may leave unbound (the AUTO mix counters), in slot order. */
+std::vector<std::int32_t> made_slots(const eg_unit_s& unit);
+void unit_made_slots(eg_ctx& ctx, const eg_unit_s* unit, std::int32_t cap,
+    std::int32_t* slots, std::int32_t* n);
 /** @brief Drop one load of a unit library; the last one unloads it and closes the file it was read from. */
 void close_library(void* library);
 void plane_wrap(eg_ctx& ctx, DLManagedTensorVersioned* tensor, eg_plane** out);

@@ -317,6 +317,7 @@ void other_leaf(eg_ctx& ctx, const Node& n, DiffNode& dn, std::size_t ordinal, c
             // read by the transpose (kept, so a later leaf that overwrites it
             // is preceded by a copy); a plane with no adjoint only notes a kept
             // plane it moves.
+            dn.reorder = n.reorder;
             bool real = false;
             for (eg_plane_s* p : n.reorder.planes) {
                 if (floats(p)) {
@@ -487,17 +488,32 @@ std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<eg_plan_s*>&
             for (int m = loop.first_leaf; m < loop.first_leaf + loop.cap * loop.per_iter; ++m) {
                 const DiffNode& node = diff->nodes[static_cast<std::size_t>(plan.leaves[static_cast<std::size_t>(m)].node)];
                 if (node.writes.empty() && node.overwrites.empty()) continue;
-                if (node.kind == Node::Scan || node.kind == Node::Reorder)
+                // Its winners would be one plane every iteration overwrites;
+                // the reverse finds them again from the values.
+                if (node.kind == Node::Scan && node.scan.index != nullptr)
                     refuse(EG_NOT_WRITTEN,
-                        "eg_record_end: a scan or reorder that writes planes "
-                        "the tape tracks inside a WHILE body is not written in "
-                        "EG_RECORD_DIFF; "
-                        "the loop's window rebuilds its states by re-running "
-                        "the body and has no re-run of it");
+                        "eg_record_end: a scan that writes a winner plane "
+                        "inside a WHILE body is not written in EG_RECORD_DIFF; "
+                        "record the scan without one, and the reverse finds "
+                        "the winners again from the values the window "
+                        "rebuilds");
+                // A plane the reorder moves without an adjoint would be moved
+                // again by the re-run, out of the tape's reach.
+                if (node.kind == Node::Reorder)
+                    for (const eg_plane_s* p : node.reorder.planes)
+                        if (tensor(*p).dtype.code != kDLFloat)
+                            refuse(EG_NOT_WRITTEN,
+                                "eg_record_end: a reorder inside a WHILE body "
+                                "that moves an integer plane is not written in "
+                                "EG_RECORD_DIFF; "
+                                "the loop's window re-runs the reorder over "
+                                "the real planes only");
                 if (node.kind == Node::Host)
                     refuse(EG_NOT_WRITTEN, "eg_record_end: host node '" + node.host->name + "' writes planes the tape tracks inside a WHILE body; the loop's window rebuilds its states by "
                            "re-running the body and does not call a host node again");
-                if (node.kind != Node::Launch && !node.overwrites.empty())    // the window rebuild re-launches plans; it has no re-run of an int copy
+                // The window rebuild re-launches plans; it has no re-run of an
+                // int copy, a sort or a compaction.
+                if (node.kind != Node::Launch && !node.overwrites.empty())
                     refuse(EG_NOT_WRITTEN, "eg_record_end: leaf " + std::to_string(plan.leaves[static_cast<std::size_t>(m)].node) + " overwrites an int plane a vjp reads inside a WHILE body; "
                            "only a launch may write it there (the loop's window rebuilds its states by re-launching the body)");
                 if (node.kind == Node::Launch) {
@@ -745,7 +761,8 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
         else host::gemm_exec(product, *a.get(), *b.get(), *c.get());
     };
     const auto plane_of = [&](int idx) -> const eg_plane_s& { return *d.planes[static_cast<std::size_t>(idx)]; };
-    // Run the forward of the copy, reduce, transform or product @p node again over the buffers @p data_at names for its planes.
+    // Run the forward of the copy, reduce, scan, reorder, transform or product
+    // @p node again over the buffers @p data_at names for its planes.
     const auto rerun = [&](const DiffNode& node, const auto& data_at) {
         const int in = node.reads.front(), out = node.writes.front();
         switch (node.kind) {
@@ -759,6 +776,32 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
                 r.out = y.get();
                 if (D != nullptr) device_reduce_leaf(*D, r);
                 else host::reduce_exec(r, threads);
+                break;
+            }
+            case Node::Scan: { // its winner plane is refused at the record's
+                               // end, so there is none to write
+                View x(plane_of(in), data_at(in)),
+                    y(plane_of(out), data_at(out));
+                host::ScanOp s = node.scan;
+                s.in           = x.get();
+                s.out          = y.get();
+                host::scan_exec(s, threads);
+                break;
+            }
+            case Node::Reorder: { // every plane moves in place, through the
+                                  // order as the window has it
+                std::vector<std::unique_ptr<View>> moved;
+                host::ReorderOp r = node.reorder;
+                for (eg_plane_s*& p : r.planes) {
+                    const int idx = find_plane(d, p);
+                    moved.push_back(
+                        std::make_unique<View>(plane_of(idx), data_at(idx)));
+                    p = moved.back()->get();
+                }
+                View order(plane_of(node.kept_reads.front()),
+                    data_at(node.kept_reads.front()));
+                r.order = order.get();
+                host::reorder_exec(r, threads);
                 break;
             }
             case Node::Fft: {

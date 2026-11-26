@@ -125,6 +125,7 @@ EG_FIXTURE_EXPORT void count1g_host(void* const* params, int64_t base, int64_t c
 EG_FIXTURE_EXPORT void grp_count_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void grp_cols_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void grp_rows_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void grp_planed_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void widemul_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void gath_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void boxed_host(void* const* params, int64_t base, int64_t count, int64_t n);
@@ -188,6 +189,20 @@ void grp_rows_host(void* const* params, int64_t base, int64_t count, int64_t n) 
     const int64_t rows = n / 4;
     for (int64_t g = base; g < base + count; ++g)
         for (int64_t r = 0; r < rows; ++r) y[g + r * 4] = 1000.0 * (double)g + (double)rows;
+}
+
+/* Groups of 8 consecutive lanes whose scratch is the plane eagle makes (the LOOKUP slot 4): group g keeps its lanes' values at 8 * g on. Each lane
+ * stores 100 * g + its rank there, and then reads it back into y with 0.001 times the plane's length added, so a test sees the slice of every
+ * group and the length the plane was made with. */
+void grp_planed_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    double* y = grp_out(params);
+    const struct fixture_handle* plane = (const struct fixture_handle*)params[4];
+    double* scr = (double*)plane->data;
+    for (int64_t g = base; g < base + count; ++g) {
+        const int64_t first = g * 8, size = n - first < 8 ? n - first : 8;
+        for (int64_t r = 0; r < size; ++r) scr[g * 8 + r] = 100.0 * (double)g + (double)r;
+        for (int64_t r = 0; r < size; ++r) y[first + r] = scr[g * 8 + r] + 0.001 * (double)plane->samples;
+    }
 }
 
 /* The width of the "cross" vector the "vecsplit" stages pass. */
@@ -1492,6 +1507,19 @@ GRP_SCRATCH(grp_m3, EG_DTYPE_INT32, 1, grp_shape3, 24, 96, "m");      /* 8 value
 GRP_SCRATCH(grp_t4, EG_DTYPE_REAL, 0, NULL, 4, 32, "t");
 GRP_SCRATCH(grp_t16, EG_DTYPE_REAL, 0, NULL, 16, 128, "t");
 GRP_SCRATCH(grp_u8, EG_DTYPE_UINT32, 0, NULL, 8, 32, "t");            /* a type a scratch plane never holds */
+/* the same 8 doubles held by the plane eagle makes at the slot given: the fifth slot of the planed units, a slot the unit does not have, a plane
+ * that is no lookup (x), and a lookup of another element type (the slot is REAL, the scratch int32) */
+#define GRP_SCRATCH_PLANE(var, dtype_, bytes_, slot_)                                                                                            \
+    static const struct eg_unit_group_scratch var = { .struct_size = sizeof(struct eg_unit_group_scratch), .dtype = dtype_, .rank = 0,         \
+        .realisation = EG_SCRATCH_PLANE, .elements = 8, .bytes = bytes_, .name = "t", .slot = slot_ }
+GRP_SCRATCH_PLANE(grp_t8_plane, EG_DTYPE_REAL, 64, 4);
+GRP_SCRATCH_PLANE(grp_t8_plane_out, EG_DTYPE_REAL, 64, 9);
+GRP_SCRATCH_PLANE(grp_t8_plane_x, EG_DTYPE_REAL, 64, 0);
+GRP_SCRATCH_PLANE(grp_t8_plane_int, EG_DTYPE_INT32, 32, 4);
+static const struct eg_unit_group_scratch* const grp_list_plane[] = { &grp_t8_plane };
+static const struct eg_unit_group_scratch* const grp_list_plane_out[] = { &grp_t8_plane_out };
+static const struct eg_unit_group_scratch* const grp_list_plane_x[] = { &grp_t8_plane_x };
+static const struct eg_unit_group_scratch* const grp_list_plane_int[] = { &grp_t8_plane_int };
 static const struct eg_unit_group_scratch* const grp_list_t8[] = { &grp_t8 };
 static const struct eg_unit_group_scratch* const grp_list_t8_short[] = { &grp_t8_short };
 static const struct eg_unit_group_scratch* const grp_list_t9[] = { &grp_t9 };
@@ -1543,6 +1571,22 @@ GRP_RECORD(grp_rec_unbounded, EG_GROUP_KEY, 1, 0, NULL, 1, 0, -1, 64, 1, grp_lis
 GRP_RECORD(grp_rec_twice, EG_GROUP_COUNT, 1, 0, NULL, -1, 8, 8, 128, 2, grp_list_twice);
 GRP_RECORD(grp_rec_bad_dtype, EG_GROUP_COUNT, 1, 0, NULL, -1, 8, 8, 32, 1, grp_list_u8);
 GRP_RECORD(grp_rec_bound, EG_GROUP_AXES, 1, 1, grp_axes_col, -1, 0, 5, 0, 0, NULL);
+GRP_RECORD(grp_rec_planed, EG_GROUP_COUNT, 2, 0, NULL, -1, 8, 8, 64, 1, grp_list_plane);
+GRP_RECORD(grp_rec_planed_out, EG_GROUP_COUNT, 2, 0, NULL, -1, 8, 8, 64, 1, grp_list_plane_out);
+GRP_RECORD(grp_rec_planed_x, EG_GROUP_COUNT, 2, 0, NULL, -1, 8, 8, 64, 1, grp_list_plane_x);
+GRP_RECORD(grp_rec_planed_int, EG_GROUP_COUNT, 2, 0, NULL, -1, 8, 8, 32, 1, grp_list_plane_int);
+/* the slots of a unit with a planed scratch: x, key, y, u, and the plane eagle makes */
+SLOT(slot_grp_scr, EG_ROLE_LOOKUP, "scr");
+static const struct eg_unit_slot* const grp_planed_slots[] = { &slot_grp_x, &slot_grp_key, &slot_grp_y, &slot_grp_u, &slot_grp_scr };
+static const struct eg_unit_body grp_planed_body = { .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = 5, .slots = grp_planed_slots };
+#define GRP_PLANED_UNIT(var, name_, byte, group_)                                                                                                 \
+    static const struct eg_unit_meta var = { .struct_size = sizeof(struct eg_unit_meta), .name = name_, .digest = DIGEST(byte),                  \
+        .pattern = EG_PATTERN_PURE, .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "grp_planed_host", .device_image_format = EG_IMAGE_NONE,      \
+        .body = &grp_planed_body, .launch = &grp_launch_flat, .group = &group_ }
+GRP_PLANED_UNIT(unit_grp_planed, "grp_planed", 0x5b, grp_rec_planed);
+GRP_PLANED_UNIT(unit_grp_planed_out, "grp_planed_out", 0x5c, grp_rec_planed_out);
+GRP_PLANED_UNIT(unit_grp_planed_x, "grp_planed_x", 0x5d, grp_rec_planed_x);
+GRP_PLANED_UNIT(unit_grp_planed_int, "grp_planed_int", 0x5e, grp_rec_planed_int);
 #define GRP_UNIT_RUN(var, name_, byte, entry_, launch_, group_)                                                                                   \
     static const struct eg_unit_meta var = { .struct_size = sizeof(struct eg_unit_meta), .name = name_, .digest = DIGEST(byte),                  \
         .pattern = EG_PATTERN_PURE, .scalar_type = EG_SCALAR_FLOAT64, .host_entry = entry_, .device_image_format = EG_IMAGE_NONE,                \
@@ -1591,7 +1635,8 @@ static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &uni
                                                     &unit_grp_count0, &unit_grp_no_axis, &unit_grp_axis_out, &unit_grp_key_range, &unit_grp_key_uniform,
                                                     &unit_grp_key_real, &unit_grp_bytes, &unit_grp_total, &unit_grp_larger, &unit_grp_phases0, &unit_grp_alien,
                                                     &unit_grp_unbounded, &unit_grp_twice, &unit_grp_bad_dtype, &unit_grp_bound, &unit_grp_boxed, &unit_grp_distinct, &unit_grp_distinct_reads,
-                                                    &unit_grp_distinct_uniform, &unit_grp_distinct_unordered };
+                                                    &unit_grp_distinct_uniform, &unit_grp_distinct_unordered, &unit_grp_planed, &unit_grp_planed_out,
+                                                    &unit_grp_planed_x, &unit_grp_planed_int };
 
 static const struct eg_library_meta library = {
     .struct_size = sizeof(struct eg_library_meta),

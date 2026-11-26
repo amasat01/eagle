@@ -114,6 +114,16 @@ DLDataType real_dtype(std::int32_t scalar) {
     return DLDataType{ kDLFloat, static_cast<std::uint8_t>(scalar == EG_SCALAR_FLOAT32 ? 32 : 64), 1 };
 }
 
+/** @brief The element type of a group scratch plane of wire type @p dtype in a unit of @p scalar. */
+DLDataType scratch_dtype(std::int32_t dtype, std::int32_t scalar) {
+    switch (dtype) {
+        case EG_DTYPE_INT64: return DLDataType{ kDLInt, 64, 1 };
+        case EG_DTYPE_INT32: return DLDataType{ kDLInt, 32, 1 };
+        case EG_DTYPE_BOOL: return DLDataType{ kDLBool, 8, 1 };
+        default: return real_dtype(scalar);    // REAL: the record check lets no other type through
+    }
+}
+
 /** @brief True for the roles whose plane has a runtime row count (the handle's extent is the trailing one). */
 bool wide(const SlotFacts& s) { return s.role == EG_ROLE_WIDE_IN || kept_out(s); }
 
@@ -405,26 +415,12 @@ void check_bind(const eg_ctx& ctx, const eg_plan_s& plan, const eg_bind_desc& d)
             refuse(EG_BAD_REQUEST, "unknown slot " + std::to_string(slot) + " (the unit has " +
                    std::to_string(n_slots) + ")");
         const SlotFacts& s = plan.unit->slots[slot];
-        if (slot == plan.unit->finish.counter_slot)
-            refuse(EG_BAD_REQUEST, "slot " + std::to_string(slot) + " ('" + s.name +
-                   "') is the finished counter: eagle makes it, do not pass it");
-        if (slot == plan.unit->fault_slot)
-            refuse(EG_BAD_REQUEST, "slot " + std::to_string(slot) + " ('" + s.name +
-                   "') is the fault cell of a checked unit: eagle makes it, do not pass it");
-        if (s.role == EG_ROLE_NSAMPLES)
-            refuse(EG_BAD_REQUEST, "slot " + std::to_string(slot) + " ('" + s.name +
-                   "') is the sample count: eagle passes it, do not bind it");
-        if (s.role == EG_ROLE_EXTENT)
-            refuse(EG_BAD_REQUEST,
-                "slot " + std::to_string(slot) + " ('" + s.name
-                    + "') is the extent of a plane's runtime axis: eagle reads "
-                      "it from that plane, do not bind it");
         if (plan.active_owner != nullptr && (slot == plan.unit->active_map_slot || slot == plan.unit->active_count_slot))
             refuse(EG_BAD_REQUEST, "slot " + std::to_string(slot) + " ('" + s.name +
                    "') is part of the active set of a runner: the runner makes it, do not pass it");
-        if (s.made)
-            refuse(EG_BAD_REQUEST, "slot " + std::to_string(slot) + " ('" + s.name +
-                   "') is a companion or compensation plane: eagle makes it, do not pass it");
+        if (const char* why = made_reason(*plan.unit, slot))
+            refuse(EG_BAD_REQUEST,
+                "slot " + std::to_string(slot) + " ('" + s.name + "') " + why);
         if ((s.role == EG_ROLE_UNIFORM) == plane)
             refuse(EG_BAD_REQUEST, "slot " + std::to_string(slot) + " ('" + s.name + "') takes " +
                    (plane ? "a uniform, not a plane" : "a plane, not a uniform"));
@@ -639,6 +635,14 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
             plan->fault = make_plane(ctx, DLDataType{ kDLInt, 64, 1 }, { 2 }, device);
             bind_handle(*plan, d.unit->fault_slot, plan->fault->tensor->dl_tensor.data, 2);
         }
+        for (const GroupScratchFacts& sc : d.unit->group_record.scratch) {    // a group's scratch realised as a plane: one slice per group of the launch (the entry sees no thread, so a slice per group is the most that can run at once), filled by the groups
+            if (sc.realisation != EG_SCRATCH_PLANE) continue;
+            std::int64_t cells = 0;
+            if (__builtin_mul_overflow(group_count(*d.unit, d.n_samples), sc.elements, &cells))
+                refuse(EG_BAD_REQUEST, "unit '" + d.unit->name + "': the scratch plane '" + sc.name + "' of " + std::to_string(d.n_samples) + " lanes does not fit 64 bits");
+            plan->group_scratch.push_back(make_plane(ctx, scratch_dtype(sc.dtype, d.unit->scalar_type), { std::max<std::int64_t>(cells, 1) }, device, false, false));
+            bind_handle(*plan, sc.slot, plan->group_scratch.back()->tensor->dl_tensor.data, static_cast<std::uint64_t>(cells));
+        }
         if (d.unit->finish.present && d.unit->finish.steps_slot >= 0)    // the steps word of an AUTO unit
             bind_handle(*plan, d.unit->finish.steps_slot, steps_cell(*plan), 1);
         if (!d.unit->cells.empty()) {    // the rows of every cell component, zeroed
@@ -775,6 +779,7 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
         }
         ctx.plans.insert(plan);
     } catch (...) {
+        for (eg_plane_s* r : plan->group_scratch) plane_release(ctx, r);
         for (eg_plane_s* r : plan->mix) plane_release(ctx, r);
         for (eg_plane_s* r : plan->segdev) plane_release(ctx, r);
         for (auto& v : plan->segteam) for (eg_plane_s* r : v) plane_release(ctx, r);
@@ -803,6 +808,7 @@ void plan_free(eg_ctx& ctx, eg_plan_s* plan) {
     for (eg_plane_s* r : plan->work) plane_release(ctx, r);
     for (eg_plane_s* r : plan->rows) plane_release(ctx, r);
     for (eg_plane_s* r : plan->team) if (r != nullptr) plane_release(ctx, r);
+    for (eg_plane_s* r : plan->group_scratch) plane_release(ctx, r);
     for (eg_plane_s* r : plan->mix) plane_release(ctx, r);
     for (eg_plane_s* r : plan->segdev) plane_release(ctx, r);
     for (auto& v : plan->segteam) for (eg_plane_s* r : v) plane_release(ctx, r);

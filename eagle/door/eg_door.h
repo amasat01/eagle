@@ -792,6 +792,22 @@ eg_status eg_host_threads(eg_ctx* ctx, int32_t threads);
  */
 eg_status eg_unit_load(eg_ctx* ctx, const struct eg_unit_load_desc* desc, eg_unit** out);
 
+/**
+ * The slots of ``unit`` the library supplies: those ``eg_bind`` refuses by name
+ * (the finished counter, the fault cell of a checked unit, the sample count, a
+ * runtime axis's extent, the companion, compensation, scratch, team and
+ * sorted-sample planes the door makes) and those it lets the caller leave
+ * unbound (the AUTO mix counters). Two-call protocol as ``eg_plan_counters``:
+ * ``*n`` always gets the count; with
+ * ``cap`` 0 nothing is written; with ``0 < cap < *n`` the call is refused.
+ * ``slots`` receives the slot indices in increasing order. The active set of a
+ * runner is not listed: it is made only when a runner owns the plan. Status:
+ * OK; BAD_REQUEST (``n`` NULL, ``slots`` NULL with ``cap`` > 0, ``cap``
+ * negative or too small, a handle of another context).
+ */
+eg_status eg_unit_made_slots(
+    eg_ctx* ctx, const eg_unit* unit, int32_t cap, int32_t* slots, int32_t* n);
+
 /** Release a unit (its library stays open while a plan uses it). NULL-safe. */
 eg_status eg_unit_free(eg_ctx* ctx, eg_unit* unit);
 
