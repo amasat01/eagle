@@ -833,8 +833,8 @@ typedef int32_t eg_mem;
 #define EG_DEVICE_DEFAULT (-1)
 
 /** INPUT to ``eg_plane_new``. The dtype is the DLPack code and bit width a
- *  plane may carry (as ``eg_plane_wrap`` accepts): float 64/32, int 64/32/8,
- *  uint 32, bool 8, one lane. A node runs on the device of its planes: a plane
+ *  plane may carry (as ``eg_plane_wrap`` accepts): float 64/32, int 64/32/16/8,
+ *  uint 64/32/16/8, bool 8, one lane. A node runs on the device of its planes: a plane
  *  states its member by ``device`` when made and by its DLPack device (type and
  *  id) when wrapped, and a node whose planes sit on two members is refused by
  *  name with ``eg_copy`` as the way. */

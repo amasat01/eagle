@@ -6809,6 +6809,248 @@ static int rank_case_ok(eg_ctx* ctx, rank_type t, int64_t cols, int64_t n, int i
     return ok;
 }
 
+/* ---- the integer plane types int16, uint8, uint16 and uint64 ------------- */
+
+/* The integer element types a plane gained beyond int8, int32, uint32 and
+ * int64: one row per type, with the largest key range its width holds. */
+static const struct int_plane_type {
+    const char* name;
+    uint8_t code, bits;
+    int64_t reach;
+} int_plane_types[] = {
+    { "int16", kDLInt, 16, 32768 },
+    { "uint8", kDLUInt, 8, 256 },
+    { "uint16", kDLUInt, 16, 65536 },
+    { "uint64", kDLUInt, 64, 70000 },
+};
+enum { INT_PLANE_TYPES = 4, INT_PLANE_BIG_N = 100003 };
+
+/* Element i of a buffer of `bits`-wide integers, set to the non-negative v. */
+static void int_plane_put(void* buf, int64_t i, int64_t v, uint8_t bits)
+{
+    switch (bits) {
+    case 8:
+        ((uint8_t*)buf)[i] = (uint8_t)v;
+        break;
+    case 16:
+        ((uint16_t*)buf)[i] = (uint16_t)v;
+        break;
+    case 32:
+        ((uint32_t*)buf)[i] = (uint32_t)v;
+        break;
+    default:
+        ((uint64_t*)buf)[i] = (uint64_t)v;
+    }
+}
+
+/* One sort of n keys in [0, bound) stored as type `t`, against the stable
+ * counting order computed here from the keys: the permutation (which also
+ * fixes the stability of equal keys) and the starts equal it. A key set
+ * to `bound` afterwards is refused with the count of such keys. */
+static int int_plane_sort_ok(eg_ctx* ctx, const struct int_plane_type* t,
+    int64_t n, int64_t bound, uint64_t seed)
+{
+    void* keys      = calloc((size_t)n + 1, 8);
+    int32_t* got    = calloc((size_t)n + 1, sizeof(int32_t));
+    int32_t* want   = calloc((size_t)n + 1, sizeof(int32_t));
+    uint32_t* sgot  = calloc((size_t)bound + 1, sizeof(uint32_t));
+    uint32_t* swant = calloc((size_t)bound + 1, sizeof(uint32_t));
+    int64_t* kv     = calloc((size_t)n + 1, sizeof(int64_t));
+    uint32_t* next  = calloc((size_t)bound + 1, sizeof(uint32_t));
+    uint64_t state  = seed * 6364136223846793005ull + 1442695040888963407ull;
+    int ok          = keys && got && want && sgot && swant && kv && next;
+    struct tensor tk, to, ts;
+    eg_plane *pk = NULL, *po = NULL, *ps = NULL;
+    for (int64_t i = 0; ok && i < n; ++i) {
+        state = state * 6364136223846793005ull + 1442695040888963407ull;
+        kv[i] = (int64_t)((state >> 20) % (uint64_t)bound);
+        int_plane_put(keys, i, kv[i], t->bits);
+        ++swant[kv[i] + 1];
+    }
+    for (int64_t k = 0; ok && k < bound; ++k)
+        swant[k + 1] += swant[k];
+    if (ok)
+        memcpy(next, swant, ((size_t)bound + 1) * sizeof(uint32_t));
+    for (int64_t i = 0; ok && i < n; ++i)
+        want[next[kv[i]]++] = (int32_t)i;
+    if (ok) {
+        pk = wrap(ctx, &tk, keys, n, t->code, t->bits);
+        po = wrap(ctx, &to, got, n, kDLInt, 32);
+        ps = wrap(ctx, &ts, sgot, bound + 1, kDLUInt, 32);
+        ok = pk && po && ps && order_do(ctx, pk, po, ps, bound, 0) == EG_OK
+            && memcmp(got, want, (size_t)n * sizeof(int32_t)) == 0
+            && memcmp(sgot, swant, ((size_t)bound + 1) * sizeof(uint32_t)) == 0;
+    }
+    if (ok && n > 0 && bound < t->reach) {
+        int_plane_put(keys, n - 1, bound, t->bits);
+        ok = order_do(ctx, pk, po, ps, bound, 0) == EG_BAD_REQUEST
+            && reason_has(ctx, "sort: 1 keys are outside [0, ");
+    }
+    eg_plane_free(ctx, pk);
+    eg_plane_free(ctx, po);
+    eg_plane_free(ctx, ps);
+    free(keys);
+    free(got);
+    free(want);
+    free(sgot);
+    free(swant);
+    free(kv);
+    free(next);
+    return ok;
+}
+
+static void check_integer_plane_sort(eg_ctx* ctx)
+{
+    static const int64_t sizes[] = { 0, 1, 1000, INT_PLANE_BIG_N };
+    for (int ti = 0; ti < INT_PLANE_TYPES; ++ti) {
+        const struct int_plane_type* t = &int_plane_types[ti];
+        int ok                         = 1;
+        for (size_t s = 0; ok && s < sizeof(sizes) / sizeof(sizes[0]); ++s) {
+            ok = int_plane_sort_ok(ctx, t, sizes[s], 200, 11 + s)
+                && int_plane_sort_ok(ctx, t, sizes[s], t->reach, 21 + s);
+        }
+        char what[256];
+        snprintf(what, sizeof(what),
+            "eg_order_by_key with %s keys, bounds 200 and %lld, sizes 0, 1, "
+            "1000 and %d: the order and starts equal a stable counting order "
+            "computed from the keys, and a key at the bound is refused with "
+            "the count",
+            t->name, (long long)t->reach, INT_PLANE_BIG_N);
+        check(ok, what);
+    }
+}
+
+/* Write through a plane the context made, read back through a wrapped caller
+ * plane by eg_copy: the bytes, and the dtype of the export, are the ones
+ * written. */
+static void check_integer_plane_round_trip(eg_ctx* ctx)
+{
+    for (int ti = 0; ti < INT_PLANE_TYPES; ++ti) {
+        const struct int_plane_type* t = &int_plane_types[ti];
+        enum { N = 37 };
+        int64_t shape[1] = { N };
+        struct eg_plane_desc d;
+        memset(&d, 0, sizeof(d));
+        d.struct_size                        = sizeof(d);
+        d.kind                               = EG_MEM_HOST;
+        d.ndim                               = 1;
+        d.dtype_code                         = t->code;
+        d.dtype_bits                         = t->bits;
+        d.shape                              = shape;
+        d.device                             = EG_DEVICE_DEFAULT;
+        eg_plane* made                       = NULL;
+        struct DLManagedTensorVersioned* out = NULL;
+        uint64_t back[N];
+        struct tensor tb;
+        memset(back, 0, sizeof(back));
+        int ok = eg_plane_new(ctx, &d, &made) == EG_OK && made
+            && eg_plane_dlpack(ctx, made, &out) == EG_OK && out
+            && out->dl_tensor.dtype.code == t->code
+            && out->dl_tensor.dtype.bits == t->bits
+            && out->dl_tensor.shape[0] == N;
+        if (ok)
+            for (int i = 0; i < N; ++i)
+                int_plane_put(
+                    out->dl_tensor.data, i, (int64_t)i * 3 + 1, t->bits);
+        eg_plane* wrapped
+            = ok ? wrap(ctx, &tb, back, N, t->code, t->bits) : NULL;
+        ok = ok && wrapped && eg_copy(ctx, made, wrapped) == EG_OK;
+        for (int i = 0; ok && i < N; ++i) {
+            uint64_t want = 0;
+            int_plane_put(&want, 0, (int64_t)i * 3 + 1, t->bits);
+            ok = memcmp((char*)back + (size_t)i * (t->bits / 8), &want,
+                     t->bits / 8)
+                == 0;
+        }
+        if (out && out->deleter)
+            out->deleter(out);
+        eg_plane_free(ctx, made);
+        eg_plane_free(ctx, wrapped);
+        char what[160];
+        snprintf(what, sizeof(what),
+            "a plane of type %s made by the context: bytes written through its export "
+            "read back through eg_copy, and the export names the dtype",
+            t->name);
+        check(ok, what);
+    }
+}
+
+/* eg_reorder of one plane of each type by a permutation: p[j] = old
+ * p[order[j]]. */
+static void check_integer_plane_reorder(eg_ctx* ctx)
+{
+    enum { N = 1000 };
+    static int32_t order[N];
+    for (int i = 0; i < N; ++i)
+        order[i] = (int32_t)((i * 7) % N);
+    for (int ti = 0; ti < INT_PLANE_TYPES; ++ti) {
+        const struct int_plane_type* t = &int_plane_types[ti];
+        uint64_t data[N], old[N];
+        struct tensor tp, to;
+        for (int i = 0; i < N; ++i)
+            int_plane_put(data, i, i % t->reach, t->bits);
+        memcpy(old, data, sizeof(data));
+        eg_plane* pp   = wrap(ctx, &tp, data, N, t->code, t->bits);
+        eg_plane* po   = wrap(ctx, &to, order, N, kDLInt, 32);
+        int ok         = pp && po && reorder_do(ctx, &pp, 1, po, 0) == EG_OK;
+        const size_t w = t->bits / 8;
+        for (int j = 0; ok && j < N; ++j)
+            ok = memcmp(
+                     (char*)data + j * w, (char*)old + (size_t)order[j] * w, w)
+                == 0;
+        eg_plane_free(ctx, pp);
+        eg_plane_free(ctx, po);
+        char what[120];
+        snprintf(what, sizeof(what),
+            "eg_reorder of a plane of type %s by a permutation moves each lane to the "
+            "place the order names",
+            t->name);
+        check(ok, what);
+    }
+}
+
+/* The calls that do not run an integer type refuse it by name; eg_scan runs a
+ * uint64 plane. One row per call and type pins which. */
+static void check_integer_plane_refusals(eg_ctx* ctx)
+{
+    for (int ti = 0; ti < INT_PLANE_TYPES; ++ti) {
+        const struct int_plane_type* t = &int_plane_types[ti];
+        uint64_t out[4]                = { 0 };
+        uint64_t narrow[4]             = { 0 };
+        for (int i = 0; i < 4; ++i)
+            int_plane_put(narrow, i, i + 1, t->bits);
+        struct tensor ti_, to_, tr;
+        eg_plane* pin  = wrap(ctx, &ti_, narrow, 4, t->code, t->bits);
+        eg_plane* pout = wrap(ctx, &to_, out, 4, t->code, t->bits);
+        eg_plane* pone = wrap(ctx, &tr, out, 1, t->code, t->bits);
+        char what[160];
+        int ok = pin && pout && pone
+            && reduce_do(
+                   ctx, pin, pone, NULL, EG_REDUCE_SUM, EG_REDUCE_FIXED, 0)
+                == EG_NOT_WRITTEN
+            && reason_has(ctx, "is not one the host reduce runs");
+        snprintf(what, sizeof(what),
+            "eg_reduce of a plane of type %s: NOT_WRITTEN naming the dtype", t->name);
+        check(ok, what);
+        if (t->code == kDLUInt && t->bits == 64) {
+            ok = pin && pout && scan_do(ctx, pin, pout, EG_SCAN_SUM, 0) == EG_OK
+                && out[0] == 1 && out[1] == 3 && out[2] == 6 && out[3] == 10;
+            snprintf(what, sizeof(what), "eg_scan of a uint64 plane runs");
+        } else {
+            ok = pin && pout
+                && scan_do(ctx, pin, pout, EG_SCAN_SUM, 0) == EG_NOT_WRITTEN
+                && reason_has(
+                    ctx, "is not one of int32, int64, uint32, uint64");
+            snprintf(what, sizeof(what),
+                "eg_scan of a plane of type %s: NOT_WRITTEN naming the dtype", t->name);
+        }
+        check(ok, what);
+        eg_plane_free(ctx, pin);
+        eg_plane_free(ctx, pout);
+        eg_plane_free(ctx, pone);
+    }
+}
+
 static void check_reduce_position(eg_ctx* ctx) {
     static const int64_t sizes[] = { 1, 2, 255, 256, 257, 4095, 4096, 4097, 8191, 8193, 50000, RANK_MAX_N };
     static const char* const words[] = { "many ties", "a constant plane", "the extremes repeated at both ends",
@@ -8593,6 +8835,10 @@ int main(int argc, char** argv) {
     check_compact(ctx);
     check_order(ctx);
     check_reorder(ctx);
+    check_integer_plane_sort(ctx);
+    check_integer_plane_round_trip(ctx);
+    check_integer_plane_reorder(ctx);
+    check_integer_plane_refusals(ctx);
     check_reverse_reorder(ctx);
     check_reverse_scan(ctx);
     check_reduce_position(ctx);

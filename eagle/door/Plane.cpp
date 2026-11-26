@@ -19,13 +19,13 @@ namespace door {
 
 namespace {
 
-/** @brief The dtypes a host plane may carry: float64/32, int64/32/8, uint64 (a banded cell), uint32, bool (int8: the status plane of eg_run_events). */
+/** @brief The dtypes a host plane may carry: float64/32, int64/32/16/8, uint64 (a banded cell)/32/16/8, bool (int8: the status plane of eg_run_events). */
 bool known_dtype(const DLDataType& t) {
     if (t.lanes != 1) return false;
     switch (t.code) {
         case kDLFloat: return t.bits == 64 || t.bits == 32;
-        case kDLInt: return t.bits == 64 || t.bits == 32 || t.bits == 8;
-        case kDLUInt: return t.bits == 32 || t.bits == 64;
+        case kDLInt: return t.bits == 64 || t.bits == 32 || t.bits == 16 || t.bits == 8;
+        case kDLUInt: return t.bits == 64 || t.bits == 32 || t.bits == 16 || t.bits == 8;
         case kDLBool: return t.bits == 8;
         default: return false;
     }
