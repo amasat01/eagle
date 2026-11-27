@@ -3955,6 +3955,93 @@ static void device_reorders(eg_ctx* ctx) {
     }
 }
 
+/* A scan, a compaction, a sort and a reorder recorded alone in a graph ended with EG_RECORD_DIFF: the second capture of the recording replays
+ * each as itself, so the replay's result is the eager call's (the oracle is the host's rule for each). */
+static void device_diff_leaves(eg_ctx* ctx) {
+    enum { LANES = 5000 };
+    static int32_t host_in[LANES], host_out[LANES], host_order[LANES], host_starts[17];
+    static uint8_t host_mask[LANES];
+    static uint32_t host_kept[LANES], host_keys[LANES], host_plane[LANES];
+    void *din = NULL, *dout = NULL, *dmask = NULL, *dkept = NULL, *dcount = NULL, *dkeys = NULL, *dorder = NULL, *dstarts = NULL;
+    int ok = cudaMalloc(&din, LANES * 4) == cudaSuccess && cudaMalloc(&dout, LANES * 4) == cudaSuccess && cudaMalloc(&dmask, LANES) == cudaSuccess &&
+             cudaMalloc(&dkept, LANES * 4) == cudaSuccess && cudaMalloc(&dcount, 4) == cudaSuccess && cudaMalloc(&dkeys, LANES * 4) == cudaSuccess &&
+             cudaMalloc(&dorder, LANES * 4) == cudaSuccess && cudaMalloc(&dstarts, 17 * 4) == cudaSuccess;
+    struct tensor tin, tout, tmask, tkept, tcount, tkeys, torder, tstarts;
+    eg_plane* pin = ok ? wrap_device_typed(ctx, &tin, din, LANES, kDLInt, 32) : NULL;
+    eg_plane* pout = ok ? wrap_device_typed(ctx, &tout, dout, LANES, kDLInt, 32) : NULL;
+    eg_plane* pmask = ok ? wrap_device_typed(ctx, &tmask, dmask, LANES, kDLBool, 8) : NULL;
+    eg_plane* pkept = ok ? wrap_device_typed(ctx, &tkept, dkept, LANES, kDLUInt, 32) : NULL;
+    eg_plane* pcount = ok ? wrap_device_typed(ctx, &tcount, dcount, 1, kDLUInt, 32) : NULL;
+    eg_plane* pkeys = ok ? wrap_device_typed(ctx, &tkeys, dkeys, LANES, kDLUInt, 32) : NULL;
+    eg_plane* porder = ok ? wrap_device_typed(ctx, &torder, dorder, LANES, kDLInt, 32) : NULL;
+    eg_plane* pstarts = ok ? wrap_device_typed(ctx, &tstarts, dstarts, 17, kDLInt, 32) : NULL;
+    ok = ok && pin && pout && pmask && pkept && pcount && pkeys && porder && pstarts;
+    check(ok, "leaves of a DIFF recording: device planes made");
+    if (!ok) return;
+    int32_t want_sum = 0, kept_count = 0;
+    for (int i = 0; i < LANES; ++i) {
+        host_in[i] = i % 7 + 1;
+        host_mask[i] = (uint8_t)(i % 3 == 0);
+        host_keys[i] = (uint32_t)((i * 5) % 16);
+        host_plane[i] = (uint32_t)(i * 11 + 3);
+    }
+    cudaMemcpy(din, host_in, sizeof(host_in), cudaMemcpyHostToDevice);
+    cudaMemcpy(dmask, host_mask, sizeof(host_mask), cudaMemcpyHostToDevice);
+    cudaMemcpy(dkeys, host_keys, sizeof(host_keys), cudaMemcpyHostToDevice);
+    struct eg_record_end_desc ed;
+    memset(&ed, 0, sizeof(ed));
+    ed.struct_size = sizeof(ed);
+    ed.flags = EG_RECORD_DIFF;
+    eg_graph* g = NULL;
+    struct eg_scan_desc sd = { sizeof(struct eg_scan_desc), 0, pin, pout, EG_SCAN_SUM, NULL };
+    ok = eg_record_begin(ctx) == EG_OK && eg_scan(ctx, &sd) == EG_OK && eg_record_end(ctx, &ed, &g) == EG_OK && eg_graph_launch(ctx, g) == EG_OK && eg_sync(ctx) == EG_OK &&
+         cudaMemcpy(host_out, dout, sizeof(host_out), cudaMemcpyDeviceToHost) == cudaSuccess;
+    for (int i = 0; ok && i < LANES; ++i) {
+        want_sum += host_in[i];
+        ok = host_out[i] == want_sum;
+    }
+    check(ok, "eg_scan in a graph ended with EG_RECORD_DIFF replays as a scan: the inclusive sums of the eager call");
+    if (g) eg_graph_free(ctx, g);
+    g = NULL;
+    uint32_t count = 0;
+    struct eg_compact_desc cd = { sizeof(struct eg_compact_desc), 0, pmask, pkept, pcount };
+    ok = eg_record_begin(ctx) == EG_OK && eg_compact(ctx, &cd) == EG_OK && eg_record_end(ctx, &ed, &g) == EG_OK && eg_graph_launch(ctx, g) == EG_OK && eg_sync(ctx) == EG_OK &&
+         cudaMemcpy(&count, dcount, 4, cudaMemcpyDeviceToHost) == cudaSuccess && cudaMemcpy(host_kept, dkept, sizeof(host_kept), cudaMemcpyDeviceToHost) == cudaSuccess;
+    for (int i = 0; ok && i < LANES; ++i)
+        if (host_mask[i] != 0) ok = host_kept[kept_count++] == (uint32_t)i;
+    check(ok && count == (uint32_t)kept_count, "eg_compact in a graph ended with EG_RECORD_DIFF replays as a compaction: the count and the kept lanes of the eager call");
+    if (g) eg_graph_free(ctx, g);
+    g = NULL;
+    struct eg_order_desc od = { sizeof(struct eg_order_desc), 0, pkeys, porder, pstarts, 16 };
+    ok = eg_record_begin(ctx) == EG_OK && eg_order_by_key(ctx, &od) == EG_OK && eg_record_end(ctx, &ed, &g) == EG_OK && eg_graph_launch(ctx, g) == EG_OK && eg_sync(ctx) == EG_OK &&
+         cudaMemcpy(host_order, dorder, sizeof(host_order), cudaMemcpyDeviceToHost) == cudaSuccess && cudaMemcpy(host_starts, dstarts, sizeof(host_starts), cudaMemcpyDeviceToHost) == cudaSuccess;
+    for (int j = 1; ok && j < LANES; ++j) {
+        const uint32_t a = host_keys[host_order[j - 1]], b = host_keys[host_order[j]];
+        ok = a < b || (a == b && host_order[j - 1] < host_order[j]);
+    }
+    ok = ok && host_starts[0] == 0 && host_starts[16] == LANES;
+    check(ok, "eg_order_by_key in a graph ended with EG_RECORD_DIFF replays as a sort: the stable order and the starts of the eager call");
+    if (g) eg_graph_free(ctx, g);
+    g = NULL;
+    uint32_t* dplane = NULL;
+    static uint32_t got[LANES];
+    struct tensor tplane;
+    ok = cudaMalloc((void**)&dplane, sizeof(host_plane)) == cudaSuccess && cudaMemcpy(dplane, host_plane, sizeof(host_plane), cudaMemcpyHostToDevice) == cudaSuccess;
+    eg_plane* pplane = ok ? wrap_device_typed(ctx, &tplane, dplane, LANES, kDLUInt, 32) : NULL;
+    eg_plane* one[1] = { pplane };
+    struct eg_reorder_desc rd = { sizeof(struct eg_reorder_desc), 0, 1, one, porder };
+    ok = ok && pplane && eg_record_begin(ctx) == EG_OK && eg_reorder(ctx, &rd) == EG_OK && eg_record_end(ctx, &ed, &g) == EG_OK && eg_graph_launch(ctx, g) == EG_OK &&
+         eg_sync(ctx) == EG_OK && cudaMemcpy(got, dplane, sizeof(got), cudaMemcpyDeviceToHost) == cudaSuccess;
+    for (int j = 0; ok && j < LANES; ++j) ok = got[j] == host_plane[host_order[j]];
+    check(ok, "eg_reorder in a graph ended with EG_RECORD_DIFF replays as a reorder: every lane holds what the order gathers");
+    if (g) eg_graph_free(ctx, g);
+    eg_plane_free(ctx, pplane);
+    cudaFree(dplane);
+    eg_plane_free(ctx, pin), eg_plane_free(ctx, pout), eg_plane_free(ctx, pmask), eg_plane_free(ctx, pkept);
+    eg_plane_free(ctx, pcount), eg_plane_free(ctx, pkeys), eg_plane_free(ctx, porder), eg_plane_free(ctx, pstarts);
+    cudaFree(din), cudaFree(dout), cudaFree(dmask), cudaFree(dkept), cudaFree(dcount), cudaFree(dkeys), cudaFree(dorder), cudaFree(dstarts);
+}
+
 /* eg_order_by_key on a device context: key widths and bounds, uniform and half-in-key-0 keys, and the sizes where a tile ends. */
 static void device_orders(eg_ctx* ctx) {
     const int64_t tile = 4096;
@@ -4248,6 +4335,7 @@ int main(int argc, char** argv) {
     device_compactions(ctx);
     device_orders(ctx);
     device_reorders(ctx);
+    device_diff_leaves(ctx);
     device_narrow_types(ctx);
     struct eg_reduce_desc rd;
     memset(&rd, 0, sizeof(rd));

@@ -1418,15 +1418,12 @@ void* scan_state_for(eg_ctx& ctx, std::uint64_t stream, std::size_t state_bytes,
     return have.data;
 }
 
-/** @brief eg_scan over device planes: the checks and the node are the host's; the scan is one pass with decoupled look-back
- *  (device/ScanKernels.cuh) on the stream in scope of the calling thread. In a recording its working memory is a pair of
- *  graph-owned stream-ordered allocation nodes, so a replay owns its own; eagerly it is the context's. */
-void device_scan(eg_ctx& ctx, const eg_scan_desc& d) {
-    const host::ScanOp s = host::scan_check(ctx, d);
-    if (s.index != nullptr)
-        refuse(EG_NOT_WRITTEN,
-            "eg_scan: index (the running winner) is not written for a device "
-            "context");
+namespace {
+
+/** @brief The checked scan @p s on the stream in scope of the calling thread, kept in the recording if there is one: the scan is one pass with
+ *  decoupled look-back (device/ScanKernels.cuh). In a recording its working memory is a pair of graph-owned stream-ordered allocation nodes,
+ *  so a replay owns its own; eagerly it is the context's. */
+void scan_leaf(eg_ctx& ctx, const host::ScanOp& s) {
     const DLDataType& type = s.in->tensor->dl_tensor.dtype;
     const auto at = [](const eg_plane_s* p) -> void* {
         return static_cast<char*>(p->tensor->dl_tensor.data) + p->tensor->dl_tensor.byte_offset;
@@ -1451,10 +1448,23 @@ void device_scan(eg_ctx& ctx, const eg_scan_desc& d) {
     }
 }
 
-/** @brief eg_compact over device planes: the checks and the node are the host's; the compaction is one pass over the mask
- *  (device/ScanKernels.cuh) on the stream in scope of the calling thread, with the working memory of a scan. */
-void device_compact(eg_ctx& ctx, const eg_compact_desc& d) {
-    const host::CompactOp c = host::compact_check(ctx, d);
+}  // namespace
+
+/** @brief eg_scan over device planes: the checks and the node are the host's; the scan runs as ``scan_leaf``. */
+void device_scan(eg_ctx& ctx, const eg_scan_desc& d) {
+    const host::ScanOp s = host::scan_check(ctx, d);
+    if (s.index != nullptr)
+        refuse(EG_NOT_WRITTEN,
+            "eg_scan: index (the running winner) is not written for a device "
+            "context");
+    scan_leaf(ctx, s);
+}
+
+namespace {
+
+/** @brief The checked compaction @p c on the stream in scope of the calling thread, kept in the recording if there is one: one pass over the mask
+ *  (device/ScanKernels.cuh) with the working memory of a scan. */
+void compact_leaf(eg_ctx& ctx, const host::CompactOp& c) {
     const auto at = [](const eg_plane_s* p) -> void* {
         return static_cast<char*>(p->tensor->dl_tensor.data) + p->tensor->dl_tensor.byte_offset;
     };
@@ -1477,6 +1487,11 @@ void device_compact(eg_ctx& ctx, const eg_compact_desc& d) {
         compact_step(stream, at(c.keep), at(c.kept), at(c.count), c.n, scan_state_for(ctx, stream, bytes));
     }
 }
+
+}  // namespace
+
+/** @brief eg_compact over device planes: the checks and the node are the host's; the compaction runs as ``compact_leaf``. */
+void device_compact(eg_ctx& ctx, const eg_compact_desc& d) { compact_leaf(ctx, host::compact_check(ctx, d)); }
 
 /** @brief What a recorded sort's or reorder's host step reads after the replay's copy: the 32-bit count of out-of-range entries, in
  *  page-locked memory, and how to word the refusal. */
@@ -1517,12 +1532,12 @@ void record_outside_step(eg_ctx& ctx, OutsideKeys* found) {
     }
 }
 
-/** @brief eg_order_by_key over device planes: the checks and the node are the host's; the sort is stable radix passes over the bits the
- *  bound needs (eagle/cuda/KeyedSort.cuh) on the stream in scope of the calling thread. Keys outside [0, bound) fail the call when
- *  it runs eagerly (it waits for the count) and the next ``eg_graph_launch`` or ``eg_sync`` after a replay (a host step reads the
- *  count the replay copied to page-locked memory). */
-void device_order_by_key(eg_ctx& ctx, const eg_order_desc& d) {
-    const host::OrderOp o = host::order_check(ctx, d);
+namespace {
+
+/** @brief The checked sort @p o on the stream in scope of the calling thread, kept in the recording if there is one: stable radix passes over
+ *  the bits the bound needs (eagle/cuda/KeyedSort.cuh). Keys outside [0, bound) fail the call when it runs eagerly (it waits for the count)
+ *  and the next ``eg_graph_launch`` or ``eg_sync`` after a replay (a host step reads the count the replay copied to page-locked memory). */
+void order_leaf(eg_ctx& ctx, const host::OrderOp& o) {
     const auto at = [](const eg_plane_s* p) -> void* {
         return static_cast<char*>(p->tensor->dl_tensor.data) + p->tensor->dl_tensor.byte_offset;
     };
@@ -1565,12 +1580,18 @@ void device_order_by_key(eg_ctx& ctx, const eg_order_desc& d) {
     record_outside_step(ctx, found);
 }
 
-/** @brief eg_reorder over device planes: the checks and the node are the host's; each plane (each row of a vector plane) is staged and
- *  gathered back through ``order`` on the stream in scope of the calling thread. Entries of ``order`` outside [0, n) are counted before
- *  anything moves and fail the call when it runs eagerly (it waits for the count) and the next ``eg_graph_launch`` or ``eg_sync`` after a
- *  replay; the planes are then untouched. */
-void device_reorder(eg_ctx& ctx, const eg_reorder_desc& d) {
-    const host::ReorderOp r = host::reorder_check(ctx, d);
+}  // namespace
+
+/** @brief eg_order_by_key over device planes: the checks and the node are the host's; the sort runs as ``order_leaf``. */
+void device_order_by_key(eg_ctx& ctx, const eg_order_desc& d) { order_leaf(ctx, host::order_check(ctx, d)); }
+
+namespace {
+
+/** @brief The checked reorder @p r on the stream in scope of the calling thread, kept in the recording if there is one: each plane (each row of a
+ *  vector plane) is staged and gathered back through ``order``. Entries of ``order`` outside [0, n) are counted before anything moves and fail
+ *  the call when it runs eagerly (it waits for the count) and the next ``eg_graph_launch`` or ``eg_sync`` after a replay; the planes are then
+ *  untouched. */
+void reorder_leaf(eg_ctx& ctx, const host::ReorderOp& r) {
     const auto at = [](const eg_plane_s* p) -> void* {
         return static_cast<char*>(p->tensor->dl_tensor.data) + p->tensor->dl_tensor.byte_offset;
     };
@@ -1619,6 +1640,11 @@ void device_reorder(eg_ctx& ctx, const eg_reorder_desc& d) {
     free_async(stream, stream, temp);
     record_outside_step(ctx, found);
 }
+
+}  // namespace
+
+/** @brief eg_reorder over device planes: the checks and the node are the host's; the reorder runs as ``reorder_leaf``. */
+void device_reorder(eg_ctx& ctx, const eg_reorder_desc& d) { reorder_leaf(ctx, host::reorder_check(ctx, d)); }
 
 /** @brief The checked reduce @p r on the context's stream, kept in the recording if there is one. */
 void device_reduce_leaf(eg_ctx& ctx, const host::ReduceOp& r) {
@@ -2718,16 +2744,22 @@ void plan_diff_pass(eg_ctx& ctx, const GraphDiff& diff, std::size_t n_launches, 
     }
 }
 
-/** @brief Capture the copy, reduce, transform or product kept in @p op again. */
+/** @brief Capture the copy, scan, compaction, sort, reorder, reduce, transform, run, host call or product kept in @p op again, each as itself. */
 void replay_leaf(eg_ctx& ctx, const Op& op) {
     const Node& n = op.leaf;
     switch (n.kind) {
         case Node::Copy: device_copy(ctx, n.src, n.dst); break;
+        case Node::Scan: scan_leaf(ctx, n.scan); break;
+        case Node::Compact: compact_leaf(ctx, n.compact); break;
+        case Node::Order: order_leaf(ctx, n.order); break;
+        case Node::Reorder: reorder_leaf(ctx, n.reorder); break;
         case Node::Reduce: device_reduce_leaf(ctx, n.reduce); break;
         case Node::Fft: device_fft_run(ctx, *n.fft, n.src, n.dst); break;
         case Node::Run: device_record_run(ctx, n.runner); break;
         case Node::Host: device_record_host_node(ctx, Node(n)); break;
-        default: device_gemm_run(ctx, op.product, n.src, n.rhs, n.dst);
+        case Node::Gemm: device_gemm_run(ctx, op.product, n.src, n.rhs, n.dst); break;
+        case Node::Launch:
+        case Node::Cond: refuse(EG_FAULT, "eg_record_end: a launch or a conditional was kept as a leaf of the recording");
     }
 }
 
